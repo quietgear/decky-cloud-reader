@@ -29,7 +29,6 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 ### Decky-Translator (UI and input reference)
 - **Path:** `/Users/mshabalov/Documents/claude-projects/Decky-Translator`
 - Reference for:
-  - Navigation panel implementation in a Decky plugin
   - Using the **L4 button** on Steam Deck to trigger plugin actions without opening the plugin UI
 
 ### decky-ocr-tts-claude-service-plugin (feature reference)
@@ -71,7 +70,6 @@ Frontend (TypeScript/React)         Backend (Python)
 - [ ] Create `requirements.txt` with `google-cloud-vision`, `google-cloud-texttospeech`, `Pillow`
 - [ ] Implement backend settings manager (read/write JSON to DECKY_PLUGIN_SETTINGS_DIR)
 - [ ] Implement GCP credential storage (base64-encoded service account key in settings)
-- [ ] Settings tab UI — text field for pasting base64 credentials
 - [ ] Credential validation (test API connectivity)
 - [ ] Build and deploy to verify Python dependencies install correctly
 
