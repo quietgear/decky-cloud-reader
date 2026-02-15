@@ -1,0 +1,102 @@
+# =============================================================================
+# Decky Cloud Reader — Build Dockerfile
+# =============================================================================
+#
+# This Dockerfile does TWO things inside an x86_64 Linux container:
+#   1. Builds the frontend: TypeScript → bundled JavaScript (via Rollup)
+#   2. Installs Python dependencies into py_modules/ (via pip, if any exist)
+#
+# We need x86_64 because:
+#   - The Steam Deck runs x86_64 Linux
+#   - Rollup uses platform-specific native binaries (@rollup/rollup-linux-x64-gnu)
+#   - Python .so files (compiled C extensions) must match the target architecture
+#   - Our dev machine is ARM (M1 Mac), so we cross-compile via Docker
+#
+# We use node:20-slim (Debian-based) which matches the -gnu rollup binary.
+# Python 3.13 is installed from Debian repos to match the Steam Deck's version.
+#
+# The final output is a zip file at /app/output/decky-cloud-reader.zip
+# containing the complete plugin directory ready for Decky Loader.
+# =============================================================================
+
+# Force x86_64 platform even on ARM Macs (cross-compilation via QEMU/Rosetta)
+FROM --platform=linux/amd64 node:20-slim
+
+# ---------------------------------------------------------------------------
+# Install system dependencies
+# ---------------------------------------------------------------------------
+# - python3 + python3-pip: needed to install Python packages into py_modules/
+# - zip: needed to create the final plugin zip archive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv zip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install pnpm globally — it's the package manager used by Decky plugins.
+RUN npm install -g pnpm
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Stage 1: Install Node.js dependencies (cached layer)
+# ---------------------------------------------------------------------------
+# Copy package.json and pnpm lockfile first, BEFORE the rest of the source.
+# Docker caches each layer — if package.json hasn't changed, `pnpm install`
+# is skipped entirely on subsequent builds (huge time saver).
+COPY package.json pnpm-lock.yaml* ./
+
+# Install Node.js dependencies.
+# --frozen-lockfile: fail if lockfile is out of sync (CI-safe).
+# If no lockfile exists yet (first build), we fall back to a regular install.
+RUN pnpm install --frozen-lockfile || pnpm install
+
+# ---------------------------------------------------------------------------
+# Stage 2: Install Python dependencies (cached layer)
+# ---------------------------------------------------------------------------
+# Copy requirements.txt separately for the same caching benefit.
+# If there's no requirements.txt, the COPY will fail, so we use a wildcard
+# and handle the "no file" case in the RUN step.
+COPY requirements.txt* ./
+
+# Install Python packages into py_modules/ directory.
+# --target: installs packages into a specific directory (not system-wide),
+#   so we can bundle them with the plugin.
+# --no-cache-dir: don't store pip's download cache (smaller image).
+# If requirements.txt doesn't exist, skip this step gracefully.
+RUN if [ -f requirements.txt ]; then \
+      pip3 install --target=/app/py_modules --no-cache-dir --break-system-packages -r requirements.txt; \
+    else \
+      echo "No requirements.txt found, skipping Python dependency install"; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Stage 3: Copy source and build frontend
+# ---------------------------------------------------------------------------
+# Now copy everything else (src/, tsconfig, rollup config, main.py, etc.)
+COPY . .
+
+# Run the Rollup build, which compiles TypeScript and bundles into dist/index.js
+RUN pnpm build
+
+# ---------------------------------------------------------------------------
+# Stage 4: Assemble plugin directory and create zip
+# ---------------------------------------------------------------------------
+# Create the final plugin directory structure that Decky Loader expects,
+# then zip it. The zip format is what Decky's developer mode "Install Plugin
+# From ZIP" feature accepts.
+#
+# Expected structure inside the zip:
+#   decky-cloud-reader/
+#   ├── dist/
+#   │   └── index.js        ← Bundled frontend JavaScript
+#   ├── plugin.json          ← Plugin metadata (name, author, flags)
+#   ├── package.json         ← Version info (read by Decky Loader)
+#   ├── main.py              ← Python backend
+#   └── py_modules/          ← Python dependencies
+RUN mkdir -p /app/output/decky-cloud-reader/dist && \
+    cp /app/dist/index.js /app/output/decky-cloud-reader/dist/ && \
+    cp /app/plugin.json /app/output/decky-cloud-reader/ && \
+    cp /app/package.json /app/output/decky-cloud-reader/ && \
+    cp /app/main.py /app/output/decky-cloud-reader/ && \
+    cp -r /app/py_modules /app/output/decky-cloud-reader/ && \
+    cd /app/output && \
+    zip -r decky-cloud-reader.zip decky-cloud-reader/

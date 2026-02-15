@@ -1,0 +1,17 @@
+# Ignore files that shouldn't be sent to Docker as build context.
+# This makes builds faster and avoids shipping unnecessary data.
+
+node_modules/
+dist/
+.git/
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Docker files themselves (avoid recursive context issues)
+docker/
+
+# Claude config
+.claude/
+CLAUDE.md

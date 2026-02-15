@@ -1,0 +1,11 @@
+{
+  "name": "Decky Cloud Reader",
+  "author": "mshabalov",
+  "flags": ["_root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["ocr", "tts", "accessibility", "cloud"],
+    "description": "OCR and Text-to-Speech for text-heavy games using Google Cloud services.",
+    "image": ""
+  }
+}

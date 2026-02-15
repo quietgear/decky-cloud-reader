@@ -1,0 +1,41 @@
+# =============================================================================
+# Decky Cloud Reader — Docker Compose Build Orchestration
+# =============================================================================
+#
+# This compose file builds the plugin and extracts the final zip artifact
+# to ./dist/ on the host machine.
+#
+# The Dockerfile handles the entire build pipeline:
+#   1. Install Node.js deps → build frontend (TypeScript → JS)
+#   2. Install Python deps into py_modules/ (if requirements.txt exists)
+#   3. Assemble the plugin directory and zip it
+#
+# This compose file just runs the container and copies the zip out.
+#
+# Output: ./dist/decky-cloud-reader.zip
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up --build
+# =============================================================================
+
+services:
+  builder:
+    # Build using our Dockerfile, with the project root as build context
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.plugin
+
+    # Copy the zip file from the container's /app/output/ to the mounted
+    # /out/ directory, which maps to ./dist/ on the host.
+    command: >
+      sh -c "
+        cp /app/output/decky-cloud-reader.zip /out/ &&
+        echo 'Zip file copied to /out/decky-cloud-reader.zip' &&
+        echo 'Contents of zip:' &&
+        zip -sf /out/decky-cloud-reader.zip
+      "
+
+    # Mount the host's dist/ directory into the container at /out.
+    # When the container writes to /out, files appear on the host.
+    volumes:
+      - ../dist:/out
