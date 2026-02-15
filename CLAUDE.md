@@ -18,6 +18,7 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 - Build and validate locally in the x86 Docker container first
 - Deploy to Steam Deck via SSH for on-device testing
 - **Comment code extensively** and provide detailed explanations in output — treat me as someone unfamiliar with the structures, approaches, frameworks, and programming languages being used, so I can learn as we go
+- **Challenge vague requests** — if I ask for something in vague terms, don't just execute it blindly. Question my decision, propose better alternatives if they exist, and ask clarifying questions to gather enough context before proceeding
 
 ## Reference Projects (Local Clones)
 
