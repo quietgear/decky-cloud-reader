@@ -66,12 +66,14 @@ Frontend (TypeScript/React)         Backend (Python)
 - [x] SSH deploy script to Steam Deck (deploy.sh)
 - [x] Frontend-backend RPC communication working (get_greeting test)
 
-### Phase 2: Settings & Credential Management `[NOT STARTED]`
-- [ ] Create `requirements.txt` with `google-cloud-vision`, `google-cloud-texttospeech`, `Pillow`
-- [ ] Implement backend settings manager (read/write JSON to DECKY_PLUGIN_SETTINGS_DIR)
-- [ ] Implement GCP credential storage (base64-encoded service account key in settings)
-- [ ] Credential validation (test API connectivity)
-- [ ] Build and deploy to verify Python dependencies install correctly
+### Phase 2: Settings & Credential Management `[DONE]`
+- [x] Create `requirements.txt` with `google-cloud-vision`, `google-cloud-texttospeech`, `Pillow`
+- [x] Implement backend settings manager (read/write JSON to DECKY_PLUGIN_SETTINGS_DIR)
+- [x] Implement GCP credential storage (base64-encoded service account key in settings)
+- [x] File browser UI for navigating filesystem and selecting credential JSON file
+- [x] Credential validation (required GCP service account fields + type check)
+- [x] Settings UI with Enabled/Debug toggles, credential status display
+- [x] Build and deploy to verify Python dependencies install correctly
 
 ### Phase 3: Screen Capture `[NOT STARTED]`
 - [ ] Implement GStreamer/PipeWire screenshot capture in Python backend
