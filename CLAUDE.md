@@ -37,3 +37,124 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 - Contains a **working GCP + OCR + TTS plugin** implementation
 - **Architecture note:** This plugin uses a separate Python service, which is NOT the desired architecture for our new plugin
 - **Useful for:** Borrowing UI features and Python OCR/TTS logic to adapt into our integrated implementation
+
+---
+
+## Implementation Plan & Progress
+
+### Architecture Overview
+
+Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles GCP API calls, screen capture, and audio playback. The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings and status.
+
+```
+Frontend (TypeScript/React)         Backend (Python)
+┌─────────────────────────┐        ┌──────────────────────────────┐
+│ Decky Panel UI          │  RPC   │ main.py (Plugin class)       │
+│  - Settings tab         │◄──────►│  - GCP credentials mgmt     │
+│  - Status tab           │        │  - Screen capture (GStreamer)│
+│  - Debug tab            │        │  - OCR (Cloud Vision)        │
+│                         │        │  - TTS (Cloud TTS)           │
+│ Global Overlay          │        │  - Audio playback (mpv)      │
+│  - OCR text display     │        │  - L4 button monitor (hidraw)│
+└─────────────────────────┘        └──────────────────────────────┘
+```
+
+### Phase 1: Foundation & Build Pipeline `[DONE]`
+- [x] Plugin scaffolding (package.json, plugin.json, tsconfig, rollup config)
+- [x] Basic Python backend with lifecycle hooks (main.py)
+- [x] Basic TypeScript frontend with test button (src/index.tsx)
+- [x] Docker-based x86 build system (docker/Dockerfile.plugin, docker-compose.yml)
+- [x] SSH deploy script to Steam Deck (deploy.sh)
+- [x] Frontend-backend RPC communication working (get_greeting test)
+
+### Phase 2: Settings & Credential Management `[NOT STARTED]`
+- [ ] Create `requirements.txt` with `google-cloud-vision`, `google-cloud-texttospeech`, `Pillow`
+- [ ] Implement backend settings manager (read/write JSON to DECKY_PLUGIN_SETTINGS_DIR)
+- [ ] Implement GCP credential storage (base64-encoded service account key in settings)
+- [ ] Settings tab UI — text field for pasting base64 credentials
+- [ ] Credential validation (test API connectivity)
+- [ ] Build and deploy to verify Python dependencies install correctly
+
+### Phase 3: Screen Capture `[NOT STARTED]`
+- [ ] Implement GStreamer/PipeWire screenshot capture in Python backend
+- [ ] Add `capture_screenshot()` RPC method
+- [ ] Test screenshot capture on Steam Deck (verify GStreamer + PipeWire work)
+- [ ] Add "Test Capture" button in UI to verify
+
+### Phase 4: OCR — Cloud Vision `[NOT STARTED]`
+- [ ] Implement Cloud Vision OCR client in backend (async, with retry)
+- [ ] Image size handling (resize if >10MB)
+- [ ] Add `perform_ocr()` RPC method (capture + OCR pipeline)
+- [ ] Display OCR text results in frontend
+- [ ] Add "Test OCR" button that captures screen and shows detected text
+
+### Phase 5: TTS — Cloud Text-to-Speech `[NOT STARTED]`
+- [ ] Implement Cloud TTS client in backend (async, with retry)
+- [ ] Voice selection support (multiple voices/languages)
+- [ ] Speech rate presets (x-slow to x-fast)
+- [ ] Audio playback via mpv/ffplay
+- [ ] Add `perform_tts(text)` and `stop_playback()` RPC methods
+- [ ] Settings UI — voice picker dropdown, speech rate selector, volume slider
+- [ ] "Test TTS" button with text input field
+
+### Phase 6: End-to-End OCR+TTS Pipeline `[NOT STARTED]`
+- [ ] Wire capture → OCR → TTS into a single `read_screen()` RPC method
+- [ ] Add "Read Screen" button in main UI
+- [ ] Loading/progress states in UI during pipeline execution
+- [ ] Error handling and user feedback for each pipeline stage
+- [ ] Stop button to interrupt audio playback
+
+### Phase 7: L4 Button Trigger `[NOT STARTED]`
+- [ ] Implement hidraw-based button monitoring in Python backend (background thread)
+- [ ] L4 press triggers `read_screen()` pipeline without opening UI
+- [ ] Settings UI — button selection (L4/R4/L5/R5)
+- [ ] Hold-time detection with configurable threshold
+- [ ] Health monitoring and auto-reconnect
+
+### Phase 8: UI Polish & Advanced Features `[NOT STARTED]`
+- [ ] Tabbed navigation panel (Settings / Status / Debug)
+- [ ] Global overlay for displaying OCR text on screen
+- [ ] Region selection (crop to area instead of full screen)
+- [ ] Text filtering (ignore specific words/patterns)
+- [ ] Visual progress indicator during hold-to-activate
+- [ ] Debug panel showing real-time state and diagnostics
+
+---
+
+## Key Technical Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Architecture | Single Decky plugin (no separate service) | Simpler deployment and lifecycle management |
+| Screen capture | GStreamer + PipeWire | Native to Steam Deck, hardware-accelerated |
+| Audio playback | mpv (preferred) or ffplay | Available on Steam Deck, supports MP3 |
+| GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
+| Button input | Hidraw direct device reading | Works in background without opening UI |
+| Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |
+| Python deps | Bundled in py_modules/ via Docker build | Runs on Steam Deck without internet |
+
+## File Structure (Target)
+
+```
+decky-cloud-reader/
+├── src/
+│   ├── index.tsx              # Plugin entry, tab navigation, definePlugin()
+│   ├── components/
+│   │   ├── TabSettings.tsx    # Voice, speed, volume, credentials
+│   │   ├── TabStatus.tsx      # Main controls, OCR results, playback
+│   │   └── TabDebug.tsx       # Diagnostics, real-time state
+│   ├── overlay/
+│   │   └── TextOverlay.tsx    # Global overlay for OCR text display
+│   └── types.d.ts             # Asset type declarations
+├── main.py                    # Python backend (all logic integrated)
+├── requirements.txt           # Python dependencies
+├── package.json
+├── plugin.json
+├── tsconfig.json
+├── rollup.config.js
+├── docker/
+│   ├── Dockerfile.plugin
+│   └── docker-compose.yml
+├── deploy.sh
+└── CLAUDE.md
+```
