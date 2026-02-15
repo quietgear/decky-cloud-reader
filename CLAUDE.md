@@ -110,7 +110,6 @@ Frontend (TypeScript/React)         Backend (Python)
 - [ ] Health monitoring and auto-reconnect
 
 ### Phase 8: UI Polish & Advanced Features `[NOT STARTED]`
-- [ ] Tabbed navigation panel (Settings / Status / Debug)
 - [ ] Global overlay for displaying OCR text on screen
 - [ ] Region selection (crop to area instead of full screen)
 - [ ] Text filtering (ignore specific words/patterns)
