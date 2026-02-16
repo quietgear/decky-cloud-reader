@@ -49,9 +49,9 @@ Everything runs inside the standard Decky plugin process — no separate service
 Frontend (TypeScript/React)         Backend (Python)
 ┌─────────────────────────┐        ┌──────────────────────────────┐
 │ Decky Panel UI          │  RPC   │ main.py (Plugin class)       │
-│  - Settings tab         │◄──────►│  - GCP credentials mgmt     │
-│  - Status tab           │        │  - Screen capture (GStreamer)│
-│  - Debug tab            │        │  - OCR (Cloud Vision)        │
+│  - Credentials section  │◄──────►│  - GCP credentials mgmt     │
+│  - Settings section     │        │  - Screen capture (GStreamer)│
+│  - Status/controls      │        │  - OCR (Cloud Vision)        │
 │                         │        │  - TTS (Cloud TTS)           │
 │ Global Overlay          │        │  - Audio playback (mpv)      │
 │  - OCR text display     │        │  - L4 button monitor (hidraw)│
@@ -120,6 +120,15 @@ Frontend (TypeScript/React)         Backend (Python)
 
 ---
 
+## Logging Conventions
+
+- **All backend log messages** use the `[DCR]` prefix so they stand out in the Decky Loader journal among logs from other plugins and the loader itself.
+- Pattern: `decky.logger.info(f"{LOG} message here")` where `LOG = "[DCR]"` is defined at the top of `main.py`.
+- Filter plugin logs on Steam Deck: `journalctl -u plugin_loader -f | grep DCR`
+- **Debug Mode** (the `debug` setting toggle in the UI): when enabled, the backend should emit verbose/detailed logs using `decky.logger.debug()`. These are normally hidden by Decky Loader's log level but appear when Decky is in developer mode. Use debug-level logs for: RPC call parameters, settings reads/writes, directory listings, timing info, internal state. Use info-level logs for: lifecycle events, credential load/clear, errors.
+
+---
+
 ## Key Technical Decisions
 
 | Decision | Choice | Rationale |
@@ -132,19 +141,12 @@ Frontend (TypeScript/React)         Backend (Python)
 | Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |
 | Python deps | Bundled in py_modules/ via Docker build | Runs on Steam Deck without internet |
 
-## File Structure (Target)
+## File Structure
 
 ```
 decky-cloud-reader/
 ├── src/
-│   ├── index.tsx              # Plugin entry, tab navigation, definePlugin()
-│   ├── components/
-│   │   ├── TabSettings.tsx    # Voice, speed, volume, credentials
-│   │   ├── TabStatus.tsx      # Main controls, OCR results, playback
-│   │   └── TabDebug.tsx       # Diagnostics, real-time state
-│   ├── overlay/
-│   │   └── TextOverlay.tsx    # Global overlay for OCR text display
-│   └── types.d.ts             # Asset type declarations
+│   └── index.tsx              # Plugin entry, all UI (sections, file browser)
 ├── main.py                    # Python backend (all logic integrated)
 ├── requirements.txt           # Python dependencies
 ├── package.json
@@ -157,3 +159,5 @@ decky-cloud-reader/
 ├── deploy.sh
 └── CLAUDE.md
 ```
+
+Components may be split out of `index.tsx` into separate files if it grows too large, but there's no predetermined file split — keep it simple until complexity demands it.

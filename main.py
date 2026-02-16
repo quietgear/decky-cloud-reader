@@ -26,6 +26,12 @@ import traceback
 
 import decky
 
+# Log prefix — makes our messages easy to find in the Decky Loader journal.
+# Usage: decky.logger.info(f"{LOG} message here")
+# In the journal, lines will look like: "[DCR] backend loaded"
+# Filter with: journalctl -u plugin_loader -f | grep DCR
+LOG = "[DCR]"
+
 
 # =============================================================================
 # Default settings — used when no settings file exists yet, and to backfill
@@ -88,7 +94,7 @@ class SettingsManager:
         """
         self.settings_path = os.path.join(settings_directory, f"{name}.json")
         self.settings = {}
-        decky.logger.debug(f"SettingsManager: path = {self.settings_path}")
+        decky.logger.debug(f"{LOG} SettingsManager: path = {self.settings_path}")
 
     def read(self):
         """
@@ -99,11 +105,11 @@ class SettingsManager:
             if os.path.exists(self.settings_path):
                 with open(self.settings_path, "r") as f:
                     self.settings = json.load(f)
-                decky.logger.debug(f"SettingsManager: loaded from {self.settings_path}")
+                decky.logger.debug(f"{LOG} SettingsManager: loaded from {self.settings_path}")
             else:
-                decky.logger.info(f"SettingsManager: no file yet at {self.settings_path}")
+                decky.logger.info(f"{LOG} SettingsManager: no file yet at {self.settings_path}")
         except Exception as e:
-            decky.logger.error(f"SettingsManager: failed to read: {e}")
+            decky.logger.error(f"{LOG} SettingsManager: failed to read: {e}")
             decky.logger.error(traceback.format_exc())
             self.settings = {}
 
@@ -126,10 +132,10 @@ class SettingsManager:
             os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
             with open(self.settings_path, "w") as f:
                 json.dump(self.settings, f, indent=4)
-            decky.logger.debug(f"SettingsManager: saved {key}")
+            decky.logger.debug(f"{LOG} SettingsManager: saved {key}")
             return True
         except Exception as e:
-            decky.logger.error(f"SettingsManager: failed to save {key}: {e}")
+            decky.logger.error(f"{LOG} SettingsManager: failed to save {key}: {e}")
             decky.logger.error(traceback.format_exc())
             return False
 
@@ -154,7 +160,7 @@ class Plugin:
     # and backfill any new default keys that didn't exist in the saved file
     # (e.g., if we add a new setting in a future version).
     async def _main(self):
-        decky.logger.info("Decky Cloud Reader: backend loaded")
+        decky.logger.info(f"{LOG} backend loaded")
 
         # Initialize the settings manager. It reads/writes a JSON file in the
         # plugin's dedicated settings directory.
@@ -167,9 +173,9 @@ class Plugin:
         for key, default_value in DEFAULT_SETTINGS.items():
             if self.settings.get(key) is None:
                 self.settings.set(key, default_value)
-                decky.logger.debug(f"Backfilled default setting: {key}")
+                decky.logger.debug(f"{LOG} backfilled default: {key}")
 
-        decky.logger.info("Decky Cloud Reader: settings initialized")
+        decky.logger.info(f"{LOG} settings initialized")
 
     # =========================================================================
     # Lifecycle: _unload()
@@ -177,14 +183,14 @@ class Plugin:
     # Called when the plugin is stopped (e.g., Decky Loader restarts, or the
     # user disables the plugin). The plugin is NOT removed from disk.
     async def _unload(self):
-        decky.logger.info("Decky Cloud Reader: backend unloaded")
+        decky.logger.info(f"{LOG} backend unloaded")
 
     # =========================================================================
     # Lifecycle: _uninstall()
     # =========================================================================
     # Called after _unload() when the plugin is fully removed from disk.
     async def _uninstall(self):
-        decky.logger.info("Decky Cloud Reader: backend uninstalled")
+        decky.logger.info(f"{LOG} backend uninstalled")
 
     # =========================================================================
     # RPC: get_settings()
@@ -196,7 +202,7 @@ class Plugin:
     # Called from the frontend via:
     #   const getSettings = callable<[], PluginSettings>("get_settings");
     async def get_settings(self):
-        decky.logger.debug("get_settings() called")
+        decky.logger.debug(f"{LOG} get_settings() called")
 
         # Start with defaults, then overlay saved values. This ensures the
         # frontend always gets every expected key, even if the settings file
@@ -235,12 +241,12 @@ class Plugin:
     # Called from the frontend via:
     #   const saveSetting = callable<[string, any], boolean>("save_setting");
     async def save_setting(self, key, value):
-        decky.logger.info(f"save_setting({key}, {value})")
+        decky.logger.info(f"{LOG} save_setting({key}, {value})")
 
         # Don't allow the frontend to directly set credentials — that goes
         # through load_credentials_file() instead.
         if key == "gcp_credentials_base64":
-            decky.logger.warning("Direct credential setting not allowed")
+            decky.logger.warning(f"{LOG} direct credential setting not allowed")
             return False
 
         return self.settings.set(key, value)
@@ -260,7 +266,7 @@ class Plugin:
     # Called from the frontend via:
     #   const listDirectory = callable<[string], DirectoryListing>("list_directory");
     async def list_directory(self, path):
-        decky.logger.debug(f"list_directory({path})")
+        decky.logger.debug(f"{LOG} list_directory({path})")
 
         try:
             # Normalize the path to resolve things like "/home/deck/../deck"
@@ -307,21 +313,21 @@ class Plugin:
             }
 
         except PermissionError:
-            decky.logger.warning(f"Permission denied: {path}")
+            decky.logger.warning(f"{LOG} permission denied: {path}")
             return {
                 "path": path,
                 "entries": [],
                 "error": f"Permission denied: {path}",
             }
         except FileNotFoundError:
-            decky.logger.warning(f"Directory not found: {path}")
+            decky.logger.warning(f"{LOG} directory not found: {path}")
             return {
                 "path": path,
                 "entries": [],
                 "error": f"Directory not found: {path}",
             }
         except Exception as e:
-            decky.logger.error(f"list_directory error: {e}")
+            decky.logger.error(f"{LOG} list_directory error: {e}")
             decky.logger.error(traceback.format_exc())
             return {
                 "path": path,
@@ -343,7 +349,7 @@ class Plugin:
     # Called from the frontend via:
     #   const loadCredentialsFile = callable<[string], CredentialResult>("load_credentials_file");
     async def load_credentials_file(self, file_path):
-        decky.logger.info(f"load_credentials_file({file_path})")
+        decky.logger.info(f"{LOG} load_credentials_file({file_path})")
 
         try:
             # Step 1: Read the file
@@ -387,7 +393,7 @@ class Plugin:
             self.settings.set("gcp_credentials_base64", encoded)
 
             project_id = creds.get("project_id", "unknown")
-            decky.logger.info(f"Credentials loaded for project: {project_id}")
+            decky.logger.info(f"{LOG} credentials loaded for project: {project_id}")
 
             return {
                 "valid": True,
@@ -408,7 +414,7 @@ class Plugin:
                 "project_id": "",
             }
         except Exception as e:
-            decky.logger.error(f"load_credentials_file error: {e}")
+            decky.logger.error(f"{LOG} load_credentials_file error: {e}")
             decky.logger.error(traceback.format_exc())
             return {
                 "valid": False,
@@ -424,6 +430,6 @@ class Plugin:
     # Called from the frontend via:
     #   const clearCredentials = callable<[], boolean>("clear_credentials");
     async def clear_credentials(self):
-        decky.logger.info("clear_credentials() called")
+        decky.logger.info(f"{LOG} clear_credentials() called")
         return self.settings.set("gcp_credentials_base64", "")
 
