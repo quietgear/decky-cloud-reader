@@ -45,6 +45,37 @@ MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 MAX_RETRIES = 3
 RETRY_DELAYS = [0.5, 1.0]  # Delays between attempts (seconds)
 
+# Google Cloud TTS API has a 5000-byte input limit per request.
+# We truncate text beyond this to avoid API errors.
+MAX_TEXT_LENGTH = 5000
+
+# Voice registry: maps voice IDs to their language codes.
+# These are all Neural2 voices — Google's high-quality neural voices.
+# 4 US English + 4 British English voices for Phase 5. Expandable later.
+VOICE_REGISTRY = {
+    # US English Neural2 voices (en-US)
+    "en-US-Neural2-A": "en-US",  # Male
+    "en-US-Neural2-C": "en-US",  # Female
+    "en-US-Neural2-D": "en-US",  # Male
+    "en-US-Neural2-F": "en-US",  # Female
+    # British English Neural2 voices (en-GB)
+    "en-GB-Neural2-A": "en-GB",  # Female
+    "en-GB-Neural2-B": "en-GB",  # Male
+    "en-GB-Neural2-C": "en-GB",  # Female
+    "en-GB-Neural2-D": "en-GB",  # Male
+}
+
+# Speech rate presets: human-friendly names mapped to the float value
+# that the Cloud TTS API expects in AudioConfig.speaking_rate.
+# Range is 0.25 to 4.0, where 1.0 is normal speed.
+SPEECH_RATE_MAP = {
+    "x-slow": 0.5,
+    "slow": 0.75,
+    "medium": 1.0,
+    "fast": 1.25,
+    "x-fast": 1.5,
+}
+
 
 # ---------------------------------------------------------------------------
 # Logging helpers — all output goes to stderr, never stdout
@@ -130,6 +161,39 @@ def init_vision_client(creds_b64):
     client = vision.ImageAnnotatorClient(credentials=credentials)
 
     log_info("Vision client initialized")
+    return client
+
+
+# ---------------------------------------------------------------------------
+# TTS client initialization
+# ---------------------------------------------------------------------------
+
+def init_tts_client(creds_b64):
+    """
+    Create a Google Cloud Text-to-Speech client from base64-encoded service
+    account JSON. Same pattern as init_vision_client().
+
+    Args:
+        creds_b64: Base64-encoded string containing the full service account JSON.
+
+    Returns:
+        An initialized TextToSpeechClient ready to make API calls.
+
+    Raises:
+        Exception: If credentials are invalid or client creation fails.
+    """
+    # Step 1: Decode the base64 string back to JSON
+    creds_json = json.loads(base64.b64decode(creds_b64))
+
+    # Step 2: Create Google OAuth2 credentials from the service account info
+    from google.oauth2 import service_account
+    credentials = service_account.Credentials.from_service_account_info(creds_json)
+
+    # Step 3: Create the TTS API client with these credentials
+    from google.cloud import texttospeech
+    client = texttospeech.TextToSpeechClient(credentials=credentials)
+
+    log_info("TTS client initialized")
     return client
 
 
@@ -335,6 +399,150 @@ def do_ocr(image_path, creds_b64):
 
 
 # ---------------------------------------------------------------------------
+# TTS action — synthesize speech from text
+# ---------------------------------------------------------------------------
+
+def do_tts(text, output_path, voice_id, speech_rate, creds_b64):
+    """
+    Synthesize speech from text using Google Cloud Text-to-Speech API.
+
+    Steps:
+      1. Validate and truncate text if needed
+      2. Look up voice language code and speaking rate
+      3. Initialize the TTS client with credentials
+      4. Build synthesis request (input, voice, audio config)
+      5. Call synthesize_speech() with retry on transient errors
+      6. Write audio content to output file
+
+    Args:
+        text: The text to synthesize into speech.
+        output_path: Absolute path where the MP3 file will be written.
+        voice_id: Voice name from VOICE_REGISTRY (e.g., "en-US-Neural2-C").
+        speech_rate: Speed preset from SPEECH_RATE_MAP (e.g., "medium").
+        creds_b64: Base64-encoded GCP service account JSON.
+
+    Returns:
+        Never returns — calls output_result() or output_error() which exit.
+    """
+    # Step 1: Validate text input
+    if not text or not text.strip():
+        output_error("No text provided for TTS")
+
+    # Truncate if over the API limit (5000 bytes). Append a note so the user
+    # knows the audio doesn't cover the full text.
+    original_length = len(text)
+    if len(text) > MAX_TEXT_LENGTH:
+        text = text[:MAX_TEXT_LENGTH - 30] + "\n... (text truncated)"
+        log_info(f"Text truncated from {original_length:,} to {len(text):,} chars")
+
+    log_info(f"TTS input: {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
+
+    # Step 2: Look up language code from the voice registry.
+    # Fall back to "en-US" if the voice ID isn't recognized (shouldn't happen
+    # with normal usage, but be defensive).
+    language_code = VOICE_REGISTRY.get(voice_id, "en-US")
+    if voice_id not in VOICE_REGISTRY:
+        log_info(f"Unknown voice '{voice_id}', defaulting to language_code='en-US'")
+
+    # Look up speaking rate float from the presets map.
+    # Fall back to 1.0 (normal speed) if the preset isn't recognized.
+    speaking_rate = SPEECH_RATE_MAP.get(speech_rate, 1.0)
+    if speech_rate not in SPEECH_RATE_MAP:
+        log_info(f"Unknown speech rate '{speech_rate}', defaulting to 1.0")
+
+    # Step 3: Initialize the TTS client
+    try:
+        client = init_tts_client(creds_b64)
+    except Exception as e:
+        log_error(f"Failed to init TTS client: {e}")
+        output_error(f"Failed to initialize GCP credentials: {e}")
+
+    # Step 4: Build the synthesis request components
+    from google.cloud import texttospeech
+
+    # SynthesisInput — the text to convert to speech.
+    # We use plain text (not SSML) for simplicity.
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+
+    # VoiceSelectionParams — which voice to use.
+    # language_code must match the voice name's prefix.
+    voice_params = texttospeech.VoiceSelectionParams(
+        language_code=language_code,
+        name=voice_id,
+    )
+
+    # AudioConfig — output format and speaking rate.
+    # MP3 is compact and supported by mpv on Steam Deck.
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        speaking_rate=speaking_rate,
+    )
+
+    # Step 5: Call the TTS API with retry logic (same pattern as OCR)
+    from google.api_core import exceptions as google_exceptions
+
+    log_info("Sending TTS request to Cloud TTS API...")
+
+    last_error = None
+    response = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice_params,
+                audio_config=audio_config,
+            )
+            break  # Success — exit the retry loop
+        except (
+            google_exceptions.ServiceUnavailable,    # 503
+            google_exceptions.ResourceExhausted,     # 429 (rate limit)
+            google_exceptions.DeadlineExceeded,      # 504 (timeout)
+            ConnectionError,
+            ConnectionResetError,
+        ) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+                log_info(
+                    f"Transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            else:
+                log_error(f"TTS failed after {MAX_RETRIES} attempts: {e}")
+                output_error(f"TTS API failed after {MAX_RETRIES} retries: {e}")
+        except Exception as e:
+            # Non-transient error — fail immediately, don't retry
+            log_error(f"TTS API error: {e}")
+            log_error(traceback.format_exc())
+            output_error(f"TTS API error: {e}")
+    else:
+        # All retries exhausted without break
+        output_error(f"TTS API failed after {MAX_RETRIES} retries: {last_error}")
+
+    # Step 6: Write the audio content to the output file
+    audio_size = len(response.audio_content)
+    log_info(f"TTS response: {audio_size:,} bytes of audio")
+
+    try:
+        with open(output_path, "wb") as f:
+            f.write(response.audio_content)
+        log_info(f"Audio written to {output_path}")
+    except Exception as e:
+        log_error(f"Failed to write audio file: {e}")
+        output_error(f"Failed to write audio file: {e}")
+
+    output_result({
+        "success": True,
+        "audio_size": audio_size,
+        "output_path": output_path,
+        "text_length": len(text),
+        "voice_id": voice_id,
+        "message": f"TTS complete: {audio_size:,} bytes, voice={voice_id}",
+    })
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -345,7 +553,8 @@ def main():
     Usage: python3 gcp_worker.py <action> [args...]
 
     Actions:
-      ocr <image_path>  — Perform OCR on the given image file
+      ocr <image_path>                              — Perform OCR on the given image file
+      tts <text> <output_path> <voice_id> <rate>     — Synthesize speech from text
 
     Credentials are read from the GCP_CREDENTIALS_BASE64 environment variable.
     """
@@ -367,6 +576,16 @@ def main():
             output_error("Usage: gcp_worker.py ocr <image_path>")
         image_path = sys.argv[2]
         do_ocr(image_path, creds_b64)
+
+    elif action == "tts":
+        # TTS requires: text, output_path, voice_id, speech_rate
+        if len(sys.argv) < 6:
+            output_error("Usage: gcp_worker.py tts <text> <output_path> <voice_id> <speech_rate>")
+        text = sys.argv[2]
+        output_path = sys.argv[3]
+        voice_id = sys.argv[4]
+        speech_rate = sys.argv[5]
+        do_tts(text, output_path, voice_id, speech_rate, creds_b64)
 
     else:
         output_error(f"Unknown action: {action}")

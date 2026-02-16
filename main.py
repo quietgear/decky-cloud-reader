@@ -22,8 +22,10 @@
 import os
 import json
 import base64
+import glob
 import traceback
 import subprocess
+import signal
 import shutil
 import tempfile
 import asyncio
@@ -48,6 +50,10 @@ CAPTURE_TIMEOUT = 2  # seconds
 #   - Up to 3 retries with backoff on transient errors (~3s extra)
 # 45 seconds gives plenty of headroom even on a slow connection.
 OCR_TIMEOUT = 45  # seconds
+
+# Timeout for the TTS subprocess. TTS API is generally faster than Vision
+# (smaller payloads, simpler processing). 30 seconds with retries.
+TTS_TIMEOUT = 30  # seconds
 
 # Thread pool for running blocking subprocess calls (like gst-launch-1.0)
 # without blocking the async event loop. Only 1 worker needed since we
@@ -202,6 +208,12 @@ class Plugin:
         # Phase 4. Keeping it on `self` avoids writing to disk unnecessarily.
         self._last_capture_bytes = None
 
+        # Playback state: tracks the running mpv process (if any) and the
+        # path to the temp MP3 file it's playing. Used by _start_playback()
+        # and _stop_playback() to manage audio lifecycle.
+        self._playback_process = None  # subprocess.Popen object or None
+        self._tts_temp_path = None     # path to current MP3 temp file
+
         decky.logger.info(f"{LOG} settings initialized")
 
         # -----------------------------------------------------------------
@@ -256,16 +268,56 @@ class Plugin:
         else:
             decky.logger.warning(f"{LOG} py_modules NOT found at {self._py_modules_path}")
 
+        # -----------------------------------------------------------------
+        # Discover audio player for TTS playback
+        # -----------------------------------------------------------------
+        # We try several players in priority order. mpv is ideal but not
+        # always installed. ffplay and pw-play are reliably present on
+        # Steam Deck. Each player needs different CLI flags, so we store
+        # both the path and the player name for command construction.
+        self._audio_player_path = None
+        self._audio_player_name = None  # "mpv", "ffplay", or "pw-play"
+        audio_candidates = [
+            ("mpv", "mpv"),
+            ("ffplay", "ffplay"),
+            ("pw-play", "pw-play"),
+        ]
+        for name, binary in audio_candidates:
+            path = shutil.which(binary)
+            if path:
+                self._audio_player_path = path
+                self._audio_player_name = name
+                decky.logger.info(f"{LOG} audio player found: {name} at {path}")
+                break
+
+        if not self._audio_player_path:
+            decky.logger.warning(f"{LOG} no audio player found (tried mpv, ffplay, pw-play) — TTS playback will not work")
+
     # =========================================================================
     # Lifecycle: _unload()
     # =========================================================================
     # Called when the plugin is stopped (e.g., Decky Loader restarts, or the
     # user disables the plugin). The plugin is NOT removed from disk.
     async def _unload(self):
-        # Shut down the thread pool executor. wait=False so we don't block
-        # the unload if a capture is somehow still running.
+        # Step 1: Stop any running audio playback and clean up its temp file
+        self._stop_playback()
+        decky.logger.info(f"{LOG} playback stopped")
+
+        # Step 2: Shut down the thread pool executor. wait=False so we don't
+        # block the unload if a capture is somehow still running.
         _capture_executor.shutdown(wait=False)
         decky.logger.info(f"{LOG} capture executor shut down")
+
+        # Step 3: Sweep any orphaned temp files from previous runs.
+        # These could exist if the plugin crashed mid-pipeline.
+        for pattern in ["/tmp/dcr_*.png", "/tmp/dcr_*.mp3"]:
+            for orphan in glob.glob(pattern):
+                try:
+                    os.remove(orphan)
+                    decky.logger.debug(f"{LOG} swept orphaned temp file: {orphan}")
+                except OSError:
+                    pass
+
         decky.logger.info(f"{LOG} backend unloaded")
 
     # =========================================================================
@@ -544,6 +596,174 @@ class Plugin:
             return {"success": False, "message": f"GCP worker error: {e}"}
 
     # =========================================================================
+    # Audio playback: _start_playback(), _stop_playback(), _cleanup_tts_temp()
+    # =========================================================================
+    # mpv is used for audio playback because it's pre-installed on Steam Deck,
+    # lightweight, and supports MP3. Unlike gcp_worker.py (which uses run()),
+    # we use Popen here because playback is a long-running background process
+    # that the user may want to stop at any time.
+
+    def _start_playback(self, mp3_path):
+        """
+        Start playing an MP3 file via the discovered audio player.
+
+        Stops any currently playing audio first. Launches the player as a
+        background process (Popen) so it plays asynchronously while the UI
+        remains responsive.
+
+        Supported players and their flags:
+          - mpv:    --no-video --really-quiet --volume=N <file>
+          - ffplay: -nodisp -autoexit -loglevel quiet -volume N <file>
+          - pw-play: --volume=F <file>  (F is 0.0-1.0 float)
+
+        Args:
+            mp3_path: Absolute path to the MP3 file to play.
+
+        Returns:
+            True if playback started successfully, False otherwise.
+        """
+        # Stop any existing playback before starting new audio
+        self._stop_playback()
+
+        if not self._audio_player_path:
+            decky.logger.error(f"{LOG} no audio player found — cannot play audio")
+            return False
+
+        if not os.path.exists(mp3_path):
+            decky.logger.error(f"{LOG} MP3 file not found: {mp3_path}")
+            return False
+
+        # Get volume from settings (0-100)
+        volume = self.settings.get("volume", DEFAULT_SETTINGS["volume"])
+
+        # Build the command based on which player was discovered.
+        # Each player has different CLI conventions for volume and quiet mode.
+        player = self._audio_player_name
+        if player == "mpv":
+            cmd = [
+                self._audio_player_path,
+                "--no-video",          # Audio only, no video window
+                "--really-quiet",      # Suppress all output
+                f"--volume={volume}",  # Volume 0-100
+                mp3_path,
+            ]
+        elif player == "ffplay":
+            # ffplay volume is 0-100 (SDL volume), matches our setting range.
+            # -autoexit makes ffplay quit when the file ends (otherwise it hangs).
+            cmd = [
+                self._audio_player_path,
+                "-nodisp",             # No video display window
+                "-autoexit",           # Exit when playback finishes
+                "-loglevel", "quiet",  # Suppress all output
+                "-volume", str(volume),
+                mp3_path,
+            ]
+        elif player == "pw-play":
+            # pw-play volume is a float 0.0-1.0, so convert from 0-100.
+            pw_volume = round(volume / 100.0, 2)
+            cmd = [
+                self._audio_player_path,
+                f"--volume={pw_volume}",
+                mp3_path,
+            ]
+        else:
+            decky.logger.error(f"{LOG} unknown audio player: {player}")
+            return False
+
+        try:
+            decky.logger.info(f"{LOG} starting playback via {player}: {mp3_path} (volume={volume})")
+
+            # The Decky Loader service runs as root, so the audio player
+            # can't find the user's PipeWire/PulseAudio session by default.
+            # We need to set XDG_RUNTIME_DIR so it can connect to the
+            # audio socket at /run/user/1000/pipewire-0 (or pulse/).
+            env = os.environ.copy()
+            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+
+            # Launch as a background process. stdout/stderr to DEVNULL
+            # since we suppress output via player flags anyway.
+            self._playback_process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # Track the temp file so _stop_playback() can clean it up
+            self._tts_temp_path = mp3_path
+
+            decky.logger.info(f"{LOG} playback started (pid={self._playback_process.pid})")
+            return True
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} failed to start {player}: {e}")
+            decky.logger.error(traceback.format_exc())
+            self._playback_process = None
+            return False
+
+    def _stop_playback(self):
+        """
+        Stop any currently playing mpv process and clean up the temp MP3 file.
+
+        Uses a graceful shutdown approach:
+          1. SIGTERM — asks mpv to exit cleanly
+          2. wait(timeout=2) — give it 2 seconds to stop
+          3. SIGKILL — force-kill if it didn't stop (shouldn't happen with mpv)
+
+        Safe to call even if nothing is playing (no-op).
+        """
+        if self._playback_process is None:
+            return
+
+        try:
+            # Check if the process is still alive (poll() returns None if running)
+            if self._playback_process.poll() is None:
+                decky.logger.info(f"{LOG} stopping playback (pid={self._playback_process.pid})")
+
+                # SIGTERM: polite request to exit
+                self._playback_process.send_signal(signal.SIGTERM)
+
+                try:
+                    # Wait up to 2 seconds for clean exit
+                    self._playback_process.wait(timeout=2)
+                    decky.logger.info(f"{LOG} playback stopped gracefully")
+                except subprocess.TimeoutExpired:
+                    # mpv didn't exit in time — force kill
+                    decky.logger.warning(f"{LOG} mpv didn't stop in 2s, sending SIGKILL")
+                    self._playback_process.kill()
+                    self._playback_process.wait(timeout=2)
+            else:
+                decky.logger.debug(f"{LOG} playback process already exited")
+
+        except ProcessLookupError:
+            # Process already exited between our poll() check and signal send.
+            # This is a normal race condition, not an error.
+            decky.logger.debug(f"{LOG} playback process already gone")
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} error stopping playback: {e}")
+            decky.logger.error(traceback.format_exc())
+
+        finally:
+            self._playback_process = None
+            self._cleanup_tts_temp()
+
+    def _cleanup_tts_temp(self):
+        """
+        Remove the current TTS temp MP3 file if it exists.
+        Called after playback stops (naturally or by user request).
+        """
+        if self._tts_temp_path:
+            try:
+                if os.path.exists(self._tts_temp_path):
+                    os.remove(self._tts_temp_path)
+                    decky.logger.debug(f"{LOG} cleaned up TTS temp file: {self._tts_temp_path}")
+            except OSError as e:
+                decky.logger.warning(f"{LOG} failed to clean up {self._tts_temp_path}: {e}")
+            finally:
+                self._tts_temp_path = None
+
+    # =========================================================================
     # OCR pipeline: _perform_ocr_sync() (internal helper)
     # =========================================================================
     # Synchronous method that captures a screenshot and runs OCR on it.
@@ -662,6 +882,182 @@ class Plugin:
             decky.logger.warning(f"{LOG} OCR failed: {result['message']}")
 
         return result
+
+    # =========================================================================
+    # TTS pipeline: _perform_tts_sync(text) (internal helper)
+    # =========================================================================
+    # Synchronous method that synthesizes speech from text and starts playback.
+    # Must be run in a thread pool because _run_gcp_worker() and _start_playback()
+    # are blocking calls.
+    #
+    # Pipeline: validate → create temp file → gcp_worker TTS → start mpv playback
+    def _perform_tts_sync(self, text):
+        """
+        Synthesize speech from text and start playback.
+
+        Args:
+            text: The text to convert to speech.
+
+        Returns:
+            Dict with keys: success, message, audio_size.
+        """
+        # Step 1: Check that credentials are configured
+        creds_b64 = self.settings.get("gcp_credentials_base64", "")
+        if not creds_b64:
+            return {
+                "success": False,
+                "message": "GCP credentials not configured",
+                "audio_size": 0,
+            }
+
+        # Step 2: Validate text
+        if not text or not text.strip():
+            return {
+                "success": False,
+                "message": "No text to speak",
+                "audio_size": 0,
+            }
+
+        # Step 3: Get voice and speech rate settings
+        voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
+        speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
+
+        decky.logger.info(f"{LOG} TTS pipeline: {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
+
+        # Step 4: Create a temp file for the MP3 output.
+        # mkstemp creates a file with a unique name that won't collide.
+        fd = None
+        tmp_path = None
+        playback_started = False
+
+        try:
+            fd, tmp_path = tempfile.mkstemp(suffix=".mp3", prefix="dcr_tts_")
+            os.close(fd)
+            fd = None  # Mark as closed so finally doesn't double-close
+
+            # Step 5: Run the GCP worker to synthesize speech
+            result = self._run_gcp_worker(
+                "tts",
+                [text, tmp_path, voice_id, speech_rate],
+                timeout=TTS_TIMEOUT,
+            )
+
+            if not result.get("success", False):
+                return {
+                    "success": False,
+                    "message": result.get("message", "TTS failed"),
+                    "audio_size": 0,
+                }
+
+            # Step 6: Verify the audio file was written and is non-empty
+            if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+                return {
+                    "success": False,
+                    "message": "TTS produced empty audio file",
+                    "audio_size": 0,
+                }
+
+            audio_size = result.get("audio_size", os.path.getsize(tmp_path))
+
+            # Step 7: Start playback — if successful, the temp file is now
+            # owned by the playback process (cleaned up when playback stops)
+            playback_started = self._start_playback(tmp_path)
+
+            if playback_started:
+                return {
+                    "success": True,
+                    "message": f"Playing: {audio_size:,} bytes, voice={voice_id}",
+                    "audio_size": audio_size,
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "TTS synthesis succeeded but audio playback failed (mpv not found?)",
+                    "audio_size": audio_size,
+                }
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} TTS pipeline error: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "message": f"TTS pipeline error: {e}",
+                "audio_size": 0,
+            }
+        finally:
+            # Clean up the file descriptor if still open
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            # Clean up the temp file ONLY if playback didn't start.
+            # If playback started, _stop_playback() owns the cleanup.
+            if not playback_started and tmp_path:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                        decky.logger.debug(f"{LOG} cleaned up TTS temp file (playback didn't start): {tmp_path}")
+                except OSError as e:
+                    decky.logger.warning(f"{LOG} failed to clean up {tmp_path}: {e}")
+
+    # =========================================================================
+    # RPC: perform_tts(text)
+    # =========================================================================
+    # Async wrapper around _perform_tts_sync(). Runs the blocking TTS pipeline
+    # in a thread pool so it doesn't freeze the event loop.
+    #
+    # Returns a dict to the frontend:
+    #   {success: bool, message: str, audio_size: int}
+    #
+    # Called from the frontend via:
+    #   const performTts = callable<[string], TtsResult>("perform_tts");
+    async def perform_tts(self, text):
+        decky.logger.info(f"{LOG} perform_tts() called ({len(text):,} chars)")
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            _capture_executor,
+            lambda: self._perform_tts_sync(text),
+        )
+
+        if result["success"]:
+            decky.logger.info(f"{LOG} TTS complete: {result['message']}")
+        else:
+            decky.logger.warning(f"{LOG} TTS failed: {result['message']}")
+
+        return result
+
+    # =========================================================================
+    # RPC: stop_playback()
+    # =========================================================================
+    # Stops the current audio playback (if any). Safe to call if nothing is
+    # playing — it's a no-op.
+    #
+    # Called from the frontend via:
+    #   const stopPlayback = callable<[], StopResult>("stop_playback");
+    async def stop_playback(self):
+        decky.logger.info(f"{LOG} stop_playback() called")
+        self._stop_playback()
+        return {
+            "success": True,
+            "message": "Playback stopped",
+        }
+
+    # =========================================================================
+    # RPC: get_playback_status()
+    # =========================================================================
+    # Lightweight status check — tells the frontend whether audio is currently
+    # playing. No subprocess involved, just checks self._playback_process.poll().
+    #
+    # Called from the frontend via:
+    #   const getPlaybackStatus = callable<[], PlaybackStatus>("get_playback_status");
+    async def get_playback_status(self):
+        is_playing = (
+            self._playback_process is not None
+            and self._playback_process.poll() is None
+        )
+        return {"is_playing": is_playing}
 
     # =========================================================================
     # RPC: get_settings()

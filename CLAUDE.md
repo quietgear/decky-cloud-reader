@@ -52,7 +52,7 @@ Frontend (TypeScript/React)         Backend (Python)
 │  - Credentials section  │◄──────►│  - GCP credentials mgmt     │
 │  - Settings section     │        │  - Screen capture (GStreamer)│
 │  - Status/controls      │        │  - Subprocess launcher       │
-│                         │        │  - Audio playback (mpv/Popen)│
+│                         │        │  - Audio playback (Popen)    │
 │ Global Overlay          │        │  - L4 button monitor (hidraw)│
 │  - OCR text display     │        │                              │
 └─────────────────────────┘        │  Subprocesses (system Python)│
@@ -108,24 +108,31 @@ Frontend (TypeScript/React)         Backend (Python)
 
 **Note:** Docker base image changed from `node:20-slim` to `python:3.13-slim` (with Node.js installed on top) to match Steam Deck's Python 3.13 — required for compatible C extensions (.so files).
 
-### Phase 5: TTS — Cloud Text-to-Speech (subprocess + mpv) `[NOT STARTED]`
+### Phase 5: TTS — Cloud Text-to-Speech (subprocess + audio playback) `[DONE]`
 
-**TTS logic (add to `gcp_worker.py`):**
-- [ ] TTS synthesis action: receives text + voice config, calls Cloud TTS API, writes MP3 to a specified output path
-- [ ] Voice selection support (language code + voice name)
-- [ ] Speech rate presets (x-slow to x-fast via SSML `<prosody>`)
-- [ ] Retry logic (same pattern as OCR)
+**TTS logic (inside `gcp_worker.py`):**
+- [x] TTS client init from base64 credentials (same pattern as Vision client)
+- [x] TTS synthesis action: receives text + voice config via CLI args, calls Cloud TTS API, writes MP3 to output path
+- [x] Voice registry (8 Neural2 voices: 4 US, 4 UK) + speech rate presets (x-slow through x-fast as floats)
+- [x] Text truncation at 5000 chars (Cloud TTS API limit) with "(text truncated)" note
+- [x] Retry logic (same pattern as OCR — 3 attempts, backoff on 503/429/timeout)
+- [x] Output: JSON `{success, audio_size, output_path, text_length, voice_id, message}` to stdout
 
-**Audio playback (mpv — long-running, uses Popen):**
-- [ ] `_start_playback(mp3_path)` — launches mpv via Popen, stores `self._playback_process`
-- [ ] `_stop_playback()` — sends SIGTERM to mpv, `process.wait(timeout=2)`, SIGKILL if needed, catch `ProcessLookupError` for already-exited process
-- [ ] Playback state tracking: `self._playback_process` checked via `poll()` — no zombie because we always `wait()`
-- [ ] `_unload()` cleanup: kill any running mpv process on plugin shutdown
+**Audio playback (multi-player, long-running, uses Popen):**
+- [x] Audio player discovery in `_main()` — tries mpv → ffplay → pw-play, stores path + name
+- [x] `_start_playback(mp3_path)` — builds player-specific command (mpv/ffplay/pw-play each have different flags), launches via Popen with `XDG_RUNTIME_DIR=/run/user/1000` (required since Decky runs as root)
+- [x] `_stop_playback()` — SIGTERM → `wait(timeout=2)` → SIGKILL if needed, catches `ProcessLookupError` for already-exited process
+- [x] Playback state tracking: `self._playback_process` checked via `poll()` — no zombie because we always `wait()`
+- [x] `_cleanup_tts_temp()` helper: removes temp MP3 after playback stops
+- [x] `_unload()` cleanup: stop playback + sweep orphaned `/tmp/dcr_*.png` and `/tmp/dcr_*.mp3`
 
 **RPC + Frontend:**
-- [ ] `perform_tts(text)` and `stop_playback()` RPC methods
-- [ ] Settings UI — voice picker, speech rate selector, volume slider
-- [ ] "Test TTS" button
+- [x] `perform_tts(text)`, `stop_playback()`, `get_playback_status()` RPC methods
+- [x] Settings UI — voice dropdown (8 Neural2 voices), speech rate dropdown (5 presets), volume slider (0-100, debounced save)
+- [x] "Read Text" / "Stop Playback" toggle button with icons, playback status polling (1s interval)
+- [x] Contextual hints: "Run OCR first" when no text, "Load GCP credentials" when not configured
+
+**Note:** mpv is not pre-installed on Steam Deck. ffplay (from ffmpeg) is the primary audio player found on the device. The plugin auto-discovers the best available player at startup.
 
 ### Phase 6: End-to-End OCR+TTS Pipeline `[NOT STARTED]`
 
@@ -171,7 +178,7 @@ Frontend (TypeScript/React)         Backend (Python)
 |----------|--------|-----------|
 | Architecture | Single Decky plugin, GCP calls via subprocess | main.py runs under Decky's embedded Python; gcp_worker.py runs under system Python (`/usr/bin/python3`) with `py_modules/` on PYTHONPATH to access google-cloud libs |
 | Screen capture | GStreamer + PipeWire | Native to Steam Deck, hardware-accelerated |
-| Audio playback | mpv (preferred) or ffplay | Available on Steam Deck, supports MP3 |
+| Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; ffplay is reliably present on Steam Deck, mpv is not pre-installed. Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root |
 | GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
 | Button input | Hidraw direct device reading | Works in background without opening UI |
 | Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |

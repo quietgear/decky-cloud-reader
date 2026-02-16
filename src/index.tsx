@@ -20,6 +20,8 @@ import {
   PanelSectionRow,  // A row within a PanelSection
   ToggleField,      // A toggle switch with label and description
   Field,            // Generic field container with label support
+  DropdownItem,     // A dropdown selector for picking from a list of options
+  SliderField,      // A slider for numeric values with min/max/step
   staticClasses     // CSS class names for standard Steam UI styling
 } from "@decky/ui";
 
@@ -28,11 +30,11 @@ import {
   definePlugin      // Registers this module as a Decky plugin
 } from "@decky/api";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 // FaBook icon — fits the "reader" theme of this plugin.
 // FaFolder/FaFile icons — used in the file browser for visual clarity.
-import { FaBook, FaFolder, FaFileAlt, FaArrowLeft } from "react-icons/fa";
+import { FaBook, FaFolder, FaFileAlt, FaArrowLeft, FaVolumeUp, FaStop } from "react-icons/fa";
 
 
 // =============================================================================
@@ -76,6 +78,24 @@ interface OcrResult {
   message: string;     // Human-readable success or error message
 }
 
+// Response from the perform_tts() backend RPC
+interface TtsResult {
+  success: boolean;    // true if TTS synthesis + playback started
+  message: string;     // Human-readable success or error message
+  audio_size: number;  // Size of the synthesized MP3 in bytes
+}
+
+// Response from the stop_playback() backend RPC
+interface StopResult {
+  success: boolean;    // Always true (stop is best-effort)
+  message: string;     // Human-readable message
+}
+
+// Response from the get_playback_status() backend RPC
+interface PlaybackStatus {
+  is_playing: boolean;  // true if mpv is currently playing audio
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   voice_id: string;        // TTS voice (Phase 5)
@@ -115,6 +135,15 @@ const captureScreenshot = callable<[], CaptureResult>("capture_screenshot");
 // Perform OCR on a fresh screenshot (capture + Cloud Vision API)
 const performOcr = callable<[], OcrResult>("perform_ocr");
 
+// Synthesize speech from text and start playback
+const performTts = callable<[string], TtsResult>("perform_tts");
+
+// Stop current audio playback
+const stopPlayback = callable<[], StopResult>("stop_playback");
+
+// Check if audio is currently playing (lightweight poll)
+const getPlaybackStatus = callable<[], PlaybackStatus>("get_playback_status");
+
 
 // =============================================================================
 // Helper: format file size in human-readable form
@@ -125,6 +154,32 @@ function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+
+// =============================================================================
+// Voice and speech rate options for the TTS dropdown selectors
+// =============================================================================
+// These match the VOICE_REGISTRY and SPEECH_RATE_MAP in gcp_worker.py.
+// Each option has a `data` value (sent to the backend) and a `label` (shown in UI).
+
+const VOICE_OPTIONS = [
+  { data: "en-US-Neural2-A", label: "US English - Male A" },
+  { data: "en-US-Neural2-C", label: "US English - Female C" },
+  { data: "en-US-Neural2-D", label: "US English - Male D" },
+  { data: "en-US-Neural2-F", label: "US English - Female F" },
+  { data: "en-GB-Neural2-A", label: "UK English - Female A" },
+  { data: "en-GB-Neural2-B", label: "UK English - Male B" },
+  { data: "en-GB-Neural2-C", label: "UK English - Female C" },
+  { data: "en-GB-Neural2-D", label: "UK English - Male D" },
+];
+
+const SPEECH_RATE_OPTIONS = [
+  { data: "x-slow", label: "Very Slow (0.5x)" },
+  { data: "slow",   label: "Slow (0.75x)" },
+  { data: "medium", label: "Normal (1.0x)" },
+  { data: "fast",   label: "Fast (1.25x)" },
+  { data: "x-fast", label: "Very Fast (1.5x)" },
+];
 
 
 // =============================================================================
@@ -329,6 +384,20 @@ function Content() {
   // The detected text from the last OCR run (shown in scrollable area)
   const [ocrText, setOcrText] = useState<string | null>(null);
 
+  // --- TTS state ---
+  // Status message shown after a TTS attempt (success or error)
+  const [ttsMessage, setTtsMessage] = useState<string | null>(null);
+  // Whether the TTS message is a success (green) or error (red)
+  const [ttsIsSuccess, setTtsIsSuccess] = useState(false);
+  // Whether TTS synthesis is currently running (disables the button)
+  const [isTtsRunning, setIsTtsRunning] = useState(false);
+  // Whether audio is currently playing (toggles Read Text / Stop button)
+  const [isPlaying, setIsPlaying] = useState(false);
+  // Ref for the playback polling interval (so we can clear it on unmount)
+  const playbackPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Ref for the volume save debounce timeout
+  const volumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Load settings from the backend when the component first mounts.
   // Also reload when returning from file browser mode.
   useEffect(() => {
@@ -411,6 +480,92 @@ function Content() {
     // because OCR results are more important to read)
     setTimeout(() => setOcrMessage(null), 8000);
   };
+
+  // --- TTS handlers ---
+
+  // Start polling the backend for playback status (every 1 second).
+  // This detects when mpv finishes playing naturally so we can update the UI.
+  const startPlaybackPoll = () => {
+    // Clear any existing poll first
+    stopPlaybackPoll();
+
+    playbackPollRef.current = setInterval(async () => {
+      const status = await getPlaybackStatus();
+      if (!status.is_playing) {
+        // Playback finished naturally — update UI
+        setIsPlaying(false);
+        stopPlaybackPoll();
+      }
+    }, 1000);
+  };
+
+  // Stop the playback polling interval
+  const stopPlaybackPoll = () => {
+    if (playbackPollRef.current) {
+      clearInterval(playbackPollRef.current);
+      playbackPollRef.current = null;
+    }
+  };
+
+  // Handle the "Read Text" button — synthesize speech and start playback
+  const handleReadText = async () => {
+    if (!ocrText) return;
+
+    setIsTtsRunning(true);
+    setTtsMessage(null);
+
+    const result = await performTts(ocrText);
+    setIsTtsRunning(false);
+    setTtsMessage(result.message);
+    setTtsIsSuccess(result.success);
+
+    if (result.success) {
+      setIsPlaying(true);
+      startPlaybackPoll();  // Poll to detect when playback finishes
+    }
+
+    // Auto-clear the status message after 5 seconds
+    setTimeout(() => setTtsMessage(null), 5000);
+  };
+
+  // Handle the "Stop Playback" button — stop audio and update UI
+  const handleStopPlayback = async () => {
+    await stopPlayback();
+    setIsPlaying(false);
+    stopPlaybackPoll();
+    setTtsMessage("Playback stopped");
+    setTtsIsSuccess(true);
+    setTimeout(() => setTtsMessage(null), 5000);
+  };
+
+  // Handle volume slider changes — update UI immediately, debounce save
+  // to prevent rapid writes to disk during slider drag.
+  const handleVolumeChange = (value: number) => {
+    // Update UI immediately for responsive feel
+    if (settings) {
+      setSettings({ ...settings, volume: value });
+    }
+
+    // Debounce the save: clear any pending timeout, set a new one.
+    // This way, the actual save only happens 800ms after the user stops dragging.
+    if (volumeSaveTimeoutRef.current) {
+      clearTimeout(volumeSaveTimeoutRef.current);
+    }
+    volumeSaveTimeoutRef.current = setTimeout(() => {
+      saveSetting("volume", value);
+    }, 800);
+  };
+
+  // Cleanup: clear intervals and timeouts when the component unmounts
+  // to prevent memory leaks and stale state updates.
+  useEffect(() => {
+    return () => {
+      stopPlaybackPoll();
+      if (volumeSaveTimeoutRef.current) {
+        clearTimeout(volumeSaveTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // --- File browser mode ---
   if (mode === "browser") {
@@ -608,6 +763,139 @@ function Content() {
               width: "100%",
             }}>
               {ocrText}
+            </div>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
+      {/* ---- TTS (Text-to-Speech) Section ---- */}
+      <PanelSection title="Text-to-Speech">
+        {/* Voice selection dropdown */}
+        <PanelSectionRow>
+          <DropdownItem
+            label="Voice"
+            description="Neural2 voice for speech synthesis"
+            menuLabel="Select Voice"
+            rgOptions={VOICE_OPTIONS.map((v) => ({
+              data: v.data,
+              label: v.label,
+            }))}
+            selectedOption={
+              VOICE_OPTIONS.find((v) => v.data === settings.voice_id)?.data
+              ?? VOICE_OPTIONS[1].data  // Default: en-US-Neural2-C
+            }
+            onChange={(option) => {
+              saveSetting("voice_id", option.data);
+              if (settings) {
+                setSettings({ ...settings, voice_id: option.data as string });
+              }
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* Speech rate dropdown */}
+        <PanelSectionRow>
+          <DropdownItem
+            label="Speech Rate"
+            description="How fast the text is read aloud"
+            menuLabel="Select Speed"
+            rgOptions={SPEECH_RATE_OPTIONS.map((r) => ({
+              data: r.data,
+              label: r.label,
+            }))}
+            selectedOption={
+              SPEECH_RATE_OPTIONS.find((r) => r.data === settings.speech_rate)?.data
+              ?? SPEECH_RATE_OPTIONS[2].data  // Default: medium
+            }
+            onChange={(option) => {
+              saveSetting("speech_rate", option.data);
+              if (settings) {
+                setSettings({ ...settings, speech_rate: option.data as string });
+              }
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* Volume slider (0-100, step 10, debounced save) */}
+        <PanelSectionRow>
+          <SliderField
+            label="Volume"
+            description="Audio playback volume"
+            value={settings.volume}
+            min={0}
+            max={100}
+            step={10}
+            notchCount={3}
+            notchLabels={[
+              { notchIndex: 0, label: "0" },
+              { notchIndex: 1, label: "50" },
+              { notchIndex: 2, label: "100" },
+            ]}
+            onChange={handleVolumeChange}
+          />
+        </PanelSectionRow>
+
+        {/* TTS status message (success/error) */}
+        {ttsMessage && (
+          <PanelSectionRow>
+            <div style={{
+              color: ttsIsSuccess ? "#2ecc71" : "#e74c3c",
+              padding: "4px 0",
+              fontSize: "13px"
+            }}>
+              {ttsMessage}
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Read Text / Stop Playback button — toggles based on playback state */}
+        <PanelSectionRow>
+          {isPlaying ? (
+            <ButtonItem
+              layout="below"
+              onClick={handleStopPlayback}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+                <FaStop size={14} />
+                <span>Stop Playback</span>
+              </div>
+            </ButtonItem>
+          ) : (
+            <ButtonItem
+              layout="below"
+              onClick={handleReadText}
+              disabled={isTtsRunning || !ocrText || !settings.is_configured}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+                <FaVolumeUp size={14} />
+                <span>{isTtsRunning ? "Synthesizing..." : "Read Text"}</span>
+              </div>
+            </ButtonItem>
+          )}
+        </PanelSectionRow>
+
+        {/* Hint when no OCR text is available */}
+        {!ocrText && settings.is_configured && (
+          <PanelSectionRow>
+            <div style={{
+              color: "#b8bcbf",
+              fontSize: "12px",
+              padding: "4px 0"
+            }}>
+              Run OCR above first to get text for reading
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Hint when credentials aren't configured */}
+        {!settings.is_configured && (
+          <PanelSectionRow>
+            <div style={{
+              color: "#b8bcbf",
+              fontSize: "12px",
+              padding: "4px 0"
+            }}>
+              Load GCP credentials above to enable TTS
             </div>
           </PanelSectionRow>
         )}
