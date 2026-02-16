@@ -43,7 +43,7 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 
 ### Architecture Overview
 
-Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles GCP API calls, screen capture, and audio playback. The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings and status.
+Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles screen capture, subprocess launching, and audio playback. GCP API calls are delegated to `gcp_worker.py` running under system Python. The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings and status.
 
 ```
 Frontend (TypeScript/React)         Backend (Python)
@@ -60,7 +60,7 @@ Frontend (TypeScript/React)         Backend (Python)
                                    │  │ gcp_worker.py            ││
                                    │  │  - OCR (Cloud Vision)    ││
                                    │  │  - TTS (Cloud TTS)       ││
-                                   │  │  - JSON stdin/stdout     ││
+                                   │  │  - CLI args + env / JSON ││
                                    │  └──────────────────────────┘│
                                    └──────────────────────────────┘
 ```
@@ -92,7 +92,7 @@ Frontend (TypeScript/React)         Backend (Python)
 
 **Subprocess infrastructure:**
 - [x] Create `gcp_worker.py` — standalone script that runs under system Python (`/usr/bin/python3`), receives commands via CLI args, outputs JSON to stdout
-- [x] System Python discovery in `_main()` — locate `/usr/bin/python3` (or fallback paths), validate version, fail fast if not found
+- [x] System Python discovery in `_main()` — locate `/usr/bin/python3` (or fallback paths), validate version, warn and degrade gracefully if not found
 - [x] Subprocess launcher helper `_run_gcp_worker(action, args, timeout)` — sets `PYTHONPATH` to `py_modules/`, sets `PYTHONNOUSERSITE=1`, runs with `subprocess.run()` + timeout, parses JSON stdout
 - [x] Subprocess hygiene: always use `subprocess.run()` (not Popen) for request-response calls — it waits for exit, so no zombies; enforce timeout to prevent hangs; clean up temp files in `finally` blocks
 
