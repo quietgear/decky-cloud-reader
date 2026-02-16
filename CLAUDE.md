@@ -51,11 +51,18 @@ Frontend (TypeScript/React)         Backend (Python)
 │ Decky Panel UI          │  RPC   │ main.py (Plugin class)       │
 │  - Credentials section  │◄──────►│  - GCP credentials mgmt     │
 │  - Settings section     │        │  - Screen capture (GStreamer)│
-│  - Status/controls      │        │  - OCR (Cloud Vision)        │
-│                         │        │  - TTS (Cloud TTS)           │
-│ Global Overlay          │        │  - Audio playback (mpv)      │
-│  - OCR text display     │        │  - L4 button monitor (hidraw)│
-└─────────────────────────┘        └──────────────────────────────┘
+│  - Status/controls      │        │  - Subprocess launcher       │
+│                         │        │  - Audio playback (mpv/Popen)│
+│ Global Overlay          │        │  - L4 button monitor (hidraw)│
+│  - OCR text display     │        │                              │
+└─────────────────────────┘        │  Subprocesses (system Python)│
+                                   │  ┌──────────────────────────┐│
+                                   │  │ gcp_worker.py            ││
+                                   │  │  - OCR (Cloud Vision)    ││
+                                   │  │  - TTS (Cloud TTS)       ││
+                                   │  │  - JSON stdin/stdout     ││
+                                   │  └──────────────────────────┘│
+                                   └──────────────────────────────┘
 ```
 
 ### Phase 1: Foundation & Build Pipeline `[DONE]`
@@ -81,28 +88,57 @@ Frontend (TypeScript/React)         Backend (Python)
 - [x] Test screenshot capture on Steam Deck (verify GStreamer + PipeWire work)
 - [x] Add "Test Capture" button in UI to verify
 
-### Phase 4: OCR — Cloud Vision `[NOT STARTED]`
-- [ ] Implement Cloud Vision OCR client in backend (async, with retry)
-- [ ] Image size handling (resize if >10MB)
-- [ ] Add `perform_ocr()` RPC method (capture + OCR pipeline)
-- [ ] Display OCR text results in frontend
-- [ ] Add "Test OCR" button that captures screen and shows detected text
+### Phase 4: OCR — Cloud Vision (subprocess) `[DONE]`
 
-### Phase 5: TTS — Cloud Text-to-Speech `[NOT STARTED]`
-- [ ] Implement Cloud TTS client in backend (async, with retry)
-- [ ] Voice selection support (multiple voices/languages)
-- [ ] Speech rate presets (x-slow to x-fast)
-- [ ] Audio playback via mpv/ffplay
-- [ ] Add `perform_tts(text)` and `stop_playback()` RPC methods
-- [ ] Settings UI — voice picker dropdown, speech rate selector, volume slider
-- [ ] "Test TTS" button with text input field
+**Subprocess infrastructure:**
+- [x] Create `gcp_worker.py` — standalone script that runs under system Python (`/usr/bin/python3`), receives commands via CLI args, outputs JSON to stdout
+- [x] System Python discovery in `_main()` — locate `/usr/bin/python3` (or fallback paths), validate version, fail fast if not found
+- [x] Subprocess launcher helper `_run_gcp_worker(action, args, timeout)` — sets `PYTHONPATH` to `py_modules/`, sets `PYTHONNOUSERSITE=1`, runs with `subprocess.run()` + timeout, parses JSON stdout
+- [x] Subprocess hygiene: always use `subprocess.run()` (not Popen) for request-response calls — it waits for exit, so no zombies; enforce timeout to prevent hangs; clean up temp files in `finally` blocks
+
+**OCR logic (inside `gcp_worker.py`):**
+- [x] Vision client init from base64 credentials (passed via env var, not CLI — avoids `ps` exposure)
+- [x] Image resize if >10MB (Pillow, two-stage: JPEG quality → dimension scaling)
+- [x] `text_detection()` call with retry (3 attempts, backoff on 503/429/timeout)
+- [x] Output: JSON `{success, text, char_count, line_count, message}` to stdout; errors/logs to stderr
+
+**RPC + Frontend:**
+- [x] `perform_ocr()` RPC: capture screenshot → write to temp file → `_run_gcp_worker("ocr", ...)` → return result
+- [x] Frontend: "Test OCR" button, status message, scrollable text display
+
+**Note:** Docker base image changed from `node:20-slim` to `python:3.13-slim` (with Node.js installed on top) to match Steam Deck's Python 3.13 — required for compatible C extensions (.so files).
+
+### Phase 5: TTS — Cloud Text-to-Speech (subprocess + mpv) `[NOT STARTED]`
+
+**TTS logic (add to `gcp_worker.py`):**
+- [ ] TTS synthesis action: receives text + voice config, calls Cloud TTS API, writes MP3 to a specified output path
+- [ ] Voice selection support (language code + voice name)
+- [ ] Speech rate presets (x-slow to x-fast via SSML `<prosody>`)
+- [ ] Retry logic (same pattern as OCR)
+
+**Audio playback (mpv — long-running, uses Popen):**
+- [ ] `_start_playback(mp3_path)` — launches mpv via Popen, stores `self._playback_process`
+- [ ] `_stop_playback()` — sends SIGTERM to mpv, `process.wait(timeout=2)`, SIGKILL if needed, catch `ProcessLookupError` for already-exited process
+- [ ] Playback state tracking: `self._playback_process` checked via `poll()` — no zombie because we always `wait()`
+- [ ] `_unload()` cleanup: kill any running mpv process on plugin shutdown
+
+**RPC + Frontend:**
+- [ ] `perform_tts(text)` and `stop_playback()` RPC methods
+- [ ] Settings UI — voice picker, speech rate selector, volume slider
+- [ ] "Test TTS" button
 
 ### Phase 6: End-to-End OCR+TTS Pipeline `[NOT STARTED]`
-- [ ] Wire capture → OCR → TTS into a single `read_screen()` RPC method
-- [ ] Add "Read Screen" button in main UI
+
+**Pipeline orchestration:**
+- [ ] `read_screen()` RPC: capture → `_run_gcp_worker("ocr", ...)` → `_run_gcp_worker("tts", ...)` → `_start_playback()`
+- [ ] Each step checks for cancellation flag (`self._pipeline_cancelled`) before proceeding
+- [ ] `stop_pipeline()` RPC: sets cancel flag + kills any running subprocess/mpv
 - [ ] Loading/progress states in UI during pipeline execution
-- [ ] Error handling and user feedback for each pipeline stage
-- [ ] Stop button to interrupt audio playback
+
+**Subprocess lifecycle guarantees:**
+- [ ] `_unload()` kills all child processes: any in-flight `gcp_worker.py` (via stored Popen if we ever switch from `run()`), any running mpv
+- [ ] Temp file cleanup in `_unload()` — sweep any `dcr_*.png`/`dcr_*.mp3` from `/tmp`
+- [ ] No Popen without corresponding `wait()` — the golden rule against zombies
 
 ### Phase 7: L4 Button Trigger `[NOT STARTED]`
 - [ ] Implement hidraw-based button monitoring in Python backend (background thread)
@@ -133,7 +169,7 @@ Frontend (TypeScript/React)         Backend (Python)
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Architecture | Single Decky plugin (no separate service) | Simpler deployment and lifecycle management |
+| Architecture | Single Decky plugin, GCP calls via subprocess | main.py runs under Decky's embedded Python; gcp_worker.py runs under system Python (`/usr/bin/python3`) with `py_modules/` on PYTHONPATH to access google-cloud libs |
 | Screen capture | GStreamer + PipeWire | Native to Steam Deck, hardware-accelerated |
 | Audio playback | mpv (preferred) or ffplay | Available on Steam Deck, supports MP3 |
 | GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
@@ -147,7 +183,8 @@ Frontend (TypeScript/React)         Backend (Python)
 decky-cloud-reader/
 ├── src/
 │   └── index.tsx              # Plugin entry, all UI (sections, file browser)
-├── main.py                    # Python backend (all logic integrated)
+├── main.py                    # Python backend (lifecycle, RPC, subprocess launcher)
+├── gcp_worker.py              # GCP subprocess (OCR + TTS, runs under system Python)
 ├── requirements.txt           # Python dependencies
 ├── package.json
 ├── plugin.json

@@ -12,23 +12,30 @@
 #   - Python .so files (compiled C extensions) must match the target architecture
 #   - Our dev machine is ARM (M1 Mac), so we cross-compile via Docker
 #
-# We use node:20-slim (Debian-based) which matches the -gnu rollup binary.
-# Python 3.13 is installed from Debian repos to match the Steam Deck's version.
+# We use python:3.13-slim (Debian-based) as the base image because:
+#   - Python 3.13 matches the Steam Deck's system Python exactly
+#   - C extensions (.so files) like grpc's cygrpc are version-specific
+#     (e.g., cygrpc.cpython-313-x86_64-linux-gnu.so)
+#   - Debian base means rollup's @rollup/rollup-linux-x64-gnu works
+# Node.js is installed on top for the frontend build (pnpm + Rollup).
 #
 # The final output is a zip file at /app/output/decky-cloud-reader.zip
 # containing the complete plugin directory ready for Decky Loader.
 # =============================================================================
 
 # Force x86_64 platform even on ARM Macs (cross-compilation via QEMU/Rosetta)
-FROM --platform=linux/amd64 node:20-slim
+FROM --platform=linux/amd64 python:3.13-slim
 
 # ---------------------------------------------------------------------------
 # Install system dependencies
 # ---------------------------------------------------------------------------
-# - python3 + python3-pip: needed to install Python packages into py_modules/
+# - curl: needed to install Node.js via nodesource
 # - zip: needed to create the final plugin zip archive
+# - Node.js 20: needed for pnpm + Rollup (frontend build)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv zip && \
+    apt-get install -y --no-install-recommends curl zip ca-certificates && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 # Install pnpm globally — it's the package manager used by Decky plugins.
@@ -57,13 +64,14 @@ RUN pnpm install --frozen-lockfile || pnpm install
 # and handle the "no file" case in the RUN step.
 COPY requirements.txt* ./
 
-# Install Python packages into py_modules/ directory.
+# Install Python packages into py_modules/ directory using Python 3.13's pip.
+# This ensures C extensions are compiled for cpython-313, matching the Deck.
 # --target: installs packages into a specific directory (not system-wide),
 #   so we can bundle them with the plugin.
 # --no-cache-dir: don't store pip's download cache (smaller image).
 # If requirements.txt doesn't exist, skip this step gracefully.
 RUN if [ -f requirements.txt ]; then \
-      pip3 install --target=/app/py_modules --no-cache-dir --break-system-packages -r requirements.txt; \
+      pip3 install --target=/app/py_modules --no-cache-dir -r requirements.txt; \
     else \
       echo "No requirements.txt found, skipping Python dependency install"; \
     fi
@@ -91,12 +99,14 @@ RUN pnpm build
 #   ├── plugin.json          ← Plugin metadata (name, author, flags)
 #   ├── package.json         ← Version info (read by Decky Loader)
 #   ├── main.py              ← Python backend
+#   ├── gcp_worker.py        ← GCP subprocess (OCR + TTS)
 #   └── py_modules/          ← Python dependencies
 RUN mkdir -p /app/output/decky-cloud-reader/dist && \
     cp /app/dist/index.js /app/output/decky-cloud-reader/dist/ && \
     cp /app/plugin.json /app/output/decky-cloud-reader/ && \
     cp /app/package.json /app/output/decky-cloud-reader/ && \
     cp /app/main.py /app/output/decky-cloud-reader/ && \
+    cp /app/gcp_worker.py /app/output/decky-cloud-reader/ && \
     cp -r /app/py_modules /app/output/decky-cloud-reader/ && \
     cd /app/output && \
     zip -r decky-cloud-reader.zip decky-cloud-reader/

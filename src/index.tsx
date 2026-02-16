@@ -67,6 +67,15 @@ interface CaptureResult {
   message: string;     // Human-readable success or error message
 }
 
+// Response from the perform_ocr() backend RPC
+interface OcrResult {
+  success: boolean;    // true if OCR completed successfully
+  text: string;        // Detected text (empty string if none found)
+  char_count: number;  // Number of characters detected
+  line_count: number;  // Number of lines detected
+  message: string;     // Human-readable success or error message
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   voice_id: string;        // TTS voice (Phase 5)
@@ -102,6 +111,9 @@ const clearCredentials = callable<[], boolean>("clear_credentials");
 
 // Capture a screenshot via GStreamer + PipeWire
 const captureScreenshot = callable<[], CaptureResult>("capture_screenshot");
+
+// Perform OCR on a fresh screenshot (capture + Cloud Vision API)
+const performOcr = callable<[], OcrResult>("perform_ocr");
 
 
 // =============================================================================
@@ -307,6 +319,16 @@ function Content() {
   // Whether a capture is currently in progress (disables the button)
   const [isCapturing, setIsCapturing] = useState(false);
 
+  // --- OCR state ---
+  // Status message shown after an OCR attempt (success or error)
+  const [ocrMessage, setOcrMessage] = useState<string | null>(null);
+  // Whether the OCR message is a success (green) or error (red)
+  const [ocrIsSuccess, setOcrIsSuccess] = useState(false);
+  // Whether OCR is currently running (disables the button)
+  const [isOcrRunning, setIsOcrRunning] = useState(false);
+  // The detected text from the last OCR run (shown in scrollable area)
+  const [ocrText, setOcrText] = useState<string | null>(null);
+
   // Load settings from the backend when the component first mounts.
   // Also reload when returning from file browser mode.
   useEffect(() => {
@@ -366,6 +388,28 @@ function Content() {
     setCaptureIsSuccess(result.success);
     // Auto-clear the status message after 5 seconds
     setTimeout(() => setCaptureMessage(null), 5000);
+  };
+
+  // Handle the "Test OCR" button press.
+  // Captures a screenshot, runs it through Cloud Vision OCR, and displays the result.
+  const handleTestOcr = async () => {
+    setIsOcrRunning(true);
+    setOcrMessage(null);
+    setOcrText(null);  // Clear previous text
+
+    const result = await performOcr();
+    setIsOcrRunning(false);
+    setOcrMessage(result.message);
+    setOcrIsSuccess(result.success);
+
+    // Show detected text if any was found
+    if (result.text) {
+      setOcrText(result.text);
+    }
+
+    // Auto-clear the status message after 8 seconds (longer than capture
+    // because OCR results are more important to read)
+    setTimeout(() => setOcrMessage(null), 8000);
   };
 
   // --- File browser mode ---
@@ -506,6 +550,67 @@ function Content() {
             {isCapturing ? "Capturing..." : "Test Capture"}
           </ButtonItem>
         </PanelSectionRow>
+      </PanelSection>
+
+      {/* ---- OCR Section ---- */}
+      <PanelSection title="OCR (Text Detection)">
+        {/* Status message from the last OCR attempt */}
+        {ocrMessage && (
+          <PanelSectionRow>
+            <div style={{
+              color: ocrIsSuccess ? "#2ecc71" : "#e74c3c",
+              padding: "4px 0",
+              fontSize: "13px"
+            }}>
+              {ocrMessage}
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Test OCR button — captures screenshot + runs Cloud Vision OCR */}
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={handleTestOcr}
+            disabled={isOcrRunning || !settings.is_configured}
+          >
+            {isOcrRunning ? "Running OCR..." : "Test OCR"}
+          </ButtonItem>
+        </PanelSectionRow>
+
+        {/* Hint when credentials aren't configured */}
+        {!settings.is_configured && (
+          <PanelSectionRow>
+            <div style={{
+              color: "#b8bcbf",
+              fontSize: "12px",
+              padding: "4px 0"
+            }}>
+              Load GCP credentials above to enable OCR
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Scrollable text display — shows detected text from the last OCR run */}
+        {ocrText && (
+          <PanelSectionRow>
+            <div style={{
+              maxHeight: "200px",
+              overflow: "auto",
+              backgroundColor: "#1a1a2e",
+              borderRadius: "4px",
+              padding: "8px",
+              fontSize: "12px",
+              lineHeight: "1.4",
+              whiteSpace: "pre-wrap",    // Preserve line breaks from OCR
+              wordBreak: "break-word",   // Break long words to prevent overflow
+              color: "#e0e0e0",
+              width: "100%",
+            }}>
+              {ocrText}
+            </div>
+          </PanelSectionRow>
+        )}
       </PanelSection>
     </>
   );

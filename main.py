@@ -41,6 +41,14 @@ LOG = "[DCR]"
 # the pipeline typically completes well under this on Steam Deck.
 CAPTURE_TIMEOUT = 2  # seconds
 
+# Timeout for the OCR subprocess (gcp_worker.py). This covers:
+#   - System Python startup and import time (~2-3s first run, cached after)
+#   - Image resize if needed (~1-2s)
+#   - Vision API call + network round trip (~5-15s)
+#   - Up to 3 retries with backoff on transient errors (~3s extra)
+# 45 seconds gives plenty of headroom even on a slow connection.
+OCR_TIMEOUT = 45  # seconds
+
 # Thread pool for running blocking subprocess calls (like gst-launch-1.0)
 # without blocking the async event loop. Only 1 worker needed since we
 # only ever capture one screenshot at a time.
@@ -195,6 +203,58 @@ class Plugin:
         self._last_capture_bytes = None
 
         decky.logger.info(f"{LOG} settings initialized")
+
+        # -----------------------------------------------------------------
+        # Discover system Python for running gcp_worker.py
+        # -----------------------------------------------------------------
+        # Decky's embedded Python can't load google-cloud native libs (C
+        # extensions). We need the system Python (/usr/bin/python3) to run
+        # gcp_worker.py as a subprocess. Here we find the first working
+        # Python from a list of candidates and store the path for later use.
+        #
+        # We DON'T crash if not found — OCR/TTS will fail gracefully with
+        # a clear error message when the user tries to use them.
+        self._system_python = None
+        python_candidates = [
+            "/usr/bin/python3",
+            "/usr/bin/python3.13",
+            "/usr/bin/python3.12",
+            "/usr/bin/python3.11",
+        ]
+        for candidate in python_candidates:
+            try:
+                result = subprocess.run(
+                    [candidate, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    version = result.stdout.strip() or result.stderr.strip()
+                    self._system_python = candidate
+                    decky.logger.info(f"{LOG} system Python found: {candidate} ({version})")
+                    break
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+
+        if not self._system_python:
+            decky.logger.warning(f"{LOG} no system Python found — OCR/TTS will not work")
+
+        # Resolve paths to gcp_worker.py and py_modules/ relative to the
+        # plugin directory. These are set at install time by the Dockerfile.
+        plugin_dir = decky.DECKY_PLUGIN_DIR
+        self._gcp_worker_path = os.path.join(plugin_dir, "gcp_worker.py")
+        self._py_modules_path = os.path.join(plugin_dir, "py_modules")
+
+        if os.path.exists(self._gcp_worker_path):
+            decky.logger.info(f"{LOG} gcp_worker.py found: {self._gcp_worker_path}")
+        else:
+            decky.logger.warning(f"{LOG} gcp_worker.py NOT found at {self._gcp_worker_path}")
+
+        if os.path.isdir(self._py_modules_path):
+            decky.logger.info(f"{LOG} py_modules found: {self._py_modules_path}")
+        else:
+            decky.logger.warning(f"{LOG} py_modules NOT found at {self._py_modules_path}")
 
     # =========================================================================
     # Lifecycle: _unload()
@@ -389,6 +449,219 @@ class Plugin:
                 "file_size": 0,
                 "message": result["error"],
             }
+
+    # =========================================================================
+    # Subprocess helper: _run_gcp_worker(action, args_list, timeout)
+    # =========================================================================
+    # Runs gcp_worker.py as a subprocess under system Python. This is the
+    # generic launcher used by OCR (and later TTS in Phase 5).
+    #
+    # The subprocess gets:
+    #   - PYTHONPATH pointing to py_modules/ (so it can import google-cloud libs)
+    #   - PYTHONNOUSERSITE=1 (ignore user site-packages to avoid conflicts)
+    #   - GCP_CREDENTIALS_BASE64 via env var (not CLI args — avoids ps exposure)
+    #
+    # Returns a dict parsed from the subprocess's JSON stdout output.
+    # On any error (timeout, missing Python, bad JSON), returns {success: False, message: "..."}.
+    def _run_gcp_worker(self, action, args_list, timeout=OCR_TIMEOUT):
+        """
+        Run gcp_worker.py with the given action and arguments.
+
+        Args:
+            action: The action to perform (e.g., "ocr", "tts").
+            args_list: List of additional CLI arguments (e.g., ["/tmp/image.png"]).
+            timeout: Maximum time to wait for the subprocess (seconds).
+
+        Returns:
+            Dict parsed from the subprocess's JSON stdout. On error, returns
+            {"success": False, "message": "<error description>"}.
+        """
+        # Pre-flight checks: make sure we have the pieces we need
+        if not self._system_python:
+            return {"success": False, "message": "System Python not found — cannot run GCP worker"}
+
+        if not os.path.exists(self._gcp_worker_path):
+            return {"success": False, "message": f"gcp_worker.py not found at {self._gcp_worker_path}"}
+
+        # Build the command: [/usr/bin/python3, /path/to/gcp_worker.py, action, ...args]
+        cmd = [self._system_python, self._gcp_worker_path, action] + args_list
+
+        # Build the environment for the subprocess
+        env = os.environ.copy()
+        # Tell Python where to find google-cloud packages (installed in py_modules/)
+        env["PYTHONPATH"] = self._py_modules_path
+        # Prevent system Python from loading user-installed packages that might conflict
+        env["PYTHONNOUSERSITE"] = "1"
+        # Pass GCP credentials securely via environment variable
+        creds_b64 = self.settings.get("gcp_credentials_base64", "")
+        if creds_b64:
+            env["GCP_CREDENTIALS_BASE64"] = creds_b64
+
+        decky.logger.info(f"{LOG} running gcp_worker: {action} {' '.join(args_list)}")
+        decky.logger.debug(f"{LOG} gcp_worker command: {' '.join(cmd)}")
+
+        try:
+            # subprocess.run() is used (not Popen) because this is a
+            # request-response call: we send input, wait for output, done.
+            # run() automatically waits for the process to exit, so no zombies.
+            result = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,  # Capture both stdout (JSON) and stderr (logs)
+                text=True,            # Decode output as UTF-8 strings
+                timeout=timeout,
+            )
+
+            # Log stderr from the worker (diagnostic messages, not errors necessarily)
+            if result.stderr:
+                for line in result.stderr.strip().split("\n"):
+                    decky.logger.debug(f"{LOG} worker: {line}")
+
+            # Parse the JSON result from stdout
+            if not result.stdout.strip():
+                decky.logger.error(f"{LOG} gcp_worker produced no stdout (exit code {result.returncode})")
+                return {"success": False, "message": "GCP worker produced no output"}
+
+            try:
+                parsed = json.loads(result.stdout.strip())
+                return parsed
+            except json.JSONDecodeError as e:
+                decky.logger.error(f"{LOG} gcp_worker output not valid JSON: {e}")
+                decky.logger.error(f"{LOG} raw stdout: {result.stdout[:500]}")
+                return {"success": False, "message": f"GCP worker output parse error: {e}"}
+
+        except subprocess.TimeoutExpired:
+            decky.logger.error(f"{LOG} gcp_worker timed out after {timeout}s")
+            return {"success": False, "message": f"GCP worker timed out after {timeout} seconds"}
+
+        except FileNotFoundError:
+            decky.logger.error(f"{LOG} system Python not found at {self._system_python}")
+            return {"success": False, "message": f"System Python not found at {self._system_python}"}
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} gcp_worker error: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {"success": False, "message": f"GCP worker error: {e}"}
+
+    # =========================================================================
+    # OCR pipeline: _perform_ocr_sync() (internal helper)
+    # =========================================================================
+    # Synchronous method that captures a screenshot and runs OCR on it.
+    # Must be run in a thread pool (not on the async event loop) because
+    # both _capture_screenshot_sync() and _run_gcp_worker() are blocking.
+    #
+    # Pipeline: capture screenshot → write to temp file → run gcp_worker OCR → return result
+    def _perform_ocr_sync(self):
+        """
+        Capture a screenshot and perform OCR on it.
+
+        Returns:
+            Dict with keys: success, text, char_count, line_count, message.
+        """
+        # Step 1: Check that credentials are configured
+        creds_b64 = self.settings.get("gcp_credentials_base64", "")
+        if not creds_b64:
+            return {
+                "success": False,
+                "text": "",
+                "char_count": 0,
+                "line_count": 0,
+                "message": "GCP credentials not configured",
+            }
+
+        # Step 2: Capture a fresh screenshot
+        decky.logger.info(f"{LOG} OCR pipeline: capturing screenshot...")
+        capture_result = self._capture_screenshot_sync()
+
+        if not capture_result["success"]:
+            return {
+                "success": False,
+                "text": "",
+                "char_count": 0,
+                "line_count": 0,
+                "message": f"Screenshot failed: {capture_result['error']}",
+            }
+
+        image_bytes = capture_result["image_bytes"]
+        decky.logger.info(f"{LOG} OCR pipeline: screenshot captured ({len(image_bytes):,} bytes)")
+
+        # Step 3: Write the image to a temp file for the subprocess to read.
+        # We use a temp file because passing large binary data via stdin/pipe
+        # is more complex and error-prone than a file path.
+        fd = None
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="dcr_ocr_")
+            # Write image bytes to the temp file using the file descriptor
+            os.write(fd, image_bytes)
+            os.close(fd)
+            fd = None  # Mark as closed so finally doesn't double-close
+
+            decky.logger.info(f"{LOG} OCR pipeline: wrote temp image to {tmp_path}")
+
+            # Step 4: Run the GCP worker subprocess to perform OCR
+            result = self._run_gcp_worker("ocr", [tmp_path])
+
+            # Ensure the result has all expected keys (the worker should always
+            # include these, but be defensive)
+            return {
+                "success": result.get("success", False),
+                "text": result.get("text", ""),
+                "char_count": result.get("char_count", 0),
+                "line_count": result.get("line_count", 0),
+                "message": result.get("message", "Unknown error"),
+            }
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} OCR pipeline error: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "text": "",
+                "char_count": 0,
+                "line_count": 0,
+                "message": f"OCR pipeline error: {e}",
+            }
+        finally:
+            # Clean up: close the file descriptor if still open
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            # Clean up: remove the temp file
+            if tmp_path:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                        decky.logger.debug(f"{LOG} cleaned up OCR temp file: {tmp_path}")
+                except OSError as e:
+                    decky.logger.warning(f"{LOG} failed to clean up {tmp_path}: {e}")
+
+    # =========================================================================
+    # RPC: perform_ocr()
+    # =========================================================================
+    # Async wrapper around _perform_ocr_sync(). Runs the blocking OCR pipeline
+    # in a thread pool so it doesn't freeze the event loop.
+    #
+    # Returns a dict to the frontend:
+    #   {success: bool, text: str, char_count: int, line_count: int, message: str}
+    #
+    # Called from the frontend via:
+    #   const performOcr = callable<[], OcrResult>("perform_ocr");
+    async def perform_ocr(self):
+        decky.logger.info(f"{LOG} perform_ocr() called")
+
+        # Run the blocking OCR pipeline in the thread pool executor.
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_capture_executor, self._perform_ocr_sync)
+
+        if result["success"]:
+            decky.logger.info(f"{LOG} OCR complete: {result['char_count']} chars, {result['line_count']} lines")
+        else:
+            decky.logger.warning(f"{LOG} OCR failed: {result['message']}")
+
+        return result
 
     # =========================================================================
     # RPC: get_settings()
