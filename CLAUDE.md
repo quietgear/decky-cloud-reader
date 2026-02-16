@@ -75,11 +75,11 @@ Frontend (TypeScript/React)         Backend (Python)
 - [x] Settings UI with Enabled/Debug toggles, credential status display
 - [x] Build and deploy to verify Python dependencies install correctly
 
-### Phase 3: Screen Capture `[NOT STARTED]`
-- [ ] Implement GStreamer/PipeWire screenshot capture in Python backend
-- [ ] Add `capture_screenshot()` RPC method
-- [ ] Test screenshot capture on Steam Deck (verify GStreamer + PipeWire work)
-- [ ] Add "Test Capture" button in UI to verify
+### Phase 3: Screen Capture `[DONE]`
+- [x] Implement GStreamer/PipeWire screenshot capture in Python backend
+- [x] Add `capture_screenshot()` RPC method
+- [x] Test screenshot capture on Steam Deck (verify GStreamer + PipeWire work)
+- [x] Add "Test Capture" button in UI to verify
 
 ### Phase 4: OCR — Cloud Vision `[NOT STARTED]`
 - [ ] Implement Cloud Vision OCR client in backend (async, with retry)

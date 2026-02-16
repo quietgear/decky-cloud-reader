@@ -60,6 +60,13 @@ interface CredentialResult {
   project_id: string;  // GCP project ID (empty on error)
 }
 
+// Response from the capture_screenshot() backend RPC
+interface CaptureResult {
+  success: boolean;    // true if screenshot was captured successfully
+  file_size: number;   // Size of the captured PNG in bytes
+  message: string;     // Human-readable success or error message
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   voice_id: string;        // TTS voice (Phase 5)
@@ -92,6 +99,9 @@ const loadCredentialsFile = callable<[string], CredentialResult>("load_credentia
 
 // Clear stored GCP credentials
 const clearCredentials = callable<[], boolean>("clear_credentials");
+
+// Capture a screenshot via GStreamer + PipeWire
+const captureScreenshot = callable<[], CaptureResult>("capture_screenshot");
 
 
 // =============================================================================
@@ -289,6 +299,14 @@ function Content() {
   // Whether a credential file is currently being loaded
   const [loadingCreds, setLoadingCreds] = useState(false);
 
+  // --- Screen capture state ---
+  // Status message shown after a capture attempt (success or error)
+  const [captureMessage, setCaptureMessage] = useState<string | null>(null);
+  // Whether the capture message is a success (green) or error (red)
+  const [captureIsSuccess, setCaptureIsSuccess] = useState(false);
+  // Whether a capture is currently in progress (disables the button)
+  const [isCapturing, setIsCapturing] = useState(false);
+
   // Load settings from the backend when the component first mounts.
   // Also reload when returning from file browser mode.
   useEffect(() => {
@@ -335,6 +353,19 @@ function Content() {
     if (settings) {
       setSettings({ ...settings, [key]: value });
     }
+  };
+
+  // Handle the "Test Capture" button press.
+  // Calls the backend to capture a screenshot and shows the result.
+  const handleTestCapture = async () => {
+    setIsCapturing(true);
+    setCaptureMessage(null);
+    const result = await captureScreenshot();
+    setIsCapturing(false);
+    setCaptureMessage(result.message);
+    setCaptureIsSuccess(result.success);
+    // Auto-clear the status message after 5 seconds
+    setTimeout(() => setCaptureMessage(null), 5000);
   };
 
   // --- File browser mode ---
@@ -447,6 +478,33 @@ function Content() {
             checked={settings.debug}
             onChange={(value) => handleToggle("debug", value)}
           />
+        </PanelSectionRow>
+      </PanelSection>
+
+      {/* ---- Screen Capture Section ---- */}
+      <PanelSection title="Screen Capture">
+        {/* Status message from the last capture attempt */}
+        {captureMessage && (
+          <PanelSectionRow>
+            <div style={{
+              color: captureIsSuccess ? "#2ecc71" : "#e74c3c",
+              padding: "4px 0",
+              fontSize: "13px"
+            }}>
+              {captureMessage}
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Test Capture button — triggers a screenshot and shows the result */}
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={handleTestCapture}
+            disabled={isCapturing}
+          >
+            {isCapturing ? "Capturing..." : "Test Capture"}
+          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
     </>

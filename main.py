@@ -23,6 +23,11 @@ import os
 import json
 import base64
 import traceback
+import subprocess
+import shutil
+import tempfile
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 import decky
 
@@ -31,6 +36,15 @@ import decky
 # In the journal, lines will look like: "[DCR] backend loaded"
 # Filter with: journalctl -u plugin_loader -f | grep DCR
 LOG = "[DCR]"
+
+# Timeout for the GStreamer capture subprocess. 2 seconds is sufficient —
+# the pipeline typically completes well under this on Steam Deck.
+CAPTURE_TIMEOUT = 2  # seconds
+
+# Thread pool for running blocking subprocess calls (like gst-launch-1.0)
+# without blocking the async event loop. Only 1 worker needed since we
+# only ever capture one screenshot at a time.
+_capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dcr_capture")
 
 
 # =============================================================================
@@ -175,6 +189,11 @@ class Plugin:
                 self.settings.set(key, default_value)
                 decky.logger.debug(f"{LOG} backfilled default: {key}")
 
+        # Storage for the last captured screenshot bytes. This is set by
+        # capture_screenshot() and will be consumed by the OCR pipeline in
+        # Phase 4. Keeping it on `self` avoids writing to disk unnecessarily.
+        self._last_capture_bytes = None
+
         decky.logger.info(f"{LOG} settings initialized")
 
     # =========================================================================
@@ -183,6 +202,10 @@ class Plugin:
     # Called when the plugin is stopped (e.g., Decky Loader restarts, or the
     # user disables the plugin). The plugin is NOT removed from disk.
     async def _unload(self):
+        # Shut down the thread pool executor. wait=False so we don't block
+        # the unload if a capture is somehow still running.
+        _capture_executor.shutdown(wait=False)
+        decky.logger.info(f"{LOG} capture executor shut down")
         decky.logger.info(f"{LOG} backend unloaded")
 
     # =========================================================================
@@ -191,6 +214,181 @@ class Plugin:
     # Called after _unload() when the plugin is fully removed from disk.
     async def _uninstall(self):
         decky.logger.info(f"{LOG} backend uninstalled")
+
+    # =========================================================================
+    # Screen capture: _capture_screenshot_sync() (internal helper)
+    # =========================================================================
+    # This is a SYNCHRONOUS method that runs the GStreamer pipeline to capture
+    # a single screenshot from PipeWire. It must be run in a thread pool (not
+    # on the async event loop) because subprocess.run() blocks.
+    #
+    # The GStreamer pipeline:
+    #   pipewiresrc  — reads frames from PipeWire (the Steam Deck's display server)
+    #   videoconvert — converts pixel formats (PipeWire may output various formats)
+    #   pngenc       — encodes the frame as PNG (snapshot=true = only last frame)
+    #   filesink     — writes the PNG to a temp file
+    #
+    # We use num-buffers=5 instead of 1 because the first few frames from
+    # PipeWire can be blank or invalid. By capturing 5 frames and using
+    # snapshot=true on pngenc, we reliably get a valid screenshot.
+    # This pattern comes from the Decky-Translator reference plugin.
+    def _capture_screenshot_sync(self):
+        """
+        Capture a screenshot via GStreamer + PipeWire. Returns a dict:
+          {success: bool, image_bytes: bytes|None, file_size: int, error: str|None}
+        """
+        # Step 1: Find gst-launch-1.0 on the system PATH.
+        # On Steam Deck it's at /usr/bin/gst-launch-1.0 (pre-installed).
+        gst_path = shutil.which("gst-launch-1.0")
+        if not gst_path:
+            return {
+                "success": False,
+                "image_bytes": None,
+                "file_size": 0,
+                "error": "gst-launch-1.0 not found on PATH",
+            }
+
+        # Step 2: Create a secure temp file for the screenshot output.
+        # mkstemp returns (file_descriptor, path). We close the fd immediately
+        # since GStreamer will write to the path directly.
+        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="dcr_capture_")
+        os.close(fd)
+
+        try:
+            # Step 3: Build the GStreamer pipeline command.
+            # -e  = send EOS (end-of-stream) on interrupt for clean shutdown
+            cmd = [
+                gst_path, "-e",
+                "pipewiresrc", "do-timestamp=true", "num-buffers=5",
+                "!", "videoconvert",
+                "!", "pngenc", "snapshot=true",
+                "!", "filesink", f"location={tmp_path}",
+            ]
+
+            # Step 4: Set environment variables required for PipeWire access.
+            # XDG_RUNTIME_DIR tells PipeWire where its socket is.
+            # XDG_SESSION_TYPE tells it we're running under Wayland.
+            env = os.environ.copy()
+            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+            env["XDG_SESSION_TYPE"] = "wayland"
+
+            decky.logger.info(f"{LOG} capturing screenshot to {tmp_path}")
+            decky.logger.debug(f"{LOG} capture command: {' '.join(cmd)}")
+
+            # Step 5: Run the GStreamer pipeline as a subprocess.
+            # capture_output=True captures stdout/stderr for error reporting.
+            result = subprocess.run(
+                cmd,
+                env=env,
+                timeout=CAPTURE_TIMEOUT,
+                capture_output=True,
+            )
+
+            # Step 6: Check if the command succeeded (exit code 0).
+            if result.returncode != 0:
+                stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                decky.logger.error(f"{LOG} gst-launch failed (code {result.returncode}): {stderr}")
+                return {
+                    "success": False,
+                    "image_bytes": None,
+                    "file_size": 0,
+                    "error": f"GStreamer failed (code {result.returncode}): {stderr[:200]}",
+                }
+
+            # Step 7: Read and validate the output file.
+            if not os.path.exists(tmp_path):
+                return {
+                    "success": False,
+                    "image_bytes": None,
+                    "file_size": 0,
+                    "error": "Screenshot file was not created",
+                }
+
+            file_size = os.path.getsize(tmp_path)
+            if file_size == 0:
+                return {
+                    "success": False,
+                    "image_bytes": None,
+                    "file_size": 0,
+                    "error": "Screenshot file is empty (0 bytes)",
+                }
+
+            # Step 8: Read the PNG bytes into memory.
+            with open(tmp_path, "rb") as f:
+                image_bytes = f.read()
+
+            decky.logger.info(f"{LOG} screenshot captured: {file_size} bytes")
+            return {
+                "success": True,
+                "image_bytes": image_bytes,
+                "file_size": file_size,
+                "error": None,
+            }
+
+        except subprocess.TimeoutExpired:
+            decky.logger.error(f"{LOG} capture timed out after {CAPTURE_TIMEOUT}s")
+            return {
+                "success": False,
+                "image_bytes": None,
+                "file_size": 0,
+                "error": f"Capture timed out after {CAPTURE_TIMEOUT} seconds",
+            }
+        except Exception as e:
+            decky.logger.error(f"{LOG} capture error: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "image_bytes": None,
+                "file_size": 0,
+                "error": str(e),
+            }
+        finally:
+            # Always clean up the temp file, even on error.
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                    decky.logger.debug(f"{LOG} cleaned up temp file: {tmp_path}")
+            except OSError as e:
+                decky.logger.warning(f"{LOG} failed to clean up {tmp_path}: {e}")
+
+    # =========================================================================
+    # RPC: capture_screenshot()
+    # =========================================================================
+    # Async wrapper around _capture_screenshot_sync(). Runs the blocking
+    # GStreamer subprocess in a thread pool so it doesn't freeze the event loop.
+    #
+    # Returns a dict to the frontend:
+    #   {success: bool, file_size: int, message: str}
+    #
+    # Also stores the captured image bytes on self._last_capture_bytes for
+    # use by the OCR pipeline in Phase 4.
+    #
+    # Called from the frontend via:
+    #   const captureScreenshot = callable<[], CaptureResult>("capture_screenshot");
+    async def capture_screenshot(self):
+        decky.logger.info(f"{LOG} capture_screenshot() called")
+
+        # Run the blocking capture in the thread pool executor.
+        # asyncio.get_event_loop().run_in_executor() schedules the sync function
+        # on the executor and returns an awaitable future.
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_capture_executor, self._capture_screenshot_sync)
+
+        if result["success"]:
+            # Store the image bytes for later use by OCR (Phase 4)
+            self._last_capture_bytes = result["image_bytes"]
+            return {
+                "success": True,
+                "file_size": result["file_size"],
+                "message": f"Screenshot captured: {result['file_size']:,} bytes",
+            }
+        else:
+            self._last_capture_bytes = None
+            return {
+                "success": False,
+                "file_size": 0,
+                "message": result["error"],
+            }
 
     # =========================================================================
     # RPC: get_settings()
