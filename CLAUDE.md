@@ -49,9 +49,10 @@ Everything runs inside the standard Decky plugin process — no separate service
 Frontend (TypeScript/React)         Backend (Python)
 ┌─────────────────────────┐        ┌──────────────────────────────┐
 │ Decky Panel UI          │  RPC   │ main.py (Plugin class)       │
-│  - Credentials section  │◄──────►│  - GCP credentials mgmt     │
+│  - Read Screen (primary)│◄──────►│  - Pipeline orchestration    │
+│  - Credentials section  │        │  - GCP credentials mgmt     │
 │  - Settings section     │        │  - Screen capture (GStreamer)│
-│  - Status/controls      │        │  - Subprocess launcher       │
+│  - OCR/TTS controls     │        │  - Subprocess launcher       │
 │                         │        │  - Audio playback (Popen)    │
 │ Global Overlay          │        │  - L4 button monitor (hidraw)│
 │  - OCR text display     │        │                              │
@@ -189,6 +190,7 @@ Frontend (TypeScript/React)         Backend (Python)
 | GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
 | Button input | Hidraw direct device reading | Works in background without opening UI |
 | Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |
+| Pipeline cancellation | `threading.Event` checked between steps | Subprocess timeouts are bounded (45s/30s); killing mid-subprocess adds complexity for marginal benefit |
 | Python deps | Bundled in py_modules/ via Docker build | Runs on Steam Deck without internet |
 
 ## File Structure
@@ -197,7 +199,7 @@ Frontend (TypeScript/React)         Backend (Python)
 decky-cloud-reader/
 ├── src/
 │   └── index.tsx              # Plugin entry, all UI (sections, file browser)
-├── main.py                    # Python backend (lifecycle, RPC, subprocess launcher)
+├── main.py                    # Python backend (lifecycle, RPC, pipeline, subprocess launcher)
 ├── gcp_worker.py              # GCP subprocess (OCR + TTS, runs under system Python)
 ├── requirements.txt           # Python dependencies
 ├── package.json
