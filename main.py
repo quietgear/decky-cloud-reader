@@ -102,7 +102,8 @@ DEFAULT_SETTINGS = {
     # TTS volume level 0-100 (used in Phase 5).
     "volume": 100,
 
-    # Master on/off switch. When False, L4 button trigger does nothing.
+    # Master on/off switch. When False: stops GCP worker + playback,
+    # grays out OCR/TTS buttons, ignores background triggers (button hold).
     "enabled": True,
 
     # When True, extra diagnostic info is logged (useful for troubleshooting).
@@ -406,6 +407,11 @@ class Plugin:
             self._handle_button_trigger(), self._event_loop
         )
 
+    @property
+    def _is_enabled(self):
+        """Check if the plugin's master switch is on."""
+        return self.settings.get("enabled", True)
+
     async def _handle_button_trigger(self):
         """
         Runs on the event loop — guards and triggers the Read Screen pipeline.
@@ -419,7 +425,7 @@ class Plugin:
         (capture → OCR → TTS → playback).
         """
         # Guard: plugin must be enabled
-        if not self.settings.get("enabled", True):
+        if not self._is_enabled:
             decky.logger.debug(f"{LOG} button trigger: plugin disabled, ignoring")
             return
 
@@ -1820,6 +1826,20 @@ class Plugin:
             else:
                 decky.logger.info(f"{LOG} debug logging disabled")
                 decky.logger.setLevel(logging.INFO)
+
+        elif key == "enabled":
+            # When the master switch is toggled, actively manage background
+            # resources. Disabling stops any running pipeline, kills audio
+            # playback, and shuts down the GCP worker subprocess (freeing
+            # memory and gRPC connections). Enabling is a no-op — the worker
+            # will lazy-start on the next request via _send_to_worker().
+            if not value:
+                decky.logger.info(f"{LOG} plugin disabled — stopping background activity")
+                self._pipeline_cancel.set()
+                self._stop_playback()
+                self._stop_worker()
+            else:
+                decky.logger.info(f"{LOG} plugin enabled")
 
         return result
 

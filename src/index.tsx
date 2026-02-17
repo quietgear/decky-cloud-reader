@@ -830,7 +830,7 @@ function Content() {
             <ButtonItem
               layout="below"
               onClick={handleReadScreen}
-              disabled={!settings.is_configured}
+              disabled={!settings.is_configured || !settings.enabled}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
                 <FaBook size={14} />
@@ -1013,7 +1013,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Enabled"
-            description="Master switch for the plugin"
+            description="Master switch — disables triggers and OCR/TTS"
             checked={settings.enabled}
             onChange={(value) => handleToggle("enabled", value)}
           />
@@ -1077,7 +1077,7 @@ function Content() {
           <ButtonItem
             layout="below"
             onClick={handleTestOcr}
-            disabled={isOcrRunning || !settings.is_configured || isPipelineRunning}
+            disabled={isOcrRunning || !settings.is_configured || isPipelineRunning || !settings.enabled}
           >
             {isOcrRunning ? "Running OCR..." : "Test OCR"}
           </ButtonItem>
@@ -1214,7 +1214,7 @@ function Content() {
             <ButtonItem
               layout="below"
               onClick={handleReadText}
-              disabled={isTtsRunning || !ocrText || !settings.is_configured || isPipelineRunning}
+              disabled={isTtsRunning || !ocrText || !settings.is_configured || isPipelineRunning || !settings.enabled}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
                 <FaVolumeUp size={14} />

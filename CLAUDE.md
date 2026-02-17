@@ -46,29 +46,31 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles screen capture, worker management, and audio playback. GCP API calls are delegated to a **persistent** `gcp_worker.py` subprocess running under system Python. The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings and status.
 
 ```
-Frontend (TypeScript/React)         Backend (Python)
-┌─────────────────────────┐        ┌──────────────────────────────┐
-│ Decky Panel UI          │  RPC   │ main.py (Plugin class)       │
-│  - Read Screen (primary)│◄──────►│  - Pipeline orchestration    │
-│  - Credentials section  │        │  - GCP credentials mgmt     │
-│  - Settings section     │        │  - Screen capture (GStreamer)│
-│  - Button trigger config│        │  - Worker lifecycle mgmt     │
-│  - OCR/TTS controls     │        │  - Audio playback (Popen)    │
-│                         │        │                              │
-│ Global Overlay          │        │  hidraw_monitor.py (thread)  │
-│  - OCR text display     │        │  - Button hold detection     │
-│                         │        │  - Auto-reconnect            │
-└─────────────────────────┘        │                              │
-                                   │  Persistent subprocess       │
-                                   │  ┌──────────────────────────┐│
-                                   │  │ gcp_worker.py (serve)    ││
-                                   │  │  - stdin/stdout JSON     ││
-                                   │  │  - Pre-init GCP clients  ││
-                                   │  │  - OCR (Cloud Vision)    ││
-                                   │  │  - TTS (Cloud TTS)       ││
-                                   │  │  - Warm gRPC connections ││
-                                   │  └──────────────────────────┘│
-                                   └──────────────────────────────┘
+Frontend (TypeScript/React)           Backend (Python)
+┌──────────────────────────┐         ┌───────────────────────────────┐
+│ Decky Panel UI           │   RPC   │ main.py (Plugin class)        │
+│  - Read Screen (primary) │◄───────►│  - Pipeline orchestration     │
+│  - Credentials section   │         │  - GCP credentials mgmt       │
+│  - Settings section      │         │  - Screen capture (GStreamer) │
+│  - Button trigger config │         │  - Worker lifecycle mgmt      │
+│  - OCR/TTS controls      │         │  - Audio playback (Popen)     │
+│  - Enabled toggle gates  │         │  - Enabled toggle teardown    │
+│    GCP-dependent buttons │         │    (worker + playback + pipe) │
+│                          │         │                               │
+│ Global Overlay           │         │  hidraw_monitor.py (thread)   │
+│  - OCR text display      │         │  - Button hold detection      │
+│                          │         │  - Auto-reconnect             │
+└──────────────────────────┘         │                               │
+                                     │  Persistent subprocess        │
+                                     │  ┌──────────────────────────┐ │
+                                     │  │ gcp_worker.py (serve)    │ │
+                                     │  │  - stdin/stdout JSON     │ │
+                                     │  │  - Pre-init GCP clients  │ │
+                                     │  │  - OCR (Cloud Vision)    │ │
+                                     │  │  - TTS (Cloud TTS)       │ │
+                                     │  │  - Warm gRPC connections │ │
+                                     │  └──────────────────────────┘ │
+                                     └───────────────────────────────┘
 ```
 
 ### Phase 1: Foundation & Build Pipeline `[DONE]`
@@ -224,6 +226,30 @@ Frontend (TypeScript/React)         Backend (Python)
 - [x] Hold time dropdown: 300ms / 500ms / 750ms / 1000ms / 1500ms
 - [x] Status indicator: Connected / Not connected (fetched via `get_button_monitor_status()`)
 - [x] Hint text explaining current configuration
+
+### Phase 7.5: Enhanced Enabled Toggle `[DONE]`
+
+**Problem:** The `enabled` toggle only gated the L4 button trigger callback. Toggling off had no side effects — the GCP worker subprocess stayed alive (holding memory + gRPC connections), audio playback continued, and GCP-dependent UI buttons remained active.
+
+**Solution:** Make the toggle actively manage background resources and gate the UI.
+
+**Backend (main.py):**
+- [x] `_is_enabled` property — centralized check for the master switch, used by background trigger callbacks
+- [x] `_handle_button_trigger()` uses `_is_enabled` instead of inline `settings.get()`
+- [x] `save_setting("enabled", False)` handler: cancels running pipeline (`_pipeline_cancel.set()`), stops audio playback (`_stop_playback()`), shuts down GCP worker (`_stop_worker()`)
+- [x] `save_setting("enabled", True)` handler: logs re-enable (worker lazy-starts on next use)
+- [x] Updated `DEFAULT_SETTINGS` comment to describe full disable behavior
+
+**Frontend (src/index.tsx):**
+- [x] Read Screen button disabled when `!settings.enabled`
+- [x] Test OCR button disabled when `!settings.enabled`
+- [x] Read Text button disabled when `!settings.enabled`
+- [x] Test Capture stays active (local screenshot, no GCP)
+- [x] Toggle description updated: "Master switch — disables triggers and OCR/TTS"
+
+**Design decisions:**
+- Hidraw monitor keeps running when disabled — CPU cost is negligible, avoids HID re-init on re-enable, same pattern planned for future touchscreen monitor
+- Worker lazy-starts on re-enable rather than eagerly — simpler and avoids unnecessary startup if user toggles on/off quickly
 
 ### Phase 8: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Global overlay for displaying OCR text on screen
