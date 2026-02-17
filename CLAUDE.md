@@ -300,7 +300,7 @@ Frontend (TypeScript/React)           Backend (Python)
 - [x] Stage 2c: Install local inference deps into `py_modules_local/`
 - [x] Stage 2d: Download OCR ONNX models (det, rec, cls — no keys file) + Piper voice model
 - [x] Stage 4: Updated assembly to include new files in zip
-- [x] `--no-cache` builds enforced in `deploy.sh` to prevent stale pip layers
+- [x] Docker layer caching enabled in `deploy.sh` for faster iterative builds
 
 **New settings:**
 | Setting | Default | Description |
@@ -411,7 +411,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | Local Python deps | Bundled in py_modules_local/ via Docker build (Python 3.12) | Separate from GCP deps due to different Python versions |
 | Default provider | Local (offline) | Works out of the box without any setup; GCP requires service account |
 | Voice loading strategy | Lazy-load + in-memory cache per voice_id | Only used voices consume memory (~63MB each); first use pays ~1s load, subsequent uses are instant from cache; worker startup is faster (OCR only, no voice pre-loaded) |
-| Docker build | Always `--no-cache` via deploy.sh | Prevents stale pip layers that can silently reuse old packages after requirements.txt changes |
+| Docker build | Layer caching enabled for speed | Use `docker compose build --no-cache` manually when requirements.txt or model URLs change |
 
 ## File Structure
 
