@@ -93,16 +93,28 @@ DEFAULT_SETTINGS = {
     # selects a JSON file via the file browser. Never shown to the user directly.
     "gcp_credentials_base64": "",
 
-    # Text-to-Speech voice ID (used in Phase 5). Format: "languageCode-Name".
+    # Provider selection: "gcp" (Google Cloud, online) or "local" (offline).
+    # Default to local — works out of the box without setup.
+    "ocr_provider": "local",
+    "tts_provider": "local",
+
+    # GCP Text-to-Speech voice ID. Format: "languageCode-Name".
     "voice_id": "en-US-Neural2-C",
 
-    # TTS speech rate preset (used in Phase 5). One of: x-slow, slow, medium, fast, x-fast.
+    # GCP TTS speech rate preset. One of: x-slow, slow, medium, fast, x-fast.
     "speech_rate": "medium",
 
-    # TTS volume level 0-100 (used in Phase 5).
+    # Local (Piper) TTS voice. Currently only one bundled voice.
+    "local_voice_id": "en_US-lessac-medium",
+
+    # Local (Piper) TTS speech rate preset. Same keys as GCP but maps to
+    # Piper's length_scale (inverse: lower = faster).
+    "local_speech_rate": "medium",
+
+    # TTS volume level 0-100.
     "volume": 100,
 
-    # Master on/off switch. When False: stops GCP worker + playback,
+    # Master on/off switch. When False: stops both workers + playback,
     # grays out OCR/TTS buttons, ignores background triggers (button hold).
     "enabled": True,
 
@@ -261,6 +273,13 @@ class Plugin:
         self._worker_lock = threading.Lock()     # Serializes stdin/stdout access
         self._worker_stderr_thread = None        # Daemon thread draining stderr
 
+        # Persistent LOCAL worker subprocess state (mirrors GCP worker above).
+        # Runs local_worker.py under the bundled Python 3.12 interpreter.
+        # Uses RapidOCR + Piper TTS for offline inference.
+        self._local_worker_process = None        # subprocess.Popen or None
+        self._local_worker_lock = threading.Lock()
+        self._local_worker_stderr_thread = None
+
         decky.logger.info(f"{LOG} settings initialized")
 
         # Sync the Python logger level to the "debug" setting stored in the
@@ -324,6 +343,42 @@ class Plugin:
             decky.logger.info(f"{LOG} py_modules found: {self._py_modules_path}")
         else:
             decky.logger.warning(f"{LOG} py_modules NOT found at {self._py_modules_path}")
+
+        # -----------------------------------------------------------------
+        # Discover bundled Python 3.12 for running local_worker.py
+        # -----------------------------------------------------------------
+        # The bundled Python 3.12 is used for local OCR/TTS inference because
+        # rapidocr-onnxruntime doesn't support Python 3.13. It's downloaded
+        # during the Docker build from python-build-standalone.
+        self._local_python_path = None
+        self._local_worker_script = None
+        self._local_models_dir = None
+        self._local_py_modules_path = None
+
+        candidate = os.path.join(plugin_dir, "python312", "python", "bin", "python3.12")
+        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            self._local_python_path = candidate
+            decky.logger.info(f"{LOG} bundled Python 3.12 found: {candidate}")
+        else:
+            decky.logger.warning(f"{LOG} bundled Python 3.12 NOT found at {candidate} — local OCR/TTS unavailable")
+
+        self._local_worker_script = os.path.join(plugin_dir, "local_worker.py")
+        if os.path.exists(self._local_worker_script):
+            decky.logger.info(f"{LOG} local_worker.py found: {self._local_worker_script}")
+        else:
+            decky.logger.warning(f"{LOG} local_worker.py NOT found at {self._local_worker_script}")
+
+        self._local_models_dir = os.path.join(plugin_dir, "models")
+        if os.path.isdir(self._local_models_dir):
+            decky.logger.info(f"{LOG} models dir found: {self._local_models_dir}")
+        else:
+            decky.logger.warning(f"{LOG} models dir NOT found at {self._local_models_dir}")
+
+        self._local_py_modules_path = os.path.join(plugin_dir, "py_modules_local")
+        if os.path.isdir(self._local_py_modules_path):
+            decky.logger.info(f"{LOG} py_modules_local found: {self._local_py_modules_path}")
+        else:
+            decky.logger.warning(f"{LOG} py_modules_local NOT found at {self._local_py_modules_path}")
 
         # -----------------------------------------------------------------
         # Discover audio player for TTS playback
@@ -419,7 +474,7 @@ class Plugin:
         Guards:
           - Plugin must be enabled (settings.enabled)
           - Pipeline must not already be running
-          - GCP credentials must be configured
+          - Providers must be available (GCP needs creds, local needs bundled Python)
 
         If all guards pass, calls read_screen() which runs the full pipeline
         (capture → OCR → TTS → playback).
@@ -434,11 +489,22 @@ class Plugin:
             decky.logger.debug(f"{LOG} button trigger: pipeline already running, ignoring")
             return
 
-        # Guard: credentials must be configured
-        creds_b64 = self.settings.get("gcp_credentials_base64", "")
-        if not creds_b64:
-            decky.logger.debug(f"{LOG} button trigger: no credentials, ignoring")
-            return
+        # Guard: check that providers are available
+        ocr_provider = self.settings.get("ocr_provider", DEFAULT_SETTINGS["ocr_provider"])
+        tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
+
+        # If any provider is GCP, need credentials
+        if ocr_provider == "gcp" or tts_provider == "gcp":
+            creds_b64 = self.settings.get("gcp_credentials_base64", "")
+            if not creds_b64:
+                decky.logger.debug(f"{LOG} button trigger: GCP provider selected but no credentials, ignoring")
+                return
+
+        # If any provider is local, need bundled Python
+        if ocr_provider == "local" or tts_provider == "local":
+            if not self._local_python_path:
+                decky.logger.debug(f"{LOG} button trigger: local provider selected but bundled Python unavailable, ignoring")
+                return
 
         decky.logger.info(f"{LOG} button trigger: starting read_screen pipeline")
         result = await self.read_screen()
@@ -462,7 +528,11 @@ class Plugin:
 
         # Step 0c: Stop the persistent GCP worker subprocess
         self._stop_worker()
-        decky.logger.info(f"{LOG} worker stopped")
+        decky.logger.info(f"{LOG} GCP worker stopped")
+
+        # Step 0d: Stop the persistent local worker subprocess
+        self._stop_local_worker()
+        decky.logger.info(f"{LOG} local worker stopped")
 
         # Step 1: Stop any running audio playback and clean up its temp file
         self._stop_playback()
@@ -475,7 +545,7 @@ class Plugin:
 
         # Step 3: Sweep any orphaned temp files from previous runs.
         # These could exist if the plugin crashed mid-pipeline.
-        for pattern in ["/tmp/dcr_*.png", "/tmp/dcr_*.mp3"]:
+        for pattern in ["/tmp/dcr_*.png", "/tmp/dcr_*.mp3", "/tmp/dcr_*.wav"]:
             for orphan in glob.glob(pattern):
                 try:
                     os.remove(orphan)
@@ -935,16 +1005,247 @@ class Plugin:
             pass  # Pipe closed — worker exited, normal shutdown
 
     # =========================================================================
+    # Persistent LOCAL worker: _start_local_worker / _stop_local_worker / etc.
+    # =========================================================================
+    # Same pattern as the GCP worker, but uses bundled Python 3.12 and
+    # local_worker.py with RapidOCR + Piper TTS. No credentials needed.
+
+    def _start_local_worker(self):
+        """
+        Launch the persistent local_worker.py subprocess in serve mode.
+
+        Pre-flight checks: bundled Python 3.12, local_worker.py, and models dir
+        must exist. The subprocess reads LOCAL_MODELS_DIR from its environment
+        and initializes RapidOCR + Piper models once at startup.
+
+        Returns:
+            True if the worker started and signaled ready, False otherwise.
+        """
+        if not self._local_python_path:
+            decky.logger.error(f"{LOG} local worker: bundled Python 3.12 not found — cannot start")
+            return False
+
+        if not os.path.exists(self._local_worker_script):
+            decky.logger.error(f"{LOG} local worker: local_worker.py not found at {self._local_worker_script}")
+            return False
+
+        if not os.path.isdir(self._local_models_dir):
+            decky.logger.error(f"{LOG} local worker: models dir not found at {self._local_models_dir}")
+            return False
+
+        # Build subprocess environment
+        env = os.environ.copy()
+        env["PYTHONPATH"] = self._local_py_modules_path
+        env["PYTHONNOUSERSITE"] = "1"
+        env["LOCAL_MODELS_DIR"] = self._local_models_dir
+        # Limit CPU threads — leave cores for the game
+        env["OMP_NUM_THREADS"] = "2"
+
+        cmd = [self._local_python_path, self._local_worker_script, "serve"]
+        decky.logger.info(f"{LOG} local worker: starting persistent subprocess...")
+
+        try:
+            self._local_worker_process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as e:
+            decky.logger.error(f"{LOG} local worker: failed to launch: {e}")
+            self._local_worker_process = None
+            return False
+
+        # Start stderr drain thread
+        self._local_worker_stderr_thread = threading.Thread(
+            target=self._drain_local_worker_stderr,
+            daemon=True,
+            name="dcr_local_worker_stderr",
+        )
+        self._local_worker_stderr_thread.start()
+
+        # Wait for ready signal (ONNX model loading can take a while first run)
+        ready_result = [None]
+
+        def _read_ready():
+            try:
+                line = self._local_worker_process.stdout.readline()
+                if line:
+                    ready_result[0] = json.loads(line.strip())
+            except Exception as e:
+                ready_result[0] = {"ready": False, "message": f"Ready read error: {e}"}
+
+        reader = threading.Thread(target=_read_ready, daemon=True)
+        reader.start()
+        reader.join(timeout=60)  # 60s — ONNX model loading may be slow first run
+
+        if reader.is_alive():
+            decky.logger.error(f"{LOG} local worker: timed out waiting for ready signal (60s)")
+            self._stop_local_worker()
+            return False
+
+        ready = ready_result[0]
+        if ready is None or not ready.get("ready", False):
+            msg = ready.get("message", "unknown") if ready else "no response"
+            decky.logger.error(f"{LOG} local worker: not ready: {msg}")
+            self._stop_local_worker()
+            return False
+
+        decky.logger.info(f"{LOG} local worker: persistent worker ready (pid={self._local_worker_process.pid})")
+        return True
+
+    def _stop_local_worker(self):
+        """
+        Stop the persistent local worker subprocess gracefully.
+        Same shutdown cascade as _stop_worker(): JSON shutdown → SIGTERM → SIGKILL.
+        """
+        if self._local_worker_process is None:
+            return
+
+        pid = self._local_worker_process.pid
+
+        try:
+            if self._local_worker_process.poll() is None:
+                try:
+                    self._local_worker_process.stdin.write('{"action":"shutdown"}\n')
+                    self._local_worker_process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+
+                try:
+                    self._local_worker_process.wait(timeout=3)
+                    decky.logger.info(f"{LOG} local worker: stopped gracefully (pid={pid})")
+                except subprocess.TimeoutExpired:
+                    decky.logger.warning(f"{LOG} local worker: graceful shutdown timed out, sending SIGTERM")
+                    try:
+                        self._local_worker_process.send_signal(signal.SIGTERM)
+                        self._local_worker_process.wait(timeout=2)
+                        decky.logger.info(f"{LOG} local worker: stopped via SIGTERM (pid={pid})")
+                    except subprocess.TimeoutExpired:
+                        decky.logger.warning(f"{LOG} local worker: SIGTERM timed out, sending SIGKILL")
+                        self._local_worker_process.kill()
+                        self._local_worker_process.wait(timeout=2)
+                    except ProcessLookupError:
+                        pass
+            else:
+                decky.logger.debug(f"{LOG} local worker: already exited (pid={pid})")
+
+        except ProcessLookupError:
+            decky.logger.debug(f"{LOG} local worker: process already gone (pid={pid})")
+        except Exception as e:
+            decky.logger.error(f"{LOG} local worker: error stopping: {e}")
+        finally:
+            for pipe in (self._local_worker_process.stdin, self._local_worker_process.stdout, self._local_worker_process.stderr):
+                try:
+                    if pipe:
+                        pipe.close()
+                except Exception:
+                    pass
+            self._local_worker_process = None
+            self._local_worker_stderr_thread = None
+
+    def _send_to_local_worker(self, command_dict, timeout=OCR_TTS_TIMEOUT):
+        """
+        Send a command to the persistent local worker and wait for a response.
+        Same pattern as _send_to_worker(): lazy start, thread-safe, auto-restart.
+        """
+        with self._local_worker_lock:
+            # Lazy start: if worker isn't running, start it now
+            if self._local_worker_process is None or self._local_worker_process.poll() is not None:
+                if self._local_worker_process is not None:
+                    decky.logger.warning(f"{LOG} local worker: process died, restarting...")
+                    self._stop_local_worker()
+
+                if not self._start_local_worker():
+                    return {"success": False, "message": "Failed to start local worker subprocess"}
+
+            action = command_dict.get("action", "unknown")
+            decky.logger.info(f"{LOG} local worker: sending command: {action}")
+
+            # Write command
+            try:
+                self._local_worker_process.stdin.write(json.dumps(command_dict) + "\n")
+                self._local_worker_process.stdin.flush()
+            except (BrokenPipeError, OSError) as e:
+                decky.logger.error(f"{LOG} local worker: stdin write error: {e}")
+                self._stop_local_worker()
+                return {"success": False, "message": f"Local worker pipe error: {e}"}
+
+            # Read response with timeout
+            response_holder = [None]
+
+            def _read_response():
+                try:
+                    line = self._local_worker_process.stdout.readline()
+                    if line:
+                        response_holder[0] = line.strip()
+                except Exception:
+                    pass
+
+            reader = threading.Thread(target=_read_response, daemon=True)
+            reader.start()
+            reader.join(timeout=timeout)
+
+            if reader.is_alive():
+                decky.logger.error(f"{LOG} local worker: response timed out after {timeout}s")
+                self._stop_local_worker()
+                return {"success": False, "message": f"Local worker response timed out after {timeout}s"}
+
+            raw_response = response_holder[0]
+            if not raw_response:
+                decky.logger.error(f"{LOG} local worker: empty response (worker may have crashed)")
+                self._stop_local_worker()
+                return {"success": False, "message": "Local worker returned empty response"}
+
+            try:
+                return json.loads(raw_response)
+            except json.JSONDecodeError as e:
+                decky.logger.error(f"{LOG} local worker: invalid JSON response: {e}")
+                decky.logger.error(f"{LOG} local worker: raw response: {raw_response[:500]}")
+                self._stop_local_worker()
+                return {"success": False, "message": f"Local worker JSON parse error: {e}"}
+
+    def _drain_local_worker_stderr(self):
+        """Drain the local worker's stderr in a daemon thread (same as GCP version)."""
+        try:
+            for line in self._local_worker_process.stderr:
+                stripped = line.strip()
+                if stripped:
+                    decky.logger.debug(f"{LOG} local: {stripped}")
+        except (ValueError, OSError):
+            pass
+
+    def _send_command(self, command_dict, provider, timeout=OCR_TTS_TIMEOUT):
+        """
+        Unified routing helper — sends a command to the correct worker based on provider.
+
+        Args:
+            command_dict: Dict to send as JSON.
+            provider: "gcp" or "local".
+            timeout: Max seconds to wait for response.
+
+        Returns:
+            Dict parsed from the worker's JSON response.
+        """
+        if provider == "gcp":
+            return self._send_to_worker(command_dict, timeout)
+        else:
+            return self._send_to_local_worker(command_dict, timeout)
+
+    # =========================================================================
     # Audio playback: _start_playback(), _stop_playback(), _cleanup_tts_temp()
     # =========================================================================
-    # mpv is used for audio playback because it's pre-installed on Steam Deck,
-    # lightweight, and supports MP3. Unlike gcp_worker.py (which uses run()),
-    # we use Popen here because playback is a long-running background process
-    # that the user may want to stop at any time.
+    # Audio playback via ffplay/mpv/pw-play. Unlike worker subprocesses (which
+    # use run()), we use Popen here because playback is a long-running background
+    # process that the user may want to stop at any time.
+    # Supports both MP3 (GCP TTS) and WAV (local Piper TTS) — all players handle both.
 
-    def _start_playback(self, mp3_path):
+    def _start_playback(self, audio_path):
         """
-        Start playing an MP3 file via the discovered audio player.
+        Start playing an audio file (MP3 or WAV) via the discovered audio player.
 
         Stops any currently playing audio first. Launches the player as a
         background process (Popen) so it plays asynchronously while the UI
@@ -956,7 +1257,7 @@ class Plugin:
           - pw-play: --volume=F <file>  (F is 0.0-1.0 float)
 
         Args:
-            mp3_path: Absolute path to the MP3 file to play.
+            audio_path: Absolute path to the audio file to play (MP3 or WAV).
 
         Returns:
             True if playback started successfully, False otherwise.
@@ -968,8 +1269,8 @@ class Plugin:
             decky.logger.error(f"{LOG} no audio player found — cannot play audio")
             return False
 
-        if not os.path.exists(mp3_path):
-            decky.logger.error(f"{LOG} MP3 file not found: {mp3_path}")
+        if not os.path.exists(audio_path):
+            decky.logger.error(f"{LOG} audio file not found: {audio_path}")
             return False
 
         # Get volume from settings (0-100)
@@ -984,7 +1285,7 @@ class Plugin:
                 "--no-video",          # Audio only, no video window
                 "--really-quiet",      # Suppress all output
                 f"--volume={volume}",  # Volume 0-100
-                mp3_path,
+                audio_path,
             ]
         elif player == "ffplay":
             # ffplay volume is 0-100 (SDL volume), matches our setting range.
@@ -995,7 +1296,7 @@ class Plugin:
                 "-autoexit",           # Exit when playback finishes
                 "-loglevel", "quiet",  # Suppress all output
                 "-volume", str(volume),
-                mp3_path,
+                audio_path,
             ]
         elif player == "pw-play":
             # pw-play volume is a float 0.0-1.0, so convert from 0-100.
@@ -1003,14 +1304,14 @@ class Plugin:
             cmd = [
                 self._audio_player_path,
                 f"--volume={pw_volume}",
-                mp3_path,
+                audio_path,
             ]
         else:
             decky.logger.error(f"{LOG} unknown audio player: {player}")
             return False
 
         try:
-            decky.logger.info(f"{LOG} starting playback via {player}: {mp3_path} (volume={volume})")
+            decky.logger.info(f"{LOG} starting playback via {player}: {audio_path} (volume={volume})")
 
             # The Decky Loader service runs as root, so the audio player
             # can't find the user's PipeWire/PulseAudio session by default.
@@ -1029,7 +1330,7 @@ class Plugin:
             )
 
             # Track the temp file so _stop_playback() can clean it up
-            self._tts_temp_path = mp3_path
+            self._tts_temp_path = audio_path
 
             decky.logger.info(f"{LOG} playback started (pid={self._playback_process.pid})")
 
@@ -1155,20 +1456,27 @@ class Plugin:
     def _perform_ocr_sync(self):
         """
         Capture a screenshot and perform OCR on it.
+        Routes to GCP or local worker based on the ocr_provider setting.
 
         Returns:
             Dict with keys: success, text, char_count, line_count, message.
         """
-        # Step 1: Check that credentials are configured
-        creds_b64 = self.settings.get("gcp_credentials_base64", "")
-        if not creds_b64:
-            return {
-                "success": False,
-                "text": "",
-                "char_count": 0,
-                "line_count": 0,
-                "message": "GCP credentials not configured",
-            }
+        # Step 1: Determine provider and check prerequisites
+        ocr_provider = self.settings.get("ocr_provider", DEFAULT_SETTINGS["ocr_provider"])
+
+        if ocr_provider == "gcp":
+            creds_b64 = self.settings.get("gcp_credentials_base64", "")
+            if not creds_b64:
+                return {
+                    "success": False, "text": "", "char_count": 0,
+                    "line_count": 0, "message": "GCP credentials not configured",
+                }
+        else:
+            if not self._local_python_path:
+                return {
+                    "success": False, "text": "", "char_count": 0,
+                    "line_count": 0, "message": "Local OCR unavailable (bundled Python not found)",
+                }
 
         # Step 2: Capture a fresh screenshot
         decky.logger.info(f"{LOG} OCR pipeline: capturing screenshot...")
@@ -1187,22 +1495,20 @@ class Plugin:
         decky.logger.info(f"{LOG} OCR pipeline: screenshot captured ({len(image_bytes):,} bytes)")
 
         # Step 3: Write the image to a temp file for the subprocess to read.
-        # We use a temp file because passing large binary data via stdin/pipe
-        # is more complex and error-prone than a file path.
         fd = None
         tmp_path = None
         try:
             fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="dcr_ocr_")
-            # Write image bytes to the temp file using the file descriptor
             os.write(fd, image_bytes)
             os.close(fd)
-            fd = None  # Mark as closed so finally doesn't double-close
+            fd = None
 
             decky.logger.info(f"{LOG} OCR pipeline: wrote temp image to {tmp_path}")
 
-            # Step 4: Send OCR request to the persistent GCP worker
-            result = self._send_to_worker(
+            # Step 4: Send OCR request to the appropriate worker
+            result = self._send_command(
                 {"action": "ocr", "image_path": tmp_path},
+                provider=ocr_provider,
                 timeout=OCR_TIMEOUT,
             )
 
@@ -1278,6 +1584,7 @@ class Plugin:
     def _perform_tts_sync(self, text):
         """
         Synthesize speech from text and start playback.
+        Routes to GCP or local worker based on the tts_provider setting.
 
         Args:
             text: The text to convert to speech.
@@ -1285,48 +1592,55 @@ class Plugin:
         Returns:
             Dict with keys: success, message, audio_size.
         """
-        # Step 1: Check that credentials are configured
-        creds_b64 = self.settings.get("gcp_credentials_base64", "")
-        if not creds_b64:
-            return {
-                "success": False,
-                "message": "GCP credentials not configured",
-                "audio_size": 0,
-            }
+        # Step 1: Determine provider and check prerequisites
+        tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
+
+        if tts_provider == "gcp":
+            creds_b64 = self.settings.get("gcp_credentials_base64", "")
+            if not creds_b64:
+                return {"success": False, "message": "GCP credentials not configured", "audio_size": 0}
+        else:
+            if not self._local_python_path:
+                return {"success": False, "message": "Local TTS unavailable (bundled Python not found)", "audio_size": 0}
 
         # Step 2: Validate text
         if not text or not text.strip():
-            return {
-                "success": False,
-                "message": "No text to speak",
-                "audio_size": 0,
-            }
+            return {"success": False, "message": "No text to speak", "audio_size": 0}
 
-        # Step 3: Get voice and speech rate settings
-        voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
-        speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
+        # Step 3: Get voice and speech rate settings based on provider
+        if tts_provider == "gcp":
+            voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
+            speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
+        else:
+            voice_id = self.settings.get("local_voice_id", DEFAULT_SETTINGS["local_voice_id"])
+            speech_rate = self.settings.get("local_speech_rate", DEFAULT_SETTINGS["local_speech_rate"])
 
-        decky.logger.info(f"{LOG} TTS pipeline: {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
+        decky.logger.info(f"{LOG} TTS pipeline ({tts_provider}): {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
 
-        # Step 4: Create a temp file for the MP3 output.
-        # mkstemp creates a file with a unique name that won't collide.
+        # Step 4: Create a temp file for the audio output.
+        # GCP produces MP3, local (Piper) produces WAV.
+        audio_suffix = ".mp3" if tts_provider == "gcp" else ".wav"
         fd = None
         tmp_path = None
         playback_started = False
 
         try:
-            fd, tmp_path = tempfile.mkstemp(suffix=".mp3", prefix="dcr_tts_")
+            fd, tmp_path = tempfile.mkstemp(suffix=audio_suffix, prefix="dcr_tts_")
             os.close(fd)
-            fd = None  # Mark as closed so finally doesn't double-close
+            fd = None
 
-            # Step 5: Send TTS request to the persistent GCP worker
-            result = self._send_to_worker({
+            # Step 5: Send TTS request to the appropriate worker
+            command = {
                 "action": "tts",
                 "text": text,
                 "output_path": tmp_path,
-                "voice_id": voice_id,
                 "speech_rate": speech_rate,
-            }, timeout=TTS_TIMEOUT)
+            }
+            # GCP worker also needs voice_id
+            if tts_provider == "gcp":
+                command["voice_id"] = voice_id
+
+            result = self._send_command(command, provider=tts_provider, timeout=TTS_TIMEOUT)
 
             if not result.get("success", False):
                 return {
@@ -1399,8 +1713,10 @@ class Plugin:
     # Once the worker call starts, it runs to completion (bounded by
     # OCR_TTS_TIMEOUT). The cancel flag is checked again before playback.
     #
-    # This method does NOT call _perform_ocr_sync() or _perform_tts_sync()
-    # because those are standalone RPC helpers with their own capture logic.
+    # Provider-aware: routes OCR and TTS to the correct worker based on
+    # settings. If both providers are the same, uses the combined ocr_tts
+    # action for efficiency. If mixed, runs OCR and TTS sequentially on
+    # different workers.
     def _read_screen_sync(self):
         """
         End-to-end Read Screen pipeline: capture → OCR+TTS → playback.
@@ -1411,23 +1727,35 @@ class Plugin:
             can display OCR results regardless.
         """
         ocr_tmp_path = None   # Temp file for the screenshot PNG
-        tts_tmp_path = None   # Temp file for the synthesized MP3
+        tts_tmp_path = None   # Temp file for the synthesized audio
         playback_started = False
 
         # Timing: track each step to identify bottlenecks
         t_pipeline_start = time.monotonic()
 
         try:
-            # ----- Pre-flight: check credentials -----
-            creds_b64 = self.settings.get("gcp_credentials_base64", "")
-            if not creds_b64:
-                return {
-                    "success": False,
-                    "message": "GCP credentials not configured",
-                    "step": "idle",
-                    "text": "",
-                    "audio_size": 0,
-                }
+            # ----- Pre-flight: determine providers and check prerequisites -----
+            ocr_provider = self.settings.get("ocr_provider", DEFAULT_SETTINGS["ocr_provider"])
+            tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
+
+            # Check GCP credentials if any provider needs them
+            if ocr_provider == "gcp" or tts_provider == "gcp":
+                creds_b64 = self.settings.get("gcp_credentials_base64", "")
+                if not creds_b64:
+                    return {
+                        "success": False,
+                        "message": "GCP credentials not configured",
+                        "step": "idle", "text": "", "audio_size": 0,
+                    }
+
+            # Check local availability if any provider needs it
+            if ocr_provider == "local" or tts_provider == "local":
+                if not self._local_python_path:
+                    return {
+                        "success": False,
+                        "message": "Local inference unavailable (bundled Python not found)",
+                        "step": "idle", "text": "", "audio_size": 0,
+                    }
 
             # ----- Step 1: Capture screenshot -----
             if self._pipeline_cancel.is_set():
@@ -1442,62 +1770,120 @@ class Plugin:
                 return {
                     "success": False,
                     "message": f"Capture failed: {capture_result['error']}",
-                    "step": "capturing",
-                    "text": "",
-                    "audio_size": 0,
+                    "step": "capturing", "text": "", "audio_size": 0,
                 }
 
             image_bytes = capture_result["image_bytes"]
             t_capture = time.monotonic() - t_step
             decky.logger.info(f"{LOG} pipeline: screenshot captured ({len(image_bytes):,} bytes) [{t_capture:.2f}s]")
 
-            # ----- Step 2: Combined OCR+TTS (single subprocess) -----
+            # ----- Step 2: OCR + TTS -----
             if self._pipeline_cancel.is_set():
                 return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
 
             self._pipeline_step = "ocr"
             t_step = time.monotonic()
-            decky.logger.info(f"{LOG} pipeline: running OCR+TTS (combined subprocess)...")
 
-            # Write image to temp file for the GCP worker subprocess
+            # Write image to temp file for the worker subprocess
             fd, ocr_tmp_path = tempfile.mkstemp(suffix=".png", prefix="dcr_pipe_ocr_")
             os.write(fd, image_bytes)
             os.close(fd)
 
-            # Create the TTS output temp file path
-            fd2, tts_tmp_path = tempfile.mkstemp(suffix=".mp3", prefix="dcr_pipe_tts_")
+            # Create the TTS output temp file path (WAV for local, MP3 for GCP)
+            audio_suffix = ".wav" if tts_provider == "local" else ".mp3"
+            fd2, tts_tmp_path = tempfile.mkstemp(suffix=audio_suffix, prefix="dcr_pipe_tts_")
             os.close(fd2)
 
             # Get voice and speech rate settings for the TTS portion
-            voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
-            speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
+            if tts_provider == "gcp":
+                voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
+                speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
+            else:
+                voice_id = self.settings.get("local_voice_id", DEFAULT_SETTINGS["local_voice_id"])
+                speech_rate = self.settings.get("local_speech_rate", DEFAULT_SETTINGS["local_speech_rate"])
 
-            # Send combined OCR+TTS to the persistent worker.
-            # With a warm worker, this skips Python startup, imports, and
-            # client init — only the actual API calls are paid.
-            result = self._send_to_worker({
-                "action": "ocr_tts",
-                "image_path": ocr_tmp_path,
-                "output_path": tts_tmp_path,
-                "voice_id": voice_id,
-                "speech_rate": speech_rate,
-            }, timeout=OCR_TTS_TIMEOUT)
-
-            t_ocr_tts = time.monotonic() - t_step
-
-            if not result.get("success", False):
-                return {
-                    "success": False,
-                    "message": f"OCR+TTS failed: {result.get('message', 'Unknown error')}",
-                    "step": "ocr",
-                    "text": "",
-                    "audio_size": 0,
+            # Route based on whether both providers are the same
+            if ocr_provider == tts_provider:
+                # Same provider — use combined ocr_tts action for efficiency
+                decky.logger.info(f"{LOG} pipeline: running OCR+TTS combined ({ocr_provider})...")
+                command = {
+                    "action": "ocr_tts",
+                    "image_path": ocr_tmp_path,
+                    "output_path": tts_tmp_path,
+                    "speech_rate": speech_rate,
                 }
+                if ocr_provider == "gcp":
+                    command["voice_id"] = voice_id
 
-            # Extract OCR results from the combined response
-            ocr_text = result.get("text", "")
-            char_count = result.get("char_count", len(ocr_text))
-            audio_size = result.get("audio_size", 0)
+                result = self._send_command(command, provider=ocr_provider, timeout=OCR_TTS_TIMEOUT)
+                t_ocr_tts = time.monotonic() - t_step
+
+                if not result.get("success", False):
+                    return {
+                        "success": False,
+                        "message": f"OCR+TTS failed: {result.get('message', 'Unknown error')}",
+                        "step": "ocr", "text": "", "audio_size": 0,
+                    }
+
+                ocr_text = result.get("text", "")
+                char_count = result.get("char_count", len(ocr_text))
+                audio_size = result.get("audio_size", 0)
+
+            else:
+                # Mixed providers — run OCR first, then TTS separately
+                decky.logger.info(f"{LOG} pipeline: running OCR ({ocr_provider}) then TTS ({tts_provider})...")
+
+                # OCR step
+                ocr_result = self._send_command(
+                    {"action": "ocr", "image_path": ocr_tmp_path},
+                    provider=ocr_provider, timeout=OCR_TIMEOUT,
+                )
+
+                if not ocr_result.get("success", False):
+                    return {
+                        "success": False,
+                        "message": f"OCR failed: {ocr_result.get('message', 'Unknown error')}",
+                        "step": "ocr", "text": "", "audio_size": 0,
+                    }
+
+                ocr_text = ocr_result.get("text", "")
+                char_count = ocr_result.get("char_count", len(ocr_text))
+
+                if not ocr_text.strip():
+                    t_ocr_tts = time.monotonic() - t_step
+                    decky.logger.info(f"{LOG} pipeline: no text detected [{t_ocr_tts:.2f}s]")
+                    return {
+                        "success": False, "message": "No text detected on screen",
+                        "step": "ocr", "text": "", "audio_size": 0,
+                    }
+
+                # Check cancellation before TTS
+                if self._pipeline_cancel.is_set():
+                    return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": 0}
+
+                self._pipeline_step = "tts"
+
+                # TTS step
+                tts_command = {
+                    "action": "tts",
+                    "text": ocr_text,
+                    "output_path": tts_tmp_path,
+                    "speech_rate": speech_rate,
+                }
+                if tts_provider == "gcp":
+                    tts_command["voice_id"] = voice_id
+
+                tts_result = self._send_command(tts_command, provider=tts_provider, timeout=TTS_TIMEOUT)
+                t_ocr_tts = time.monotonic() - t_step
+
+                if not tts_result.get("success", False):
+                    return {
+                        "success": False,
+                        "message": f"TTS failed: {tts_result.get('message', 'Unknown error')}",
+                        "step": "tts", "text": ocr_text, "audio_size": 0,
+                    }
+
+                audio_size = tts_result.get("audio_size", 0)
 
             # No text detected — the subprocess returned success with empty text
             if not ocr_text.strip():
@@ -1505,9 +1891,7 @@ class Plugin:
                 return {
                     "success": False,
                     "message": "No text detected on screen",
-                    "step": "ocr",
-                    "text": "",
-                    "audio_size": 0,
+                    "step": "ocr", "text": "", "audio_size": 0,
                 }
 
             decky.logger.info(
@@ -1520,9 +1904,7 @@ class Plugin:
                 return {
                     "success": False,
                     "message": "TTS produced empty audio file",
-                    "step": "tts",
-                    "text": ocr_text,
-                    "audio_size": 0,
+                    "step": "tts", "text": ocr_text, "audio_size": 0,
                 }
 
             # ----- Step 3: Playback -----
@@ -1541,17 +1923,13 @@ class Plugin:
                 return {
                     "success": True,
                     "message": f"Playing: {char_count} chars, {audio_size:,} bytes ({t_total:.1f}s)",
-                    "step": "playing",
-                    "text": ocr_text,
-                    "audio_size": audio_size,
+                    "step": "playing", "text": ocr_text, "audio_size": audio_size,
                 }
             else:
                 return {
                     "success": False,
                     "message": "Audio playback failed to start (no audio player found?)",
-                    "step": "playing",
-                    "text": ocr_text,
-                    "audio_size": audio_size,
+                    "step": "playing", "text": ocr_text, "audio_size": audio_size,
                 }
 
         except Exception as e:
@@ -1743,14 +2121,26 @@ class Plugin:
         result = dict(DEFAULT_SETTINGS)
         result.update(self.settings.get_all())
 
-        # Compute whether credentials are configured. The frontend uses this
-        # to show "Configured" vs "Not Configured" status.
+        # Compute whether GCP credentials are configured
         creds_b64 = result.get("gcp_credentials_base64", "")
-        result["is_configured"] = bool(creds_b64)
+        result["is_gcp_configured"] = bool(creds_b64)
+
+        # Compute whether local inference is available (bundled Python found)
+        result["is_local_available"] = self._local_python_path is not None
+
+        # Backwards-compatible is_configured: true if the current providers
+        # have everything they need to function
+        ocr_provider = result.get("ocr_provider", "local")
+        tts_provider = result.get("tts_provider", "local")
+        needs_gcp = ocr_provider == "gcp" or tts_provider == "gcp"
+        needs_local = ocr_provider == "local" or tts_provider == "local"
+        result["is_configured"] = (
+            (not needs_gcp or bool(creds_b64))
+            and (not needs_local or self._local_python_path is not None)
+        )
 
         # If credentials are stored, decode them to extract the project_id
-        # for display in the UI. We don't send the full credentials to the
-        # frontend — just the project_id.
+        # for display in the UI.
         result["project_id"] = ""
         if creds_b64:
             try:
@@ -1830,16 +2220,39 @@ class Plugin:
         elif key == "enabled":
             # When the master switch is toggled, actively manage background
             # resources. Disabling stops any running pipeline, kills audio
-            # playback, and shuts down the GCP worker subprocess (freeing
-            # memory and gRPC connections). Enabling is a no-op — the worker
-            # will lazy-start on the next request via _send_to_worker().
+            # playback, and shuts down both worker subprocesses (freeing
+            # memory, gRPC connections, and ONNX models). Enabling is a no-op
+            # — workers lazy-start on the next request.
             if not value:
                 decky.logger.info(f"{LOG} plugin disabled — stopping background activity")
                 self._pipeline_cancel.set()
                 self._stop_playback()
                 self._stop_worker()
+                self._stop_local_worker()
             else:
                 decky.logger.info(f"{LOG} plugin enabled")
+
+        elif key == "ocr_provider":
+            # Provider changed — stop the old provider's worker so it doesn't
+            # linger. The new provider's worker will lazy-start on next use.
+            old_provider = self.settings.get("ocr_provider", DEFAULT_SETTINGS["ocr_provider"])
+            if old_provider != value:
+                if old_provider == "gcp":
+                    decky.logger.info(f"{LOG} OCR provider changed to {value}, stopping GCP worker")
+                    self._stop_worker()
+                else:
+                    decky.logger.info(f"{LOG} OCR provider changed to {value}, stopping local worker")
+                    self._stop_local_worker()
+
+        elif key == "tts_provider":
+            old_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
+            if old_provider != value:
+                if old_provider == "gcp":
+                    decky.logger.info(f"{LOG} TTS provider changed to {value}, stopping GCP worker")
+                    self._stop_worker()
+                else:
+                    decky.logger.info(f"{LOG} TTS provider changed to {value}, stopping local worker")
+                    self._stop_local_worker()
 
         return result
 

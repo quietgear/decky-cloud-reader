@@ -4,7 +4,7 @@
 
 This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin that runs within the Decky Loader framework.
 
-**Purpose:** Use GCP services (Cloud Vision OCR + Cloud Text-to-Speech) to provide OCR and TTS functionality for text-heavy games on Steam Deck.
+**Purpose:** Provide OCR and TTS functionality for text-heavy games on Steam Deck. Supports two provider modes: **local** (RapidOCR + Piper TTS, offline) and **GCP** (Cloud Vision + Cloud TTS, online). Local mode is the default and works out of the box; GCP mode requires a service account.
 
 ## Development Environment
 
@@ -26,10 +26,11 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 - **Path:** `/Users/mshabalov/Documents/claude-projects/decky-plugin-template`
 - Use as the main structural reference for plugin scaffolding, build system, and conventions
 
-### Decky-Translator (UI and input reference)
+### Decky-Translator (UI, input, and OCR reference)
 - **Path:** `/Users/mshabalov/Documents/claude-projects/Decky-Translator`
 - Reference for:
   - Using the **L4 button** on Steam Deck to trigger plugin actions without opening the plugin UI
+  - **RapidOCR integration pattern**: uses `rapidocr-onnxruntime` with custom ONNX model paths but NO `rec_keys_path` (avoids model-dictionary mismatch)
 
 ### decky-ocr-tts-claude-service-plugin (feature reference)
 - **Path:** `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin`
@@ -43,32 +44,41 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 
 ### Architecture Overview
 
-Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles screen capture, worker management, and audio playback. GCP API calls are delegated to a **persistent** `gcp_worker.py` subprocess running under system Python. The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings and status.
+Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles screen capture, dual worker management, provider routing, and audio playback. OCR/TTS is delegated to one of two **persistent subprocess workers**: `gcp_worker.py` (Google Cloud APIs, system Python 3.13) or `local_worker.py` (RapidOCR + Piper TTS, bundled Python 3.12). The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings, provider selection, and status.
 
 ```
 Frontend (TypeScript/React)           Backend (Python)
 ┌──────────────────────────┐         ┌───────────────────────────────┐
 │ Decky Panel UI           │   RPC   │ main.py (Plugin class)        │
 │  - Read Screen (primary) │◄───────►│  - Pipeline orchestration     │
+│  - Provider selection    │         │  - Provider routing (GCP/local)│
 │  - Credentials section   │         │  - GCP credentials mgmt       │
 │  - Settings section      │         │  - Screen capture (GStreamer) │
-│  - Button trigger config │         │  - Worker lifecycle mgmt      │
+│  - Button trigger config │         │  - Dual worker lifecycle mgmt │
 │  - OCR/TTS controls      │         │  - Audio playback (Popen)     │
 │  - Enabled toggle gates  │         │  - Enabled toggle teardown    │
-│    GCP-dependent buttons │         │    (worker + playback + pipe) │
+│    provider-aware buttons│         │    (workers + playback + pipe)│
 │                          │         │                               │
 │ Global Overlay           │         │  hidraw_monitor.py (thread)   │
 │  - OCR text display      │         │  - Button hold detection      │
 │                          │         │  - Auto-reconnect             │
 └──────────────────────────┘         │                               │
-                                     │  Persistent subprocess        │
+                                     │  Persistent subprocesses      │
                                      │  ┌──────────────────────────┐ │
                                      │  │ gcp_worker.py (serve)    │ │
+                                     │  │  - System Python 3.13    │ │
                                      │  │  - stdin/stdout JSON     │ │
-                                     │  │  - Pre-init GCP clients  │ │
                                      │  │  - OCR (Cloud Vision)    │ │
                                      │  │  - TTS (Cloud TTS)       │ │
                                      │  │  - Warm gRPC connections │ │
+                                     │  └──────────────────────────┘ │
+                                     │  ┌──────────────────────────┐ │
+                                     │  │ local_worker.py (serve)  │ │
+                                     │  │  - Bundled Python 3.12   │ │
+                                     │  │  - stdin/stdout JSON     │ │
+                                     │  │  - OCR (RapidOCR)        │ │
+                                     │  │  - TTS (Piper TTS)       │ │
+                                     │  │  - Pre-loaded ONNX models│ │
                                      │  └──────────────────────────┘ │
                                      └───────────────────────────────┘
 ```
@@ -251,7 +261,83 @@ Frontend (TypeScript/React)           Backend (Python)
 - Hidraw monitor keeps running when disabled — CPU cost is negligible, avoids HID re-init on re-enable, same pattern planned for future touchscreen monitor
 - Worker lazy-starts on re-enable rather than eagerly — simpler and avoids unnecessary startup if user toggles on/off quickly
 
-### Phase 8: UI Polish & Advanced Features `[NOT STARTED]`
+### Phase 8: Local OCR & TTS (No GCP) `[DONE]`
+
+**Problem:** Every OCR and TTS operation required a GCP service account and internet access. Users had to set up Google Cloud before using the plugin at all.
+
+**Solution:** Add RapidOCR (offline OCR) and Piper TTS (offline TTS) as alternative providers that coexist alongside the existing GCP backend. Users select their provider in settings — local mode works entirely offline with models bundled in the plugin zip. Local is the default provider.
+
+**Architecture:** Two independent persistent workers, same JSON line protocol. `main.py` routes to the correct worker based on `ocr_provider` / `tts_provider` settings.
+
+**Critical constraint:** `rapidocr-onnxruntime` requires Python <3.13, but the Steam Deck's system Python is 3.13. The plugin bundles a standalone Python 3.12 interpreter (~40MB compressed) for the local worker — the same approach Decky-Translator uses.
+
+**New files:**
+- [x] `local_worker.py` — Local OCR+TTS persistent worker (RapidOCR + Piper)
+- [x] `requirements_local.txt` — Python 3.12 deps for local inference
+
+**Backend (main.py):**
+- [x] Local worker lifecycle: `_start_local_worker()`, `_stop_local_worker()`, `_send_to_local_worker()`
+- [x] `_send_command()` routing helper: dispatches to GCP or local worker based on provider
+- [x] Pipeline methods (`_read_screen_sync`, `_perform_ocr_sync`, `_perform_tts_sync`) updated for provider awareness
+- [x] Mixed provider support: OCR on one provider, TTS on another (sequential)
+- [x] Same-provider optimization: combined `ocr_tts` action when both use the same provider
+- [x] Bundled Python 3.12 discovery in `_main()` for local worker
+- [x] `_unload()` stops both workers, sweeps `.wav` temp files
+- [x] `save_setting()` handles `ocr_provider`/`tts_provider` changes (stops old worker)
+- [x] `save_setting("enabled", False)` stops both workers
+- [x] `get_settings()` returns `is_gcp_configured`, `is_local_available`, provider-aware `is_configured`
+- [x] New default settings: `ocr_provider`, `tts_provider`, `local_voice_id`, `local_speech_rate`
+
+**Frontend (src/index.tsx):**
+- [x] "Provider" section with OCR engine and TTS engine dropdowns
+- [x] GCP Credentials section conditionally hidden when both providers are local
+- [x] TTS voice/rate dropdowns swap between GCP voices and Piper voices based on provider
+- [x] Button disabled logic uses provider-aware readiness (`ocrReady`, `ttsReady`, `pipelineReady`)
+- [x] Provider status hints (missing credentials, missing bundled Python)
+
+**Docker (Dockerfile.plugin):**
+- [x] Stage 2b: Download bundled Python 3.12 from python-build-standalone
+- [x] Stage 2c: Install local inference deps into `py_modules_local/`
+- [x] Stage 2d: Download OCR ONNX models (det, rec, cls — no keys file) + Piper voice model
+- [x] Stage 4: Updated assembly to include new files in zip
+- [x] `--no-cache` builds enforced in `deploy.sh` to prevent stale pip layers
+
+**New settings:**
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ocr_provider` | `"local"` | OCR engine: "gcp" or "local" |
+| `tts_provider` | `"local"` | TTS engine: "gcp" or "local" |
+| `local_voice_id` | `"en_US-lessac-medium"` | Piper voice (only one bundled) |
+| `local_speech_rate` | `"medium"` | Piper speech rate preset |
+
+**Model handling decisions (lessons learned during implementation):**
+
+1. **RapidOCR package choice: `rapidocr-onnxruntime` (not `rapidocr` v3.x)**
+   - We first tried `rapidocr` v3.x which bundles models in the wheel. However: (a) it pulls in heavy transitive deps (sympy, shapely, pyclipper) inflating the zip to 292MB, (b) the API changed — returns `RapidOCROutput` object instead of the tuple `(result, elapse)`, requiring code rewrite, (c) less battle-tested than the older package.
+   - Switched to `rapidocr-onnxruntime` — same package Decky-Translator uses. Lighter deps, proven API, same OCR quality.
+
+2. **Keys file bug: do NOT pass `rec_keys_path` to RapidOCR**
+   - Our initial implementation downloaded `ppocr_keys_v1.txt` from HuggingFace and passed it as `rec_keys_path=`. This caused `IndexError: list index out of range` because the separately downloaded character dictionary didn't match the v4 recognition model's output vocabulary.
+   - **Fix (from Decky-Translator's approach):** Pass custom ONNX model paths (`det_model_path`, `rec_model_path`, `cls_model_path`) but do NOT pass `rec_keys_path`. The library's built-in character dictionary is guaranteed to match. The keys file is NOT downloaded or included in `models/ocr/`.
+
+3. **RapidOCR result format: `result = engine(img)` then `result[0]` for detections**
+   - `rapidocr-onnxruntime` returns a tuple-like object. `result[0]` is a list of `[bounding_box, text, confidence]` items (or `None`). Do NOT tuple-unpack (`result, elapse = ...`).
+
+4. **Piper TTS API: use `synthesize_wav()` (v1.3+ API)**
+   - `piper-tts>=1.4.0` removed the old `synthesize_stream_raw()` method. The new API uses `voice.synthesize_wav(text, wav_file, syn_config=SynthesisConfig(length_scale=...))` which writes WAV directly — simpler than manually collecting PCM chunks and writing WAV headers.
+
+**Performance (measured on Steam Deck):**
+| Metric | 1st trigger (cold worker) | Warm worker |
+|--------|--------------------------|-------------|
+| Total pipeline | ~5.7s | ~2.1s |
+| Screenshot capture | 0.21s | 0.21s |
+| OCR (RapidOCR) | ~1.4s | ~1.2s |
+| TTS (Piper) | ~1.3s | ~0.7s |
+| Worker startup (one-time) | ~3s | 0s |
+
+**Plugin zip size:** ~304 MB total (up from ~35 MB before local inference)
+
+### Phase 9: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Global overlay for displaying OCR text on screen
 - [ ] Region selection (crop to area instead of full screen)
 - [ ] Text filtering (ignore specific words/patterns)
@@ -273,27 +359,37 @@ Frontend (TypeScript/React)           Backend (Python)
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Architecture | Single Decky plugin, GCP calls via persistent subprocess | main.py runs under Decky's embedded Python; gcp_worker.py runs under system Python (`/usr/bin/python3`) in persistent "serve" mode with `py_modules/` on PYTHONPATH |
-| GCP worker mode | Persistent subprocess with stdin/stdout JSON lines | Eliminates ~1.7s per-call overhead (Python startup + imports + client init). GCP clients initialized once at startup; gRPC connections stay warm across requests |
+| Architecture | Single Decky plugin, API/model calls via persistent subprocesses | main.py runs under Decky's embedded Python; workers run under system/bundled Python in persistent "serve" mode |
+| Dual worker design | Two independent workers (GCP + local), same JSON protocol | Provider routing in main.py, workers don't know about each other. Each uses the right Python version for its deps |
+| GCP worker | System Python 3.13 + persistent subprocess | Matches Steam Deck's system Python; gRPC connections stay warm across requests |
+| Local worker | Bundled Python 3.12 + persistent subprocess | rapidocr-onnxruntime requires Python <3.13; ONNX models loaded once at startup |
+| Local OCR package | `rapidocr-onnxruntime` (not `rapidocr` v3.x) | Same as Decky-Translator. Lighter deps, proven API. Pass custom ONNX model paths but NOT `rec_keys_path` — the library's built-in keys file avoids model-dictionary mismatch |
+| Local TTS package | `piper-tts>=1.4.0` | v1.3+ API uses `synthesize_wav()` + `SynthesisConfig(length_scale=...)`. Old `synthesize_stream_raw()` was removed |
+| Bundled Python 3.12 | python-build-standalone install_only_stripped | Self-contained ~40MB interpreter, no system install needed, same approach as Decky-Translator |
 | Screen capture | GStreamer + PipeWire | Native to Steam Deck, hardware-accelerated |
-| Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; ffplay is reliably present on Steam Deck, mpv is not pre-installed. Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root. A daemon reaper thread calls `wait()` on the player process to prevent zombies when playback finishes naturally with the UI closed |
+| Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; supports both MP3 (GCP) and WAV (Piper). Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root. A daemon reaper thread prevents zombies |
 | GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
 | Button input | Hidraw direct device reading | Works in background without opening UI |
 | Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |
-| Pipeline optimization | Combined `ocr_tts` action via persistent worker | Read Screen pipeline sends single command to warm worker — no subprocess spawn, no imports, no client init |
+| Pipeline optimization | Combined `ocr_tts` action when both providers are the same | Single command to warm worker; mixed providers run OCR then TTS sequentially |
 | Pipeline cancellation | `threading.Event` checked between steps | Worker call timeout is bounded (60s); killing mid-request adds complexity for marginal benefit |
-| Python deps | Bundled in py_modules/ via Docker build | Runs on Steam Deck without internet |
+| GCP Python deps | Bundled in py_modules/ via Docker build (Python 3.13) | Runs on Steam Deck without internet |
+| Local Python deps | Bundled in py_modules_local/ via Docker build (Python 3.12) | Separate from GCP deps due to different Python versions |
+| Default provider | Local (offline) | Works out of the box without any setup; GCP requires service account |
+| Docker build | Always `--no-cache` via deploy.sh | Prevents stale pip layers that can silently reuse old packages after requirements.txt changes |
 
 ## File Structure
 
 ```
 decky-cloud-reader/
 ├── src/
-│   └── index.tsx              # Plugin entry, all UI (sections, file browser)
-├── main.py                    # Python backend (lifecycle, RPC, pipeline, worker management)
+│   └── index.tsx              # Plugin entry, all UI (sections, file browser, provider selection)
+├── main.py                    # Python backend (lifecycle, RPC, pipeline, dual worker management)
 ├── hidraw_monitor.py          # Hidraw button monitor (hold-to-trigger, background thread)
-├── gcp_worker.py              # GCP worker (persistent serve mode or one-shot CLI, system Python)
-├── requirements.txt           # Python dependencies
+├── gcp_worker.py              # GCP worker (persistent serve mode or one-shot CLI, system Python 3.13)
+├── local_worker.py            # Local worker (persistent serve mode or one-shot CLI, bundled Python 3.12)
+├── requirements.txt           # GCP Python dependencies (system Python 3.13)
+├── requirements_local.txt     # Local inference deps (bundled Python 3.12)
 ├── package.json
 ├── plugin.json
 ├── tsconfig.json
@@ -303,6 +399,24 @@ decky-cloud-reader/
 │   └── docker-compose.yml
 ├── deploy.sh
 └── CLAUDE.md
+```
+
+**Deployed plugin additionally contains (built by Docker):**
+```
+decky-cloud-reader/
+├── py_modules/                # GCP Python packages (compiled for cpython-313-x86_64)
+├── py_modules_local/          # Local inference packages (compiled for cpython-312-x86_64)
+├── python312/                 # Bundled Python 3.12 interpreter
+│   └── python/bin/python3.12
+└── models/                    # OCR + TTS model files
+    ├── ocr/                   # RapidOCR (PaddleOCR v4) ONNX models
+    │   ├── ch_PP-OCRv4_det_infer.onnx
+    │   ├── ch_PP-OCRv4_rec_infer.onnx
+    │   └── ch_ppocr_mobile_v2.0_cls_infer.onnx
+    │   # NOTE: NO ppocr_keys_v1.txt — library's built-in keys used instead
+    └── tts/                   # Piper voice model
+        ├── en_US-lessac-medium.onnx
+        └── en_US-lessac-medium.onnx.json
 ```
 
 Components may be split out of `index.tsx` into separate files if it grows too large, but there's no predetermined file split — keep it simple until complexity demands it.

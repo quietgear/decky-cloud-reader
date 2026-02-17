@@ -62,11 +62,16 @@ build() {
     # Ensure the dist/ directory exists for the Docker volume mount
     mkdir -p dist/
 
-    # Run the Docker Compose build.
-    # --build: always rebuild the Docker image (picks up source changes)
+    # Run the Docker Compose build from scratch every time.
+    # --build: rebuild the Docker image before starting containers
+    # --no-cache: skip layer cache entirely — ensures pip installs, model
+    #   downloads, and frontend builds always use the latest files.
+    #   Without this, Docker can reuse stale layers (e.g., old pip packages)
+    #   even when requirements.txt has changed.
     # The Dockerfile handles everything: frontend build, Python deps, zip creation.
     # The compose file just copies the zip out of the container.
-    docker compose -f docker/docker-compose.yml up --build
+    docker compose -f docker/docker-compose.yml build --no-cache
+    docker compose -f docker/docker-compose.yml up
 
     # Verify the zip was produced
     if [ ! -f "${ZIP_FILE}" ]; then

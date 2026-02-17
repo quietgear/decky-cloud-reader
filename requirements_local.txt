@@ -1,0 +1,19 @@
+# =============================================================================
+# Local inference dependencies — installed with bundled Python 3.12
+# =============================================================================
+# These are installed into py_modules_local/ (separate from the GCP deps in
+# py_modules/) using the bundled Python 3.12 interpreter. Python 3.12 is
+# required because rapidocr-onnxruntime doesn't support Python 3.13 yet.
+#
+# Installed during Docker build via:
+#   python312/python/bin/python3.12 -m pip install --target=py_modules_local/ -r requirements_local.txt
+#
+# We use rapidocr-onnxruntime (same as Decky-Translator) with separately
+# downloaded ONNX model files. IMPORTANT: we do NOT provide a custom
+# rec_keys_path — the library's built-in character dictionary is guaranteed
+# to match. Providing a separately downloaded ppocr_keys_v1.txt causes
+# IndexError due to model-dictionary version mismatch.
+
+rapidocr-onnxruntime>=1.3.0
+piper-tts>=1.4.0
+Pillow>=10.0.0

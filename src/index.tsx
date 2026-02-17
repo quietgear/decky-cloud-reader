@@ -130,15 +130,26 @@ interface ButtonMonitorStatus {
 
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
-  voice_id: string;         // TTS voice (Phase 5)
-  speech_rate: string;      // TTS speed preset (Phase 5)
-  volume: number;           // TTS volume 0-100 (Phase 5)
-  enabled: boolean;         // Master on/off
-  debug: boolean;           // Verbose logging
-  trigger_button: string;   // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
-  hold_time_ms: number;     // Hold threshold in ms (Phase 7)
-  is_configured: boolean;   // Computed: are GCP credentials loaded?
-  project_id: string;       // Computed: GCP project ID from credentials
+  // Provider selection (Phase 8)
+  ocr_provider: string;         // "gcp" or "local"
+  tts_provider: string;         // "gcp" or "local"
+  // GCP TTS settings
+  voice_id: string;             // GCP TTS voice (Phase 5)
+  speech_rate: string;          // GCP TTS speed preset (Phase 5)
+  // Local TTS settings (Phase 8)
+  local_voice_id: string;       // Piper voice ID
+  local_speech_rate: string;    // Piper speech rate preset
+  // Common settings
+  volume: number;               // TTS volume 0-100 (Phase 5)
+  enabled: boolean;             // Master on/off
+  debug: boolean;               // Verbose logging
+  trigger_button: string;       // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
+  hold_time_ms: number;         // Hold threshold in ms (Phase 7)
+  // Computed fields
+  is_configured: boolean;       // Whether current providers are ready
+  is_gcp_configured: boolean;   // Whether GCP credentials are loaded
+  is_local_available: boolean;  // Whether bundled Python 3.12 is present
+  project_id: string;           // GCP project ID from credentials
 }
 
 
@@ -225,6 +236,39 @@ const SPEECH_RATE_OPTIONS = [
   { data: "medium", label: "Normal (1.0x)" },
   { data: "fast",   label: "Fast (1.25x)" },
   { data: "x-fast", label: "Very Fast (1.5x)" },
+];
+
+
+// =============================================================================
+// Provider options for OCR and TTS engine selection (Phase 8)
+// =============================================================================
+// Users can choose between Google Cloud (online, requires credentials) and
+// local inference (offline, uses bundled models).
+
+const OCR_PROVIDER_OPTIONS = [
+  { data: "local", label: "RapidOCR (offline)" },
+  { data: "gcp",   label: "Google Cloud (online)" },
+];
+
+const TTS_PROVIDER_OPTIONS = [
+  { data: "local", label: "Piper TTS (offline)" },
+  { data: "gcp",   label: "Google Cloud (online)" },
+];
+
+// Local (Piper) voice options — currently only one bundled voice.
+// More voices can be added by downloading additional .onnx models.
+const LOCAL_VOICE_OPTIONS = [
+  { data: "en_US-lessac-medium", label: "US English - Lessac (Medium)" },
+];
+
+// Speech rate options for Piper TTS. Same labels as GCP but maps to
+// Piper's length_scale internally (inverse: lower = faster).
+const LOCAL_SPEECH_RATE_OPTIONS = [
+  { data: "x-slow", label: "Very Slow" },
+  { data: "slow",   label: "Slow" },
+  { data: "medium", label: "Normal" },
+  { data: "fast",   label: "Fast" },
+  { data: "x-fast", label: "Very Fast" },
 ];
 
 
@@ -780,6 +824,21 @@ function Content() {
     );
   }
 
+  // --- Computed readiness flags (Phase 8: provider-aware) ---
+  // Determines whether each provider has what it needs to function.
+  // Local provider needs bundled Python; GCP needs credentials.
+  const ocrReady = settings.ocr_provider === "local"
+    ? settings.is_local_available
+    : settings.is_gcp_configured;
+  const ttsReady = settings.tts_provider === "local"
+    ? settings.is_local_available
+    : settings.is_gcp_configured;
+  // Both providers must be ready for the full pipeline
+  const pipelineReady = ocrReady && ttsReady;
+
+  // Check if either provider uses GCP (controls GCP Credentials section visibility)
+  const needsGcp = settings.ocr_provider === "gcp" || settings.tts_provider === "gcp";
+
   // --- Normal mode (settings view) ---
   return (
     <>
@@ -830,7 +889,7 @@ function Content() {
             <ButtonItem
               layout="below"
               onClick={handleReadScreen}
-              disabled={!settings.is_configured || !settings.enabled}
+              disabled={!pipelineReady || !settings.enabled}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
                 <FaBook size={14} />
@@ -840,15 +899,22 @@ function Content() {
           )}
         </PanelSectionRow>
 
-        {/* Hint when credentials aren't configured */}
-        {!settings.is_configured && (
+        {/* Hint when providers aren't ready */}
+        {!pipelineReady && (
           <PanelSectionRow>
             <div style={{
               color: "#b8bcbf",
               fontSize: "12px",
               padding: "4px 0"
             }}>
-              Load GCP credentials below to enable
+              {!ocrReady && settings.ocr_provider === "gcp"
+                ? "Load GCP credentials to enable OCR"
+                : !ocrReady
+                ? "Local OCR unavailable (bundled Python missing)"
+                : !ttsReady && settings.tts_provider === "gcp"
+                ? "Load GCP credentials to enable TTS"
+                : "Local TTS unavailable (bundled Python missing)"
+              }
             </div>
           </PanelSectionRow>
         )}
@@ -943,22 +1009,103 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
+      {/* ---- Provider Section (Phase 8) ---- */}
+      {/* Lets the user choose between Google Cloud (online) and local (offline)
+          for OCR and TTS independently. Changing a provider stops the old
+          worker so the new one lazy-starts on next use. */}
+      <PanelSection title="Provider">
+        {/* OCR Engine dropdown */}
+        <PanelSectionRow>
+          <DropdownItem
+            label="OCR Engine"
+            description="Text detection engine"
+            menuLabel="Select OCR Engine"
+            rgOptions={OCR_PROVIDER_OPTIONS.map((o) => ({
+              data: o.data,
+              label: o.label,
+            }))}
+            selectedOption={
+              OCR_PROVIDER_OPTIONS.find((o) => o.data === settings.ocr_provider)?.data
+              ?? OCR_PROVIDER_OPTIONS[0].data
+            }
+            onChange={async (option) => {
+              await saveSetting("ocr_provider", option.data);
+              const updated = await getSettings();
+              setSettings(updated);
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* TTS Engine dropdown */}
+        <PanelSectionRow>
+          <DropdownItem
+            label="TTS Engine"
+            description="Speech synthesis engine"
+            menuLabel="Select TTS Engine"
+            rgOptions={TTS_PROVIDER_OPTIONS.map((o) => ({
+              data: o.data,
+              label: o.label,
+            }))}
+            selectedOption={
+              TTS_PROVIDER_OPTIONS.find((o) => o.data === settings.tts_provider)?.data
+              ?? TTS_PROVIDER_OPTIONS[0].data
+            }
+            onChange={async (option) => {
+              await saveSetting("tts_provider", option.data);
+              const updated = await getSettings();
+              setSettings(updated);
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* Provider status hints */}
+        {settings.ocr_provider === "local" && !settings.is_local_available && (
+          <PanelSectionRow>
+            <div style={{ color: "#e74c3c", fontSize: "12px", padding: "4px 0" }}>
+              Local OCR unavailable — bundled Python not found
+            </div>
+          </PanelSectionRow>
+        )}
+        {settings.tts_provider === "local" && !settings.is_local_available && (
+          <PanelSectionRow>
+            <div style={{ color: "#e74c3c", fontSize: "12px", padding: "4px 0" }}>
+              Local TTS unavailable — bundled Python not found
+            </div>
+          </PanelSectionRow>
+        )}
+        {settings.ocr_provider === "gcp" && !settings.is_gcp_configured && (
+          <PanelSectionRow>
+            <div style={{ color: "#e74c3c", fontSize: "12px", padding: "4px 0" }}>
+              GCP OCR needs credentials — load them below
+            </div>
+          </PanelSectionRow>
+        )}
+        {settings.tts_provider === "gcp" && !settings.is_gcp_configured && (
+          <PanelSectionRow>
+            <div style={{ color: "#e74c3c", fontSize: "12px", padding: "4px 0" }}>
+              GCP TTS needs credentials — load them below
+            </div>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
       {/* ---- GCP Credentials Section ---- */}
-      <PanelSection title="GCP Credentials">
+      {/* Only shown when at least one provider uses GCP */}
+      {needsGcp && <PanelSection title="GCP Credentials">
         {/* Status: Configured or Not Configured */}
         <PanelSectionRow>
           <Field label="Status">
             <div style={{
-              color: settings.is_configured ? "#2ecc71" : "#e74c3c",
+              color: settings.is_gcp_configured ? "#2ecc71" : "#e74c3c",
               fontWeight: "bold"
             }}>
-              {settings.is_configured ? "Configured" : "Not Configured"}
+              {settings.is_gcp_configured ? "Configured" : "Not Configured"}
             </div>
           </Field>
         </PanelSectionRow>
 
         {/* Show project ID when credentials are loaded */}
-        {settings.is_configured && settings.project_id && (
+        {settings.is_gcp_configured && settings.project_id && (
           <PanelSectionRow>
             <Field label="Project">
               <div style={{ color: "#b8bcbf", fontSize: "13px" }}>
@@ -993,19 +1140,19 @@ function Content() {
         {/* Load Credentials button — opens the file browser */}
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => setMode("browser")}>
-            {settings.is_configured ? "Change Credentials" : "Load Credentials"}
+            {settings.is_gcp_configured ? "Change Credentials" : "Load Credentials"}
           </ButtonItem>
         </PanelSectionRow>
 
         {/* Clear Credentials button — only shown when credentials are loaded */}
-        {settings.is_configured && (
+        {settings.is_gcp_configured && (
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={handleClearCredentials}>
               Clear Credentials
             </ButtonItem>
           </PanelSectionRow>
         )}
-      </PanelSection>
+      </PanelSection>}
 
       {/* ---- Settings Section ---- */}
       <PanelSection title="Settings">
@@ -1072,26 +1219,29 @@ function Content() {
           </PanelSectionRow>
         )}
 
-        {/* Test OCR button — captures screenshot + runs Cloud Vision OCR */}
+        {/* Test OCR button — captures screenshot + runs OCR via selected provider */}
         <PanelSectionRow>
           <ButtonItem
             layout="below"
             onClick={handleTestOcr}
-            disabled={isOcrRunning || !settings.is_configured || isPipelineRunning || !settings.enabled}
+            disabled={isOcrRunning || !ocrReady || isPipelineRunning || !settings.enabled}
           >
             {isOcrRunning ? "Running OCR..." : "Test OCR"}
           </ButtonItem>
         </PanelSectionRow>
 
-        {/* Hint when credentials aren't configured */}
-        {!settings.is_configured && (
+        {/* Hint when OCR provider isn't ready */}
+        {!ocrReady && (
           <PanelSectionRow>
             <div style={{
               color: "#b8bcbf",
               fontSize: "12px",
               padding: "4px 0"
             }}>
-              Load GCP credentials above to enable OCR
+              {settings.ocr_provider === "gcp"
+                ? "Load GCP credentials to enable OCR"
+                : "Local OCR unavailable (bundled Python missing)"
+              }
             </div>
           </PanelSectionRow>
         )}
@@ -1120,51 +1270,104 @@ function Content() {
 
       {/* ---- TTS (Text-to-Speech) Section ---- */}
       <PanelSection title="Text-to-Speech">
-        {/* Voice selection dropdown */}
-        <PanelSectionRow>
-          <DropdownItem
-            label="Voice"
-            description="Neural2 voice for speech synthesis"
-            menuLabel="Select Voice"
-            rgOptions={VOICE_OPTIONS.map((v) => ({
-              data: v.data,
-              label: v.label,
-            }))}
-            selectedOption={
-              VOICE_OPTIONS.find((v) => v.data === settings.voice_id)?.data
-              ?? VOICE_OPTIONS[1].data  // Default: en-US-Neural2-C
-            }
-            onChange={(option) => {
-              saveSetting("voice_id", option.data);
-              if (settings) {
-                setSettings({ ...settings, voice_id: option.data as string });
-              }
-            }}
-          />
-        </PanelSectionRow>
+        {/* Voice selection — different options based on TTS provider */}
+        {settings.tts_provider === "gcp" ? (
+          <>
+            {/* GCP Voice selection dropdown */}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Voice"
+                description="Neural2 voice for speech synthesis"
+                menuLabel="Select Voice"
+                rgOptions={VOICE_OPTIONS.map((v) => ({
+                  data: v.data,
+                  label: v.label,
+                }))}
+                selectedOption={
+                  VOICE_OPTIONS.find((v) => v.data === settings.voice_id)?.data
+                  ?? VOICE_OPTIONS[1].data
+                }
+                onChange={(option) => {
+                  saveSetting("voice_id", option.data);
+                  if (settings) {
+                    setSettings({ ...settings, voice_id: option.data as string });
+                  }
+                }}
+              />
+            </PanelSectionRow>
 
-        {/* Speech rate dropdown */}
-        <PanelSectionRow>
-          <DropdownItem
-            label="Speech Rate"
-            description="How fast the text is read aloud"
-            menuLabel="Select Speed"
-            rgOptions={SPEECH_RATE_OPTIONS.map((r) => ({
-              data: r.data,
-              label: r.label,
-            }))}
-            selectedOption={
-              SPEECH_RATE_OPTIONS.find((r) => r.data === settings.speech_rate)?.data
-              ?? SPEECH_RATE_OPTIONS[2].data  // Default: medium
-            }
-            onChange={(option) => {
-              saveSetting("speech_rate", option.data);
-              if (settings) {
-                setSettings({ ...settings, speech_rate: option.data as string });
-              }
-            }}
-          />
-        </PanelSectionRow>
+            {/* GCP Speech rate dropdown */}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Speech Rate"
+                description="How fast the text is read aloud"
+                menuLabel="Select Speed"
+                rgOptions={SPEECH_RATE_OPTIONS.map((r) => ({
+                  data: r.data,
+                  label: r.label,
+                }))}
+                selectedOption={
+                  SPEECH_RATE_OPTIONS.find((r) => r.data === settings.speech_rate)?.data
+                  ?? SPEECH_RATE_OPTIONS[2].data
+                }
+                onChange={(option) => {
+                  saveSetting("speech_rate", option.data);
+                  if (settings) {
+                    setSettings({ ...settings, speech_rate: option.data as string });
+                  }
+                }}
+              />
+            </PanelSectionRow>
+          </>
+        ) : (
+          <>
+            {/* Local (Piper) Voice selection dropdown */}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Voice"
+                description="Piper voice for offline speech synthesis"
+                menuLabel="Select Voice"
+                rgOptions={LOCAL_VOICE_OPTIONS.map((v) => ({
+                  data: v.data,
+                  label: v.label,
+                }))}
+                selectedOption={
+                  LOCAL_VOICE_OPTIONS.find((v) => v.data === settings.local_voice_id)?.data
+                  ?? LOCAL_VOICE_OPTIONS[0].data
+                }
+                onChange={(option) => {
+                  saveSetting("local_voice_id", option.data);
+                  if (settings) {
+                    setSettings({ ...settings, local_voice_id: option.data as string });
+                  }
+                }}
+              />
+            </PanelSectionRow>
+
+            {/* Local Speech rate dropdown */}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Speech Rate"
+                description="How fast the text is read aloud"
+                menuLabel="Select Speed"
+                rgOptions={LOCAL_SPEECH_RATE_OPTIONS.map((r) => ({
+                  data: r.data,
+                  label: r.label,
+                }))}
+                selectedOption={
+                  LOCAL_SPEECH_RATE_OPTIONS.find((r) => r.data === settings.local_speech_rate)?.data
+                  ?? LOCAL_SPEECH_RATE_OPTIONS[2].data
+                }
+                onChange={(option) => {
+                  saveSetting("local_speech_rate", option.data);
+                  if (settings) {
+                    setSettings({ ...settings, local_speech_rate: option.data as string });
+                  }
+                }}
+              />
+            </PanelSectionRow>
+          </>
+        )}
 
         {/* Volume slider (0-100, step 10, debounced save) */}
         <PanelSectionRow>
@@ -1214,7 +1417,7 @@ function Content() {
             <ButtonItem
               layout="below"
               onClick={handleReadText}
-              disabled={isTtsRunning || !ocrText || !settings.is_configured || isPipelineRunning || !settings.enabled}
+              disabled={isTtsRunning || !ocrText || !ttsReady || isPipelineRunning || !settings.enabled}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
                 <FaVolumeUp size={14} />
@@ -1225,7 +1428,7 @@ function Content() {
         </PanelSectionRow>
 
         {/* Hint when no OCR text is available */}
-        {!ocrText && settings.is_configured && (
+        {!ocrText && ttsReady && (
           <PanelSectionRow>
             <div style={{
               color: "#b8bcbf",
@@ -1237,15 +1440,18 @@ function Content() {
           </PanelSectionRow>
         )}
 
-        {/* Hint when credentials aren't configured */}
-        {!settings.is_configured && (
+        {/* Hint when TTS provider isn't ready */}
+        {!ttsReady && (
           <PanelSectionRow>
             <div style={{
               color: "#b8bcbf",
               fontSize: "12px",
               padding: "4px 0"
             }}>
-              Load GCP credentials above to enable TTS
+              {settings.tts_provider === "gcp"
+                ? "Load GCP credentials to enable TTS"
+                : "Local TTS unavailable (bundled Python missing)"
+              }
             </div>
           </PanelSectionRow>
         )}

@@ -2,9 +2,11 @@
 # Decky Cloud Reader — Build Dockerfile
 # =============================================================================
 #
-# This Dockerfile does TWO things inside an x86_64 Linux container:
+# This Dockerfile does FOUR things inside an x86_64 Linux container:
 #   1. Builds the frontend: TypeScript → bundled JavaScript (via Rollup)
-#   2. Installs Python dependencies into py_modules/ (via pip, if any exist)
+#   2. Installs GCP Python dependencies into py_modules/ (Python 3.13 pip)
+#   3. Downloads bundled Python 3.12 + local inference deps into py_modules_local/
+#   4. Downloads OCR + TTS models into models/
 #
 # We need x86_64 because:
 #   - The Steam Deck runs x86_64 Linux
@@ -13,10 +15,15 @@
 #   - Our dev machine is ARM (M1 Mac), so we cross-compile via Docker
 #
 # We use python:3.13-slim (Debian-based) as the base image because:
-#   - Python 3.13 matches the Steam Deck's system Python exactly
+#   - Python 3.13 matches the Steam Deck's system Python for GCP worker
 #   - C extensions (.so files) like grpc's cygrpc are version-specific
-#     (e.g., cygrpc.cpython-313-x86_64-linux-gnu.so)
 #   - Debian base means rollup's @rollup/rollup-linux-x64-gnu works
+#
+# Bundled Python 3.12 is downloaded separately because:
+#   - rapidocr-onnxruntime requires Python <3.13
+#   - We use python-build-standalone for a self-contained interpreter (~40MB)
+#   - Local worker (local_worker.py) runs under this bundled Python
+#
 # Node.js is installed on top for the frontend build (pnpm + Rollup).
 #
 # The final output is a zip file at /app/output/decky-cloud-reader.zip
@@ -77,6 +84,57 @@ RUN if [ -f requirements.txt ]; then \
     fi
 
 # ---------------------------------------------------------------------------
+# Stage 2b: Download bundled Python 3.12 (for local inference worker)
+# ---------------------------------------------------------------------------
+# rapidocr-onnxruntime doesn't support Python 3.13, so we bundle a standalone
+# Python 3.12 interpreter from python-build-standalone. This is a ~40MB
+# compressed, self-contained interpreter — no system-level install needed.
+# The "install_only_stripped" variant has debug symbols removed for smaller size.
+RUN curl -L -o /tmp/python312.tar.gz \
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.12.9+20250317-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" && \
+    mkdir -p /app/python312 && \
+    tar -xzf /tmp/python312.tar.gz -C /app/python312 && \
+    rm /tmp/python312.tar.gz
+
+# ---------------------------------------------------------------------------
+# Stage 2c: Install Python 3.12 local inference dependencies
+# ---------------------------------------------------------------------------
+# These are installed using the bundled Python 3.12's pip into a SEPARATE
+# directory (py_modules_local/) from the GCP deps (py_modules/). This keeps
+# them isolated — different Python versions, different package sets.
+COPY requirements_local.txt ./
+RUN /app/python312/python/bin/python3.12 -m pip install \
+    --target=/app/py_modules_local --no-cache-dir \
+    -r requirements_local.txt
+
+# ---------------------------------------------------------------------------
+# Stage 2d: Download OCR + TTS models
+# ---------------------------------------------------------------------------
+# RapidOCR ONNX models (PaddleOCR v4):
+#   - det: text detection (finds text regions in the image)
+#   - rec: text recognition (reads characters in each region)
+#   - cls: text direction classification (handles rotated text)
+#   NOTE: We do NOT download ppocr_keys_v1.txt — the rapidocr_onnxruntime
+#   package has a built-in character dictionary that is guaranteed to match.
+#   Providing a separately downloaded keys file causes IndexError due to
+#   model-dictionary version mismatch (same approach as Decky-Translator).
+#
+# Piper TTS voice model:
+#   - en_US-lessac-medium: US English, medium quality (~63MB ONNX)
+#   - .onnx.json: model config (sample rate, phoneme map, etc.)
+RUN mkdir -p /app/models/ocr /app/models/tts && \
+    curl -L -o /app/models/ocr/ch_PP-OCRv4_det_infer.onnx \
+      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx" && \
+    curl -L -o /app/models/ocr/ch_PP-OCRv4_rec_infer.onnx \
+      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx" && \
+    curl -L -o /app/models/ocr/ch_ppocr_mobile_v2.0_cls_infer.onnx \
+      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_ppocr_mobile_v2.0_cls_train.onnx" && \
+    curl -L -o /app/models/tts/en_US-lessac-medium.onnx \
+      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx" && \
+    curl -L -o /app/models/tts/en_US-lessac-medium.onnx.json \
+      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+
+# ---------------------------------------------------------------------------
 # Stage 3: Copy source and build frontend
 # ---------------------------------------------------------------------------
 # Now copy everything else (src/, tsconfig, rollup config, main.py, etc.)
@@ -95,13 +153,20 @@ RUN pnpm build
 # Expected structure inside the zip:
 #   decky-cloud-reader/
 #   ├── dist/
-#   │   └── index.js        ← Bundled frontend JavaScript
-#   ├── plugin.json          ← Plugin metadata (name, author, flags)
-#   ├── package.json         ← Version info (read by Decky Loader)
-#   ├── main.py              ← Python backend
-#   ├── hidraw_monitor.py    ← Hidraw button monitor (hold-to-trigger)
-#   ├── gcp_worker.py        ← GCP subprocess (OCR + TTS)
-#   └── py_modules/          ← Python dependencies
+#   │   └── index.js           ← Bundled frontend JavaScript
+#   ├── plugin.json             ← Plugin metadata (name, author, flags)
+#   ├── package.json            ← Version info (read by Decky Loader)
+#   ├── main.py                 ← Python backend
+#   ├── hidraw_monitor.py       ← Hidraw button monitor (hold-to-trigger)
+#   ├── gcp_worker.py           ← GCP subprocess (OCR + TTS via Google Cloud)
+#   ├── local_worker.py         ← Local subprocess (OCR + TTS via RapidOCR + Piper)
+#   ├── py_modules/             ← GCP Python dependencies (system Python 3.13)
+#   ├── py_modules_local/       ← Local inference deps (bundled Python 3.12)
+#   ├── python312/              ← Bundled Python 3.12 interpreter
+#   │   └── python/bin/python3.12
+#   └── models/                 ← OCR + TTS model files
+#       ├── ocr/                ← RapidOCR (PaddleOCR v4) ONNX models (no keys file)
+#       └── tts/                ← Piper voice model (en_US-lessac-medium)
 RUN mkdir -p /app/output/decky-cloud-reader/dist && \
     cp /app/dist/index.js /app/output/decky-cloud-reader/dist/ && \
     cp /app/plugin.json /app/output/decky-cloud-reader/ && \
@@ -109,6 +174,10 @@ RUN mkdir -p /app/output/decky-cloud-reader/dist && \
     cp /app/main.py /app/output/decky-cloud-reader/ && \
     cp /app/hidraw_monitor.py /app/output/decky-cloud-reader/ && \
     cp /app/gcp_worker.py /app/output/decky-cloud-reader/ && \
+    cp /app/local_worker.py /app/output/decky-cloud-reader/ && \
     cp -r /app/py_modules /app/output/decky-cloud-reader/ && \
+    cp -r /app/py_modules_local /app/output/decky-cloud-reader/ && \
+    cp -r /app/python312 /app/output/decky-cloud-reader/ && \
+    cp -r /app/models /app/output/decky-cloud-reader/ && \
     cd /app/output && \
     zip -r decky-cloud-reader.zip decky-cloud-reader/
