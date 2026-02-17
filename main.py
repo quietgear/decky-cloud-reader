@@ -1635,10 +1635,8 @@ class Plugin:
                 "text": text,
                 "output_path": tmp_path,
                 "speech_rate": speech_rate,
+                "voice_id": voice_id,
             }
-            # GCP worker also needs voice_id
-            if tts_provider == "gcp":
-                command["voice_id"] = voice_id
 
             result = self._send_command(command, provider=tts_provider, timeout=TTS_TIMEOUT)
 
@@ -1811,9 +1809,8 @@ class Plugin:
                     "image_path": ocr_tmp_path,
                     "output_path": tts_tmp_path,
                     "speech_rate": speech_rate,
+                    "voice_id": voice_id,
                 }
-                if ocr_provider == "gcp":
-                    command["voice_id"] = voice_id
 
                 result = self._send_command(command, provider=ocr_provider, timeout=OCR_TTS_TIMEOUT)
                 t_ocr_tts = time.monotonic() - t_step
@@ -1869,9 +1866,8 @@ class Plugin:
                     "text": ocr_text,
                     "output_path": tts_tmp_path,
                     "speech_rate": speech_rate,
+                    "voice_id": voice_id,
                 }
-                if tts_provider == "gcp":
-                    tts_command["voice_id"] = voice_id
 
                 tts_result = self._send_command(tts_command, provider=tts_provider, timeout=TTS_TIMEOUT)
                 t_ocr_tts = time.monotonic() - t_step

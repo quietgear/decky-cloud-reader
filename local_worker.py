@@ -57,6 +57,19 @@ PIPER_RATE_MAP = {
     "x-fast": 0.6,
 }
 
+# Registry of bundled Piper voices. Each key is the voice_id (used in settings
+# and worker commands), and the value is a display-friendly description for logs.
+# All models live in LOCAL_MODELS_DIR/tts/ as <voice_id>.onnx + <voice_id>.onnx.json.
+PIPER_VOICES = {
+    "en_US-lessac-medium": "US Female - Lessac",
+    "en_US-ryan-medium":   "US Male - Ryan",
+    "en_GB-cori-medium":   "UK Female - Cori",
+    "en_GB-alan-medium":   "UK Male - Alan",
+}
+
+# Default voice used when no voice_id is specified or an unknown voice is requested.
+DEFAULT_PIPER_VOICE = "en_US-lessac-medium"
+
 
 # ---------------------------------------------------------------------------
 # Logging helpers — all output goes to stderr, never stdout
@@ -217,13 +230,13 @@ def do_ocr(image_path, ocr_engine=None):
 # TTS action — synthesize speech using Piper TTS (offline)
 # ---------------------------------------------------------------------------
 
-def do_tts(text, output_path, speech_rate, piper_voice=None):
+def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None):
     """
     Synthesize speech from text using Piper TTS (offline, local inference).
 
     Steps:
       1. Validate text input
-      2. Initialize Piper voice model (skip if pre-initialized)
+      2. Load Piper voice (from cache in serve mode, or fresh in CLI mode)
       3. Map speech rate to Piper's length_scale
       4. Synthesize audio to WAV file
 
@@ -231,8 +244,10 @@ def do_tts(text, output_path, speech_rate, piper_voice=None):
         text: The text to synthesize into speech.
         output_path: Absolute path where the WAV file will be written.
         speech_rate: Speed preset from PIPER_RATE_MAP (e.g., "medium").
-        piper_voice: Optional pre-initialized PiperVoice. When provided
-                     (in serve mode), skips model loading for speed.
+        voice_id: Piper voice to use (e.g., "en_US-ryan-medium"). Falls back
+                  to DEFAULT_PIPER_VOICE if None or unknown.
+        voice_cache: Dict of cached PiperVoice instances (serve mode). When None
+                     (CLI mode), voice is loaded fresh and not cached.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -241,15 +256,19 @@ def do_tts(text, output_path, speech_rate, piper_voice=None):
     if not text or not text.strip():
         output_error("No text provided for TTS")
 
-    log_info(f"TTS input: {len(text):,} chars, rate={speech_rate}")
+    log_info(f"TTS input: {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
 
-    # Step 2: Initialize Piper voice if not pre-initialized
-    if piper_voice is None:
-        try:
-            piper_voice = _init_piper_voice()
-        except Exception as e:
-            log_error(f"Failed to init Piper voice: {e}")
-            output_error(f"Failed to initialize Piper voice: {e}")
+    # Step 2: Load Piper voice — use cache in serve mode, fresh load in CLI mode
+    try:
+        if voice_cache is not None:
+            # Serve mode: use lazy cache (loads on first use, reuses after)
+            piper_voice, resolved_voice_id = _get_or_load_voice(voice_id, voice_cache)
+        else:
+            # CLI mode: load fresh (no cache to store it in)
+            piper_voice, resolved_voice_id = _init_piper_voice(voice_id)
+    except Exception as e:
+        log_error(f"Failed to init Piper voice: {e}")
+        output_error(f"Failed to initialize Piper voice: {e}")
 
     # Step 3: Map speech rate to Piper's length_scale (inverse: lower = faster)
     length_scale = PIPER_RATE_MAP.get(speech_rate, 1.0)
@@ -259,7 +278,7 @@ def do_tts(text, output_path, speech_rate, piper_voice=None):
     # Step 4: Synthesize audio using piper-tts v1.3+ API.
     # synthesize_wav() writes a complete WAV file directly — simpler than
     # collecting raw PCM chunks manually. SynthesisConfig controls speech rate.
-    log_info(f"Synthesizing speech (length_scale={length_scale})...")
+    log_info(f"Synthesizing speech with '{resolved_voice_id}' (length_scale={length_scale})...")
     t_start = time.monotonic()
 
     try:
@@ -278,8 +297,8 @@ def do_tts(text, output_path, speech_rate, piper_voice=None):
             "audio_size": audio_size,
             "output_path": output_path,
             "text_length": len(text),
-            "voice_id": "en_US-lessac-medium",
-            "message": f"TTS complete: {audio_size:,} bytes, piper/en_US-lessac-medium",
+            "voice_id": resolved_voice_id,
+            "message": f"TTS complete: {audio_size:,} bytes, piper/{resolved_voice_id}",
         })
 
     except Exception as e:
@@ -293,7 +312,7 @@ def do_tts(text, output_path, speech_rate, piper_voice=None):
 # ---------------------------------------------------------------------------
 
 def do_ocr_tts(image_path, output_audio_path, speech_rate,
-               ocr_engine=None, piper_voice=None):
+               ocr_engine=None, voice_id=None, voice_cache=None):
     """
     Perform OCR and TTS in a single invocation (same as GCP's combined action).
 
@@ -307,7 +326,10 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
         output_audio_path: Absolute path where the WAV file will be written.
         speech_rate: Speed preset from PIPER_RATE_MAP (e.g., "medium").
         ocr_engine: Optional pre-initialized RapidOCR engine (serve mode).
-        piper_voice: Optional pre-initialized PiperVoice (serve mode).
+        voice_id: Piper voice to use (e.g., "en_US-ryan-medium"). Falls back
+                  to DEFAULT_PIPER_VOICE if None or unknown.
+        voice_cache: Dict of cached PiperVoice instances (serve mode). When None
+                     (CLI mode), voice is loaded fresh and not cached.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -347,6 +369,9 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
     log_info(f"OCR completed in {t_ocr:.2f}s")
 
     # ---- Step 4: Handle no text detected ----
+    # Resolve voice_id early so it appears in the result even when no text is found
+    resolved_voice_id = voice_id if (voice_id and voice_id in PIPER_VOICES) else DEFAULT_PIPER_VOICE
+
     if not result or not result[0]:
         log_info("No text detected in image")
         output_result({
@@ -356,7 +381,7 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
             "line_count": 0,
             "audio_size": 0,
             "output_path": "",
-            "voice_id": "en_US-lessac-medium",
+            "voice_id": resolved_voice_id,
             "message": "No text detected in image",
         })
 
@@ -367,13 +392,15 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
     line_count = detected_text.count("\n") + 1 if detected_text else 0
     log_info(f"OCR detected {char_count:,} chars, {line_count} lines")
 
-    # ---- Step 6: Initialize Piper voice if needed ----
-    if piper_voice is None:
-        try:
-            piper_voice = _init_piper_voice()
-        except Exception as e:
-            log_error(f"Failed to init Piper voice: {e}")
-            output_error(f"TTS voice init failed (OCR text available): {e}")
+    # ---- Step 6: Load Piper voice (from cache or fresh) ----
+    try:
+        if voice_cache is not None:
+            piper_voice, resolved_voice_id = _get_or_load_voice(voice_id, voice_cache)
+        else:
+            piper_voice, resolved_voice_id = _init_piper_voice(voice_id)
+    except Exception as e:
+        log_error(f"Failed to init Piper voice: {e}")
+        output_error(f"TTS voice init failed (OCR text available): {e}")
 
     # ---- Step 7: Synthesize speech (piper-tts v1.3+ API) ----
     length_scale = PIPER_RATE_MAP.get(speech_rate, 1.0)
@@ -407,8 +434,8 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
         "line_count": line_count,
         "audio_size": audio_size,
         "output_path": output_audio_path,
-        "voice_id": "en_US-lessac-medium",
-        "message": f"OCR+TTS complete: {char_count:,} chars, {audio_size:,} bytes",
+        "voice_id": resolved_voice_id,
+        "message": f"OCR+TTS complete: {char_count:,} chars, {audio_size:,} bytes, piper/{resolved_voice_id}",
     })
 
 
@@ -461,24 +488,35 @@ def _init_ocr_engine():
     return engine
 
 
-def _init_piper_voice():
+def _init_piper_voice(voice_id=None):
     """
-    Load the Piper TTS voice model.
+    Load a Piper TTS voice model by voice_id.
 
     Model files are expected in LOCAL_MODELS_DIR/tts/:
-      - en_US-lessac-medium.onnx      (the voice model)
-      - en_US-lessac-medium.onnx.json  (model config with sample_rate etc.)
+      - <voice_id>.onnx      (the voice model)
+      - <voice_id>.onnx.json  (model config with sample_rate etc.)
+
+    Args:
+        voice_id: The voice identifier (e.g., "en_US-lessac-medium"). Falls back
+                  to DEFAULT_PIPER_VOICE if None or not in PIPER_VOICES.
 
     Returns:
-        An initialized PiperVoice ready to synthesize speech.
+        A tuple of (PiperVoice, resolved_voice_id) — the resolved ID may differ
+        from input if the requested voice was unknown or None.
     """
+    # Resolve voice_id — fall back to default if unknown or missing
+    if not voice_id or voice_id not in PIPER_VOICES:
+        if voice_id:
+            log_info(f"Unknown voice_id '{voice_id}', falling back to {DEFAULT_PIPER_VOICE}")
+        voice_id = DEFAULT_PIPER_VOICE
+
     models_dir = os.environ.get("LOCAL_MODELS_DIR", "")
     if not models_dir:
         raise RuntimeError("LOCAL_MODELS_DIR environment variable not set")
 
     tts_dir = os.path.join(models_dir, "tts")
-    model_path = os.path.join(tts_dir, "en_US-lessac-medium.onnx")
-    config_path = os.path.join(tts_dir, "en_US-lessac-medium.onnx.json")
+    model_path = os.path.join(tts_dir, f"{voice_id}.onnx")
+    config_path = os.path.join(tts_dir, f"{voice_id}.onnx.json")
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Piper voice model not found: {model_path}")
@@ -487,10 +525,40 @@ def _init_piper_voice():
 
     from piper import PiperVoice
 
-    log_info(f"Loading Piper voice from {model_path}")
+    log_info(f"Loading Piper voice '{voice_id}' from {model_path}")
     voice = PiperVoice.load(model_path, config_path=config_path)
-    log_info("Piper voice loaded")
-    return voice
+    log_info(f"Piper voice '{voice_id}' loaded")
+    return voice, voice_id
+
+
+def _get_or_load_voice(voice_id, voice_cache):
+    """
+    Get a Piper voice from cache, or load and cache it on first use.
+
+    This implements lazy-loading: voices are only loaded into memory when first
+    requested, then cached in voice_cache dict for instant reuse. This way the
+    worker doesn't pay the ~1s load cost for voices that are never used, and
+    switching between previously-used voices is free.
+
+    Args:
+        voice_id: The voice identifier (e.g., "en_US-ryan-medium").
+        voice_cache: Dict mapping voice_id → PiperVoice (mutated in place).
+
+    Returns:
+        A tuple of (PiperVoice, resolved_voice_id).
+    """
+    # Resolve to default if missing/unknown before checking cache
+    resolved_id = voice_id if (voice_id and voice_id in PIPER_VOICES) else DEFAULT_PIPER_VOICE
+
+    if resolved_id in voice_cache:
+        log_debug(f"Using cached voice '{resolved_id}'")
+        return voice_cache[resolved_id], resolved_id
+
+    log_info(f"Voice cache miss for '{resolved_id}', loading...")
+    voice, resolved_id = _init_piper_voice(resolved_id)
+    voice_cache[resolved_id] = voice
+    log_info(f"Voice '{resolved_id}' loaded and cached ({len(voice_cache)} voice(s) in cache)")
+    return voice, resolved_id
 
 
 # ---------------------------------------------------------------------------
@@ -521,13 +589,15 @@ def serve():
     # Step 2: Ensure stdout flushes after every line (critical for JSON protocol).
     sys.stdout.reconfigure(line_buffering=True)
 
-    # Step 3: Initialize OCR engine and Piper voice model upfront.
-    # This is the ~3-5s we're paying ONCE instead of every call.
+    # Step 3: Initialize OCR engine upfront, but use lazy-loading for TTS voices.
+    # OCR engine is always needed and there's only one, so we pay the ~1.5s load
+    # cost at startup. Piper voices are loaded on first use and cached — this way
+    # startup is faster (~1.5s instead of ~3s) and only used voices consume memory.
     try:
-        log_info("serve: initializing models...")
+        log_info("serve: initializing OCR engine...")
         ocr_engine = _init_ocr_engine()
-        piper_voice = _init_piper_voice()
-        log_info("serve: both models initialized")
+        voice_cache = {}  # Lazy voice cache: voice_id → PiperVoice
+        log_info("serve: OCR engine initialized, voice cache empty (lazy-load)")
     except Exception as e:
         log_error(f"serve: model init failed: {e}")
         log_error(traceback.format_exc())
@@ -578,12 +648,15 @@ def serve():
             elif action == "tts":
                 do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
                        cmd.get("speech_rate", "medium"),
-                       piper_voice=piper_voice)
+                       voice_id=cmd.get("voice_id"),
+                       voice_cache=voice_cache)
 
             elif action == "ocr_tts":
                 do_ocr_tts(cmd.get("image_path", ""), cmd.get("output_path", ""),
                            cmd.get("speech_rate", "medium"),
-                           ocr_engine=ocr_engine, piper_voice=piper_voice)
+                           ocr_engine=ocr_engine,
+                           voice_id=cmd.get("voice_id"),
+                           voice_cache=voice_cache)
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)
@@ -613,10 +686,10 @@ def main():
     Usage: python3.12 local_worker.py <action> [args...]
 
     Actions:
-      ocr <image_path>                                    — Perform local OCR
-      tts <text> <output_path> [rate]                     — Synthesize local TTS
-      ocr_tts <image_path> <output_audio_path> [rate]     — Combined OCR+TTS
-      serve                                               — Persistent mode (stdin/stdout JSON)
+      ocr <image_path>                                            — Perform local OCR
+      tts <text> <output_path> [rate] [voice_id]                  — Synthesize local TTS
+      ocr_tts <image_path> <output_audio_path> [rate] [voice_id]  — Combined OCR+TTS
+      serve                                                       — Persistent mode (stdin/stdout JSON)
     """
     if len(sys.argv) < 2:
         print(json.dumps({"success": False, "message": "Usage: local_worker.py <action> [args...]"}), flush=True)
@@ -641,15 +714,17 @@ def main():
 
         elif action == "tts":
             if len(sys.argv) < 4:
-                raise WorkerError("Usage: local_worker.py tts <text> <output_path> [speech_rate]")
+                raise WorkerError("Usage: local_worker.py tts <text> <output_path> [speech_rate] [voice_id]")
             speech_rate = sys.argv[4] if len(sys.argv) > 4 else "medium"
-            do_tts(sys.argv[2], sys.argv[3], speech_rate)
+            voice_id = sys.argv[5] if len(sys.argv) > 5 else None
+            do_tts(sys.argv[2], sys.argv[3], speech_rate, voice_id=voice_id)
 
         elif action == "ocr_tts":
             if len(sys.argv) < 4:
-                raise WorkerError("Usage: local_worker.py ocr_tts <image_path> <output_audio_path> [speech_rate]")
+                raise WorkerError("Usage: local_worker.py ocr_tts <image_path> <output_audio_path> [speech_rate] [voice_id]")
             speech_rate = sys.argv[4] if len(sys.argv) > 4 else "medium"
-            do_ocr_tts(sys.argv[2], sys.argv[3], speech_rate)
+            voice_id = sys.argv[5] if len(sys.argv) > 5 else None
+            do_ocr_tts(sys.argv[2], sys.argv[3], speech_rate, voice_id=voice_id)
 
         else:
             raise WorkerError(f"Unknown action: {action}")

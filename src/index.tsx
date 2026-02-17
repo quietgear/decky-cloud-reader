@@ -255,10 +255,13 @@ const TTS_PROVIDER_OPTIONS = [
   { data: "gcp",   label: "Google Cloud (online)" },
 ];
 
-// Local (Piper) voice options — currently only one bundled voice.
-// More voices can be added by downloading additional .onnx models.
+// Local (Piper) voice options — 4 bundled voices (2 US + 2 UK, male + female each).
+// Each voice has a .onnx model + .onnx.json config in models/tts/.
 const LOCAL_VOICE_OPTIONS = [
-  { data: "en_US-lessac-medium", label: "US English - Lessac (Medium)" },
+  { data: "en_US-lessac-medium", label: "US Female - Lessac" },
+  { data: "en_US-ryan-medium",   label: "US Male - Ryan" },
+  { data: "en_GB-cori-medium",   label: "UK Female - Cori" },
+  { data: "en_GB-alan-medium",   label: "UK Male - Alan" },
 ];
 
 // Speech rate options for Piper TTS. Same labels as GCP but maps to

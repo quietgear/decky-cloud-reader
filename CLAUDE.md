@@ -337,6 +337,40 @@ Frontend (TypeScript/React)           Backend (Python)
 
 **Plugin zip size:** ~304 MB total (up from ~35 MB before local inference)
 
+### Phase 8.5: Multiple Piper TTS Voices `[DONE]`
+
+**Problem:** Only 1 Piper voice was bundled (`en_US-lessac-medium`), giving users no choice of accent or gender for offline TTS.
+
+**Solution:** Bundle 3 additional voices (4 total: 2 US + 2 UK, 1 male + 1 female each) with lazy-load caching so only used voices consume memory.
+
+**Bundled voices:**
+| Voice ID | Region | Gender |
+|----------|--------|--------|
+| `en_US-lessac-medium` | US | Female (default) |
+| `en_US-ryan-medium` | US | Male |
+| `en_GB-cori-medium` | UK | Female |
+| `en_GB-alan-medium` | UK | Male |
+
+**local_worker.py changes:**
+- [x] `PIPER_VOICES` registry dict + `DEFAULT_PIPER_VOICE` constant
+- [x] `_init_piper_voice(voice_id)` — accepts voice_id, builds path from `f"{voice_id}.onnx"`, returns `(PiperVoice, resolved_voice_id)` tuple
+- [x] `_get_or_load_voice(voice_id, voice_cache)` — lazy cache helper: loads on miss, returns from cache on hit
+- [x] `do_tts()` / `do_ocr_tts()` — accept `voice_id` + `voice_cache` params instead of `piper_voice`
+- [x] `serve()` — startup initializes OCR engine only + empty `voice_cache = {}` (no voice pre-loaded, faster startup)
+- [x] CLI `main()` — passes optional `voice_id` from CLI args
+- [x] All hardcoded `"voice_id": "en_US-lessac-medium"` replaced with dynamic `resolved_voice_id`
+
+**main.py changes:**
+- [x] `voice_id` always included in worker commands (removed 3 `if provider == "gcp":` guards)
+
+**Frontend (src/index.tsx):**
+- [x] `LOCAL_VOICE_OPTIONS` expanded from 1 to 4 entries
+
+**Docker (Dockerfile.plugin):**
+- [x] Stage 2d: 6 new `curl` commands for 3 voice model pairs (`.onnx` + `.onnx.json`)
+
+**Plugin zip size:** ~493 MB total (up from ~304 MB, +189MB for 3 new voice model pairs)
+
 ### Phase 9: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Global overlay for displaying OCR text on screen
 - [ ] Region selection (crop to area instead of full screen)
@@ -376,6 +410,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | GCP Python deps | Bundled in py_modules/ via Docker build (Python 3.13) | Runs on Steam Deck without internet |
 | Local Python deps | Bundled in py_modules_local/ via Docker build (Python 3.12) | Separate from GCP deps due to different Python versions |
 | Default provider | Local (offline) | Works out of the box without any setup; GCP requires service account |
+| Voice loading strategy | Lazy-load + in-memory cache per voice_id | Only used voices consume memory (~63MB each); first use pays ~1s load, subsequent uses are instant from cache; worker startup is faster (OCR only, no voice pre-loaded) |
 | Docker build | Always `--no-cache` via deploy.sh | Prevents stale pip layers that can silently reuse old packages after requirements.txt changes |
 
 ## File Structure
@@ -414,9 +449,15 @@ decky-cloud-reader/
     │   ├── ch_PP-OCRv4_rec_infer.onnx
     │   └── ch_ppocr_mobile_v2.0_cls_infer.onnx
     │   # NOTE: NO ppocr_keys_v1.txt — library's built-in keys used instead
-    └── tts/                   # Piper voice model
-        ├── en_US-lessac-medium.onnx
-        └── en_US-lessac-medium.onnx.json
+    └── tts/                   # Piper voice models (4 voices, lazy-loaded)
+        ├── en_US-lessac-medium.onnx      # US Female (default)
+        ├── en_US-lessac-medium.onnx.json
+        ├── en_US-ryan-medium.onnx        # US Male
+        ├── en_US-ryan-medium.onnx.json
+        ├── en_GB-cori-medium.onnx        # UK Female
+        ├── en_GB-cori-medium.onnx.json
+        ├── en_GB-alan-medium.onnx        # UK Male
+        └── en_GB-alan-medium.onnx.json
 ```
 
 Components may be split out of `index.tsx` into separate files if it grows too large, but there's no predetermined file split — keep it simple until complexity demands it.
