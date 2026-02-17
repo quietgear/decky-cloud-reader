@@ -96,6 +96,28 @@ interface PlaybackStatus {
   is_playing: boolean;  // true if mpv is currently playing audio
 }
 
+// Response from the read_screen() backend RPC (Phase 6 pipeline)
+interface ReadScreenResult {
+  success: boolean;    // true if the full pipeline completed successfully
+  message: string;     // Human-readable success or error message
+  step: string;        // Pipeline step where it finished (or failed)
+  text: string;        // OCR text (populated even if TTS fails)
+  audio_size: number;  // Size of the synthesized MP3 in bytes
+}
+
+// Response from the get_pipeline_status() backend RPC (Phase 6 polling)
+interface PipelineStatus {
+  running: boolean;    // true if the pipeline is currently running
+  step: string;        // Current step: idle/capturing/ocr/tts/playing
+  is_playing: boolean; // true if audio is currently playing
+}
+
+// Response from the stop_pipeline() backend RPC
+interface StopPipelineResult {
+  success: boolean;    // Always true (stop is best-effort)
+  message: string;     // Human-readable message
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   voice_id: string;        // TTS voice (Phase 5)
@@ -144,6 +166,15 @@ const stopPlayback = callable<[], StopResult>("stop_playback");
 // Check if audio is currently playing (lightweight poll)
 const getPlaybackStatus = callable<[], PlaybackStatus>("get_playback_status");
 
+// Phase 6: End-to-end pipeline (capture → OCR → TTS → playback)
+const readScreen = callable<[], ReadScreenResult>("read_screen");
+
+// Cancel the running pipeline and stop playback
+const stopPipeline = callable<[], StopPipelineResult>("stop_pipeline");
+
+// Lightweight poll for pipeline progress (step, running, is_playing)
+const getPipelineStatus = callable<[], PipelineStatus>("get_pipeline_status");
+
 
 // =============================================================================
 // Helper: format file size in human-readable form
@@ -180,6 +211,24 @@ const SPEECH_RATE_OPTIONS = [
   { data: "fast",   label: "Fast (1.25x)" },
   { data: "x-fast", label: "Very Fast (1.5x)" },
 ];
+
+
+// =============================================================================
+// Helper: map pipeline step strings to user-friendly labels
+// =============================================================================
+// Shown in the UI while the Read Screen pipeline is running, so the user
+// knows what's happening. Each label uses present progressive tense.
+function getPipelineStepLabel(step: string): string {
+  switch (step) {
+    case "starting":   return "Starting...";
+    case "capturing":  return "Capturing screen...";
+    case "ocr":        return "Detecting text...";
+    case "tts":        return "Generating speech...";
+    case "playing":    return "Playing audio...";
+    case "cancelled":  return "Cancelled";
+    default:           return "";
+  }
+}
 
 
 // =============================================================================
@@ -398,6 +447,18 @@ function Content() {
   // Ref for the volume save debounce timeout
   const volumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // --- Pipeline state (Phase 6: Read Screen) ---
+  // Whether the end-to-end pipeline is currently running
+  const [isPipelineRunning, setIsPipelineRunning] = useState(false);
+  // Current pipeline step (for progress display)
+  const [pipelineStep, setPipelineStep] = useState("idle");
+  // Status message shown after pipeline completes (success or error)
+  const [pipelineMessage, setPipelineMessage] = useState<string | null>(null);
+  // Whether the pipeline message is a success (green) or error (red)
+  const [pipelineIsSuccess, setPipelineIsSuccess] = useState(false);
+  // Ref for the pipeline polling interval
+  const pipelinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Load settings from the backend when the component first mounts.
   // Also reload when returning from file browser mode.
   useEffect(() => {
@@ -556,11 +617,95 @@ function Content() {
     }, 800);
   };
 
+  // --- Pipeline handlers (Phase 6: Read Screen) ---
+
+  // Start polling the backend for pipeline status (every 1 second).
+  // Updates the progress step label in real time while the pipeline runs.
+  const startPipelinePoll = () => {
+    stopPipelinePoll();
+
+    pipelinePollRef.current = setInterval(async () => {
+      const status = await getPipelineStatus();
+      setPipelineStep(status.step);
+
+      // If the pipeline finished and audio is playing, switch to playback poll
+      if (!status.running && status.is_playing) {
+        setIsPipelineRunning(false);
+        setIsPlaying(true);
+        stopPipelinePoll();
+        startPlaybackPoll();
+      }
+      // If the pipeline finished and nothing is playing, clean up
+      if (!status.running && !status.is_playing) {
+        setIsPipelineRunning(false);
+        stopPipelinePoll();
+      }
+    }, 1000);
+  };
+
+  // Stop the pipeline polling interval
+  const stopPipelinePoll = () => {
+    if (pipelinePollRef.current) {
+      clearInterval(pipelinePollRef.current);
+      pipelinePollRef.current = null;
+    }
+  };
+
+  // Handle the "Read Screen" button — run the full pipeline
+  const handleReadScreen = async () => {
+    setIsPipelineRunning(true);
+    setPipelineStep("starting");
+    setPipelineMessage(null);
+    setOcrText(null);  // Clear previous OCR text
+    startPipelinePoll();
+
+    // This blocks until the pipeline finishes (capture → OCR → TTS → playback start)
+    const result = await readScreen();
+
+    // Populate OCR text if the pipeline got far enough to extract it
+    if (result.text) {
+      setOcrText(result.text);
+    }
+
+    if (result.success) {
+      // Pipeline succeeded — audio is now playing
+      setPipelineMessage(result.message);
+      setPipelineIsSuccess(true);
+      setIsPlaying(true);
+      setIsPipelineRunning(false);
+      stopPipelinePoll();
+      startPlaybackPoll();
+    } else {
+      // Pipeline failed or was cancelled
+      setPipelineMessage(result.message);
+      setPipelineIsSuccess(false);
+      setIsPipelineRunning(false);
+      stopPipelinePoll();
+    }
+
+    // Auto-clear the status message after 8 seconds
+    setTimeout(() => setPipelineMessage(null), 8000);
+  };
+
+  // Handle the "Stop" button during pipeline — cancel and clean up
+  const handleStopPipeline = async () => {
+    await stopPipeline();
+    setIsPipelineRunning(false);
+    setIsPlaying(false);
+    setPipelineStep("idle");
+    stopPipelinePoll();
+    stopPlaybackPoll();
+    setPipelineMessage("Pipeline stopped");
+    setPipelineIsSuccess(true);
+    setTimeout(() => setPipelineMessage(null), 5000);
+  };
+
   // Cleanup: clear intervals and timeouts when the component unmounts
   // to prevent memory leaks and stale state updates.
   useEffect(() => {
     return () => {
       stopPlaybackPoll();
+      stopPipelinePoll();
       if (volumeSaveTimeoutRef.current) {
         clearTimeout(volumeSaveTimeoutRef.current);
       }
@@ -593,6 +738,77 @@ function Content() {
   // --- Normal mode (settings view) ---
   return (
     <>
+      {/* ---- Read Screen Section (Phase 6) ---- */}
+      {/* This is the primary user-facing feature: one button to capture the
+          screen, detect text, synthesize speech, and play it back. Placed first
+          because it's the main action the user will use. */}
+      <PanelSection title="Read Screen">
+        {/* Progress indicator — shows the current pipeline step while running */}
+        {isPipelineRunning && (
+          <PanelSectionRow>
+            <div style={{
+              color: "#67b7dc",
+              padding: "4px 0",
+              fontSize: "13px"
+            }}>
+              {getPipelineStepLabel(pipelineStep)}
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Status message after pipeline completes (success/error) */}
+        {pipelineMessage && !isPipelineRunning && (
+          <PanelSectionRow>
+            <div style={{
+              color: pipelineIsSuccess ? "#2ecc71" : "#e74c3c",
+              padding: "4px 0",
+              fontSize: "13px"
+            }}>
+              {pipelineMessage}
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Read Screen / Stop button — toggles based on pipeline/playback state */}
+        <PanelSectionRow>
+          {isPipelineRunning || isPlaying ? (
+            <ButtonItem
+              layout="below"
+              onClick={isPipelineRunning ? handleStopPipeline : handleStopPlayback}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+                <FaStop size={14} />
+                <span>Stop</span>
+              </div>
+            </ButtonItem>
+          ) : (
+            <ButtonItem
+              layout="below"
+              onClick={handleReadScreen}
+              disabled={!settings.is_configured}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+                <FaBook size={14} />
+                <span>Read Screen</span>
+              </div>
+            </ButtonItem>
+          )}
+        </PanelSectionRow>
+
+        {/* Hint when credentials aren't configured */}
+        {!settings.is_configured && (
+          <PanelSectionRow>
+            <div style={{
+              color: "#b8bcbf",
+              fontSize: "12px",
+              padding: "4px 0"
+            }}>
+              Load GCP credentials below to enable
+            </div>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
       {/* ---- GCP Credentials Section ---- */}
       <PanelSection title="GCP Credentials">
         {/* Status: Configured or Not Configured */}
@@ -700,7 +916,7 @@ function Content() {
           <ButtonItem
             layout="below"
             onClick={handleTestCapture}
-            disabled={isCapturing}
+            disabled={isCapturing || isPipelineRunning}
           >
             {isCapturing ? "Capturing..." : "Test Capture"}
           </ButtonItem>
@@ -727,7 +943,7 @@ function Content() {
           <ButtonItem
             layout="below"
             onClick={handleTestOcr}
-            disabled={isOcrRunning || !settings.is_configured}
+            disabled={isOcrRunning || !settings.is_configured || isPipelineRunning}
           >
             {isOcrRunning ? "Running OCR..." : "Test OCR"}
           </ButtonItem>
@@ -864,7 +1080,7 @@ function Content() {
             <ButtonItem
               layout="below"
               onClick={handleReadText}
-              disabled={isTtsRunning || !ocrText || !settings.is_configured}
+              disabled={isTtsRunning || !ocrText || !settings.is_configured || isPipelineRunning}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
                 <FaVolumeUp size={14} />

@@ -134,18 +134,25 @@ Frontend (TypeScript/React)         Backend (Python)
 
 **Note:** mpv is not pre-installed on Steam Deck. ffplay (from ffmpeg) is the primary audio player found on the device. The plugin auto-discovers the best available player at startup.
 
-### Phase 6: End-to-End OCR+TTS Pipeline `[NOT STARTED]`
+### Phase 6: End-to-End OCR+TTS Pipeline `[DONE]`
 
 **Pipeline orchestration:**
-- [ ] `read_screen()` RPC: capture → `_run_gcp_worker("ocr", ...)` → `_run_gcp_worker("tts", ...)` → `_start_playback()`
-- [ ] Each step checks for cancellation flag (`self._pipeline_cancelled`) before proceeding
-- [ ] `stop_pipeline()` RPC: sets cancel flag + kills any running subprocess/mpv
-- [ ] Loading/progress states in UI during pipeline execution
+- [x] `read_screen()` RPC: capture → `_run_gcp_worker("ocr", ...)` → `_run_gcp_worker("tts", ...)` → `_start_playback()`
+- [x] Each step checks for cancellation flag (`self._pipeline_cancel`) before proceeding
+- [x] `stop_pipeline()` RPC: sets cancel flag + stops any running playback
+- [x] Loading/progress states in UI during pipeline execution (`get_pipeline_status()` polled at 1s)
 
 **Subprocess lifecycle guarantees:**
-- [ ] `_unload()` kills all child processes: any in-flight `gcp_worker.py` (via stored Popen if we ever switch from `run()`), any running mpv
-- [ ] Temp file cleanup in `_unload()` — sweep any `dcr_*.png`/`dcr_*.mp3` from `/tmp`
-- [ ] No Popen without corresponding `wait()` — the golden rule against zombies
+- [x] `_unload()` sets pipeline cancel flag + stops playback + sweeps orphaned temp files
+- [x] Temp file cleanup in `_read_screen_sync()` finally block — OCR temp always cleaned, TTS temp only if playback didn't start
+- [x] No Popen without corresponding `wait()` — the golden rule against zombies
+
+**Frontend (Read Screen section):**
+- [x] "Read Screen" / "Stop" toggle button with icons (FaBook / FaStop), placed as first section in panel
+- [x] Pipeline progress indicator (step labels: Capturing → Detecting text → Generating speech → Playing)
+- [x] OCR text populated in existing scrollable display even if TTS fails
+- [x] Standalone buttons (Test Capture, Test OCR, Read Text) disabled while pipeline is running
+- [x] Concurrent pipeline rejection ("Pipeline already running")
 
 ### Phase 7: L4 Button Trigger `[NOT STARTED]`
 - [ ] Implement hidraw-based button monitoring in Python backend (background thread)

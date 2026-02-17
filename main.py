@@ -29,6 +29,7 @@ import signal
 import shutil
 import tempfile
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import decky
@@ -214,6 +215,13 @@ class Plugin:
         self._playback_process = None  # subprocess.Popen object or None
         self._tts_temp_path = None     # path to current MP3 temp file
 
+        # Pipeline state: tracks the end-to-end Read Screen pipeline
+        # (capture → OCR → TTS → playback). These fields let the frontend
+        # poll progress and let stop_pipeline() cancel between steps.
+        self._pipeline_step = "idle"              # Current step: idle/capturing/ocr/tts/playing/cancelled
+        self._pipeline_cancel = threading.Event()  # Thread-safe cancellation flag
+        self._pipeline_running = False             # Prevents concurrent pipelines
+
         decky.logger.info(f"{LOG} settings initialized")
 
         # -----------------------------------------------------------------
@@ -299,6 +307,10 @@ class Plugin:
     # Called when the plugin is stopped (e.g., Decky Loader restarts, or the
     # user disables the plugin). The plugin is NOT removed from disk.
     async def _unload(self):
+        # Step 0: Cancel any running pipeline so it stops between steps
+        self._pipeline_cancel.set()
+        decky.logger.info(f"{LOG} pipeline cancel flag set")
+
         # Step 1: Stop any running audio playback and clean up its temp file
         self._stop_playback()
         decky.logger.info(f"{LOG} playback stopped")
@@ -1000,6 +1012,277 @@ class Plugin:
                         decky.logger.debug(f"{LOG} cleaned up TTS temp file (playback didn't start): {tmp_path}")
                 except OSError as e:
                     decky.logger.warning(f"{LOG} failed to clean up {tmp_path}: {e}")
+
+    # =========================================================================
+    # Pipeline: _read_screen_sync() (internal helper)
+    # =========================================================================
+    # Synchronous method that chains capture → OCR → TTS → playback into a
+    # single pipeline. Each step checks the cancellation flag before proceeding.
+    # Cancellation is "between steps" only — once a subprocess starts, it runs
+    # to completion (bounded by OCR_TIMEOUT / TTS_TIMEOUT).
+    #
+    # This method does NOT call _perform_ocr_sync() or _perform_tts_sync()
+    # because we need per-step progress tracking and cancellation checks
+    # between sub-steps that those combined methods don't support.
+    def _read_screen_sync(self):
+        """
+        End-to-end Read Screen pipeline: capture → OCR → TTS → playback.
+
+        Returns:
+            Dict with keys: success, message, step, text, audio_size.
+            The `text` field is populated even on TTS failure so the frontend
+            can display OCR results regardless.
+        """
+        ocr_tmp_path = None   # Temp file for the screenshot PNG
+        tts_tmp_path = None   # Temp file for the synthesized MP3
+        playback_started = False
+
+        try:
+            # ----- Pre-flight: check credentials -----
+            creds_b64 = self.settings.get("gcp_credentials_base64", "")
+            if not creds_b64:
+                return {
+                    "success": False,
+                    "message": "GCP credentials not configured",
+                    "step": "idle",
+                    "text": "",
+                    "audio_size": 0,
+                }
+
+            # ----- Step 1: Capture screenshot -----
+            if self._pipeline_cancel.is_set():
+                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+
+            self._pipeline_step = "capturing"
+            decky.logger.info(f"{LOG} pipeline: capturing screenshot...")
+            capture_result = self._capture_screenshot_sync()
+
+            if not capture_result["success"]:
+                return {
+                    "success": False,
+                    "message": f"Capture failed: {capture_result['error']}",
+                    "step": "capturing",
+                    "text": "",
+                    "audio_size": 0,
+                }
+
+            image_bytes = capture_result["image_bytes"]
+            decky.logger.info(f"{LOG} pipeline: screenshot captured ({len(image_bytes):,} bytes)")
+
+            # ----- Step 2: OCR -----
+            if self._pipeline_cancel.is_set():
+                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+
+            self._pipeline_step = "ocr"
+            decky.logger.info(f"{LOG} pipeline: running OCR...")
+
+            # Write image to temp file for the GCP worker subprocess
+            fd, ocr_tmp_path = tempfile.mkstemp(suffix=".png", prefix="dcr_pipe_ocr_")
+            os.write(fd, image_bytes)
+            os.close(fd)
+
+            ocr_result = self._run_gcp_worker("ocr", [ocr_tmp_path])
+
+            if not ocr_result.get("success", False):
+                return {
+                    "success": False,
+                    "message": f"OCR failed: {ocr_result.get('message', 'Unknown error')}",
+                    "step": "ocr",
+                    "text": "",
+                    "audio_size": 0,
+                }
+
+            ocr_text = ocr_result.get("text", "")
+            if not ocr_text.strip():
+                return {
+                    "success": False,
+                    "message": "No text detected on screen",
+                    "step": "ocr",
+                    "text": "",
+                    "audio_size": 0,
+                }
+
+            char_count = ocr_result.get("char_count", len(ocr_text))
+            decky.logger.info(f"{LOG} pipeline: OCR detected {char_count} chars")
+
+            # ----- Step 3: TTS -----
+            if self._pipeline_cancel.is_set():
+                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": 0}
+
+            self._pipeline_step = "tts"
+            decky.logger.info(f"{LOG} pipeline: synthesizing speech...")
+
+            voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
+            speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
+
+            fd, tts_tmp_path = tempfile.mkstemp(suffix=".mp3", prefix="dcr_pipe_tts_")
+            os.close(fd)
+
+            tts_result = self._run_gcp_worker(
+                "tts",
+                [ocr_text, tts_tmp_path, voice_id, speech_rate],
+                timeout=TTS_TIMEOUT,
+            )
+
+            if not tts_result.get("success", False):
+                return {
+                    "success": False,
+                    "message": f"TTS failed: {tts_result.get('message', 'Unknown error')}",
+                    "step": "tts",
+                    "text": ocr_text,
+                    "audio_size": 0,
+                }
+
+            # Verify audio file exists and is non-empty
+            if not os.path.exists(tts_tmp_path) or os.path.getsize(tts_tmp_path) == 0:
+                return {
+                    "success": False,
+                    "message": "TTS produced empty audio file",
+                    "step": "tts",
+                    "text": ocr_text,
+                    "audio_size": 0,
+                }
+
+            audio_size = tts_result.get("audio_size", os.path.getsize(tts_tmp_path))
+            decky.logger.info(f"{LOG} pipeline: TTS synthesized {audio_size:,} bytes")
+
+            # ----- Step 4: Playback -----
+            if self._pipeline_cancel.is_set():
+                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": audio_size}
+
+            self._pipeline_step = "playing"
+            playback_started = self._start_playback(tts_tmp_path)
+
+            if playback_started:
+                decky.logger.info(f"{LOG} pipeline: playback started")
+                return {
+                    "success": True,
+                    "message": f"Playing: {char_count} chars, {audio_size:,} bytes",
+                    "step": "playing",
+                    "text": ocr_text,
+                    "audio_size": audio_size,
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "Audio playback failed to start (no audio player found?)",
+                    "step": "playing",
+                    "text": ocr_text,
+                    "audio_size": audio_size,
+                }
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} pipeline error: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "message": f"Pipeline error: {e}",
+                "step": "error",
+                "text": "",
+                "audio_size": 0,
+            }
+        finally:
+            # Always clean up the OCR temp file (screenshot PNG)
+            if ocr_tmp_path:
+                try:
+                    if os.path.exists(ocr_tmp_path):
+                        os.remove(ocr_tmp_path)
+                        decky.logger.debug(f"{LOG} pipeline: cleaned up OCR temp file: {ocr_tmp_path}")
+                except OSError as e:
+                    decky.logger.warning(f"{LOG} pipeline: failed to clean up {ocr_tmp_path}: {e}")
+
+            # Clean up TTS temp file ONLY if playback didn't start.
+            # If playback started, _stop_playback() owns the cleanup.
+            if not playback_started and tts_tmp_path:
+                try:
+                    if os.path.exists(tts_tmp_path):
+                        os.remove(tts_tmp_path)
+                        decky.logger.debug(f"{LOG} pipeline: cleaned up TTS temp file: {tts_tmp_path}")
+                except OSError as e:
+                    decky.logger.warning(f"{LOG} pipeline: failed to clean up {tts_tmp_path}: {e}")
+
+            # Reset pipeline state
+            self._pipeline_step = "idle"
+            self._pipeline_running = False
+
+    # =========================================================================
+    # RPC: read_screen()
+    # =========================================================================
+    # Async entry point for the end-to-end pipeline. Rejects concurrent runs,
+    # clears the cancellation flag, and dispatches to _read_screen_sync() in
+    # the thread pool executor.
+    #
+    # Called from the frontend via:
+    #   const readScreen = callable<[], ReadScreenResult>("read_screen");
+    async def read_screen(self):
+        decky.logger.info(f"{LOG} read_screen() called")
+
+        # Reject if a pipeline is already running
+        if self._pipeline_running:
+            decky.logger.warning(f"{LOG} pipeline already running — rejecting")
+            return {
+                "success": False,
+                "message": "Pipeline already running",
+                "step": self._pipeline_step,
+                "text": "",
+                "audio_size": 0,
+            }
+
+        # Initialize pipeline state
+        self._pipeline_cancel.clear()
+        self._pipeline_running = True
+        self._pipeline_step = "starting"
+
+        # Run the blocking pipeline in the thread pool executor
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_capture_executor, self._read_screen_sync)
+
+        if result["success"]:
+            decky.logger.info(f"{LOG} pipeline complete: {result['message']}")
+        else:
+            decky.logger.warning(f"{LOG} pipeline ended: {result['message']}")
+
+        return result
+
+    # =========================================================================
+    # RPC: stop_pipeline()
+    # =========================================================================
+    # Sets the cancellation flag (checked between pipeline steps) and stops
+    # audio playback immediately if currently playing.
+    #
+    # Note: this does NOT kill in-flight GCP worker subprocesses. They will
+    # complete naturally within their timeouts (45s OCR / 30s TTS). The cancel
+    # flag is checked after each subprocess returns.
+    #
+    # Called from the frontend via:
+    #   const stopPipeline = callable<[], StopPipelineResult>("stop_pipeline");
+    async def stop_pipeline(self):
+        decky.logger.info(f"{LOG} stop_pipeline() called")
+        self._pipeline_cancel.set()
+        self._stop_playback()
+        return {
+            "success": True,
+            "message": "Pipeline stop requested",
+        }
+
+    # =========================================================================
+    # RPC: get_pipeline_status()
+    # =========================================================================
+    # Lightweight poll target for the frontend. Returns the current pipeline
+    # step and whether audio is playing. No subprocess involved.
+    #
+    # Called from the frontend via:
+    #   const getPipelineStatus = callable<[], PipelineStatus>("get_pipeline_status");
+    async def get_pipeline_status(self):
+        is_playing = (
+            self._playback_process is not None
+            and self._playback_process.poll() is None
+        )
+        return {
+            "running": self._pipeline_running,
+            "step": self._pipeline_step,
+            "is_playing": is_playing,
+        }
 
     # =========================================================================
     # RPC: perform_tts(text)
