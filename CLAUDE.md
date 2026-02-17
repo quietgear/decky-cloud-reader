@@ -128,7 +128,7 @@ Frontend (TypeScript/React)         Backend (Python)
 - [x] Audio player discovery in `_main()` — tries mpv → ffplay → pw-play, stores path + name
 - [x] `_start_playback(mp3_path)` — builds player-specific command (mpv/ffplay/pw-play each have different flags), launches via Popen with `XDG_RUNTIME_DIR=/run/user/1000` (required since Decky runs as root)
 - [x] `_stop_playback()` — SIGTERM → `wait(timeout=2)` → SIGKILL if needed, catches `ProcessLookupError` for already-exited process
-- [x] Playback state tracking: `self._playback_process` checked via `poll()` — no zombie because we always `wait()`
+- [x] Playback state tracking: `self._playback_process` checked via `poll()`; a daemon reaper thread (`_reap_playback`) calls `wait()` on each player process to prevent zombies when playback finishes naturally with the UI panel closed
 - [x] `_cleanup_tts_temp()` helper: removes temp MP3 after playback stops
 - [x] `_unload()` cleanup: stop playback + sweep orphaned `/tmp/dcr_*.png` and `/tmp/dcr_*.mp3`
 
@@ -239,7 +239,7 @@ Frontend (TypeScript/React)         Backend (Python)
 - **All backend log messages** use the `[DCR]` prefix so they stand out in the Decky Loader journal among logs from other plugins and the loader itself.
 - Pattern: `decky.logger.info(f"{LOG} message here")` where `LOG = "[DCR]"` is defined at the top of `main.py`.
 - Filter plugin logs on Steam Deck: `journalctl -u plugin_loader -f | grep DCR`
-- **Debug Mode** (the `debug` setting toggle in the UI): when enabled, the backend should emit verbose/detailed logs using `decky.logger.debug()`. These are normally hidden by Decky Loader's log level but appear when Decky is in developer mode. Use debug-level logs for: RPC call parameters, settings reads/writes, directory listings, timing info, internal state. Use info-level logs for: lifecycle events, credential load/clear, errors.
+- **Debug Mode** (the `debug` setting toggle in the UI): when enabled, the backend calls `decky.logger.setLevel(logging.DEBUG)` so that `decky.logger.debug()` messages appear in the journal. The level is synced both at startup in `_main()` (from the saved setting) and at runtime in `save_setting()` when the user toggles the switch — no restart needed. Use debug-level logs for: RPC call parameters, settings reads/writes, directory listings, timing info, internal state. Use info-level logs for: lifecycle events, credential load/clear, errors.
 
 ---
 
@@ -250,7 +250,7 @@ Frontend (TypeScript/React)         Backend (Python)
 | Architecture | Single Decky plugin, GCP calls via persistent subprocess | main.py runs under Decky's embedded Python; gcp_worker.py runs under system Python (`/usr/bin/python3`) in persistent "serve" mode with `py_modules/` on PYTHONPATH |
 | GCP worker mode | Persistent subprocess with stdin/stdout JSON lines | Eliminates ~1.7s per-call overhead (Python startup + imports + client init). GCP clients initialized once at startup; gRPC connections stay warm across requests |
 | Screen capture | GStreamer + PipeWire | Native to Steam Deck, hardware-accelerated |
-| Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; ffplay is reliably present on Steam Deck, mpv is not pre-installed. Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root |
+| Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; ffplay is reliably present on Steam Deck, mpv is not pre-installed. Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root. A daemon reaper thread calls `wait()` on the player process to prevent zombies when playback finishes naturally with the UI closed |
 | GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
 | Button input | Hidraw direct device reading | Works in background without opening UI |
 | Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |

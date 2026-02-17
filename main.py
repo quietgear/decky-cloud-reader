@@ -22,6 +22,7 @@
 import os
 import json
 import base64
+import logging
 import glob
 import traceback
 import subprocess
@@ -260,6 +261,16 @@ class Plugin:
         self._worker_stderr_thread = None        # Daemon thread draining stderr
 
         decky.logger.info(f"{LOG} settings initialized")
+
+        # Sync the Python logger level to the "debug" setting stored in the
+        # JSON config.  Decky Loader defaults the logger to INFO, so
+        # decky.logger.debug() messages are silently dropped unless we
+        # explicitly lower the level to DEBUG here.
+        if self.settings.get("debug", DEFAULT_SETTINGS["debug"]):
+            decky.logger.setLevel(logging.DEBUG)
+            decky.logger.info(f"{LOG} debug logging enabled")
+        else:
+            decky.logger.setLevel(logging.INFO)
 
         # -----------------------------------------------------------------
         # Discover system Python for running gcp_worker.py
@@ -1015,6 +1026,21 @@ class Plugin:
             self._tts_temp_path = mp3_path
 
             decky.logger.info(f"{LOG} playback started (pid={self._playback_process.pid})")
+
+            # Start a daemon thread that waits for the playback process to
+            # exit.  This ensures waitpid() is called promptly even when the
+            # UI panel is closed and nobody is polling get_playback_status().
+            # Without this, ffplay becomes a zombie (Z / <defunct>) after it
+            # finishes playing because no code path calls wait() on it.
+            proc = self._playback_process  # capture for the closure
+            reaper = threading.Thread(
+                target=self._reap_playback,
+                args=(proc,),
+                daemon=True,
+                name="dcr-playback-reaper",
+            )
+            reaper.start()
+
             return True
 
         except Exception as e:
@@ -1022,6 +1048,33 @@ class Plugin:
             decky.logger.error(traceback.format_exc())
             self._playback_process = None
             return False
+
+    def _reap_playback(self, proc):
+        """
+        Reaper thread target: waits for a playback process to exit, then
+        cleans up the temp MP3 file.
+
+        This prevents zombie processes when ffplay finishes naturally and
+        nobody is polling from the frontend (e.g., QAM panel is closed).
+
+        If _stop_playback() kills the process first, wait() returns
+        immediately and this thread exits — no conflict.
+
+        Args:
+            proc: The subprocess.Popen object to wait on.
+        """
+        try:
+            proc.wait()  # blocks until the process exits (reaps the zombie)
+            decky.logger.debug(f"{LOG} playback process {proc.pid} reaped (exit={proc.returncode})")
+        except Exception as e:
+            decky.logger.debug(f"{LOG} reaper error for pid {proc.pid}: {e}")
+
+        # Only clean up if this proc is still the active playback process.
+        # If _stop_playback() or a new _start_playback() already replaced it,
+        # they own the cleanup — we must not interfere.
+        if self._playback_process is proc:
+            self._playback_process = None
+            self._cleanup_tts_temp()
 
     def _stop_playback(self):
         """
@@ -1757,6 +1810,16 @@ class Plugin:
             # Update hold threshold on the running monitor (no restart needed)
             if self._hidraw_monitor:
                 self._hidraw_monitor.configure(hold_threshold_ms=value)
+
+        elif key == "debug":
+            # Sync the Python logger level to the debug toggle.
+            # This takes effect immediately — no restart needed.
+            if value:
+                decky.logger.setLevel(logging.DEBUG)
+                decky.logger.info(f"{LOG} debug logging enabled")
+            else:
+                decky.logger.info(f"{LOG} debug logging disabled")
+                decky.logger.setLevel(logging.INFO)
 
         return result
 
