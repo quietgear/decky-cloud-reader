@@ -29,10 +29,24 @@ import signal
 import shutil
 import tempfile
 import asyncio
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import decky
+
+# Decky Loader runs main.py in a sandbox that doesn't add the plugin directory
+# to sys.path. We need to add it manually so we can import hidraw_monitor.py
+# which lives alongside main.py in the plugin directory.
+import sys
+_plugin_dir = os.path.dirname(os.path.realpath(__file__))
+if _plugin_dir not in sys.path:
+    sys.path.insert(0, _plugin_dir)
+
+# Import the hidraw button monitor for hardware button trigger support.
+# This module handles all low-level HID communication with the Steam Deck
+# controller. It's in a separate file to keep main.py focused on plugin logic.
+from hidraw_monitor import HidrawButtonMonitor, TRIGGER_BUTTONS
 
 # Log prefix — makes our messages easy to find in the Decky Loader journal.
 # Usage: decky.logger.info(f"{LOG} message here")
@@ -55,6 +69,11 @@ OCR_TIMEOUT = 45  # seconds
 # Timeout for the TTS subprocess. TTS API is generally faster than Vision
 # (smaller payloads, simpler processing). 30 seconds with retries.
 TTS_TIMEOUT = 30  # seconds
+
+# Timeout for the combined OCR+TTS subprocess. This runs both API calls
+# sequentially in a single process, so the timeout needs to cover both.
+# 60 seconds is generous — the combined call typically takes ~3s.
+OCR_TTS_TIMEOUT = 60  # seconds
 
 # Thread pool for running blocking subprocess calls (like gst-launch-1.0)
 # without blocking the async event loop. Only 1 worker needed since we
@@ -87,6 +106,14 @@ DEFAULT_SETTINGS = {
 
     # When True, extra diagnostic info is logged (useful for troubleshooting).
     "debug": False,
+
+    # Which back button triggers the Read Screen pipeline without opening the UI.
+    # Options: "disabled" (no button trigger), "L4", "R4", "L5", "R5".
+    "trigger_button": "L4",
+
+    # How long the trigger button must be held before the pipeline fires (ms).
+    # Range: 300-1500ms. Higher values prevent accidental triggers.
+    "hold_time_ms": 500,
 }
 
 # Fields that must be present in a valid GCP service account JSON file.
@@ -222,6 +249,16 @@ class Plugin:
         self._pipeline_cancel = threading.Event()  # Thread-safe cancellation flag
         self._pipeline_running = False             # Prevents concurrent pipelines
 
+        # Persistent GCP worker subprocess state.
+        # Instead of spawning a new subprocess for every OCR/TTS call (paying
+        # ~1.7s of Python startup + imports + client init each time), we keep
+        # a single gcp_worker.py process alive in "serve" mode. It initializes
+        # GCP clients once at startup and reuses them for every request.
+        # Communication is via stdin/stdout JSON lines.
+        self._worker_process = None              # subprocess.Popen or None
+        self._worker_lock = threading.Lock()     # Serializes stdin/stdout access
+        self._worker_stderr_thread = None        # Daemon thread draining stderr
+
         decky.logger.info(f"{LOG} settings initialized")
 
         # -----------------------------------------------------------------
@@ -301,15 +338,114 @@ class Plugin:
         if not self._audio_player_path:
             decky.logger.warning(f"{LOG} no audio player found (tried mpv, ffplay, pw-play) — TTS playback will not work")
 
+        # -----------------------------------------------------------------
+        # Capture the event loop for cross-thread async dispatch
+        # -----------------------------------------------------------------
+        # The hidraw monitor runs in a daemon thread. When it detects a
+        # button hold, it needs to call read_screen() which is async. We
+        # use asyncio.run_coroutine_threadsafe() to schedule the coroutine
+        # on the main event loop. This requires a reference to the loop.
+        self._event_loop = asyncio.get_event_loop()
+
+        # -----------------------------------------------------------------
+        # Start hidraw button monitor
+        # -----------------------------------------------------------------
+        # The monitor runs in a background thread, reading HID packets from
+        # the Steam Deck controller. When the user holds the configured
+        # button for the threshold duration, it calls _on_button_trigger().
+        # Graceful degradation: if the device isn't found (e.g., running on
+        # a dev machine), the plugin still works via the UI.
+        self._hidraw_monitor = None
+        trigger_button = self.settings.get("trigger_button", DEFAULT_SETTINGS["trigger_button"])
+        hold_time_ms = self.settings.get("hold_time_ms", DEFAULT_SETTINGS["hold_time_ms"])
+
+        if trigger_button != "disabled":
+            self._hidraw_monitor = HidrawButtonMonitor(
+                target_button=trigger_button,
+                hold_threshold_ms=hold_time_ms,
+                on_trigger=self._on_button_trigger,
+                logger=decky.logger,
+                log_prefix=LOG,
+            )
+            started = self._hidraw_monitor.start()
+            if started:
+                decky.logger.info(f"{LOG} button monitor started: button={trigger_button}, hold={hold_time_ms}ms")
+            else:
+                decky.logger.warning(f"{LOG} button monitor failed to start — trigger disabled (UI still works)")
+        else:
+            decky.logger.info(f"{LOG} button trigger disabled by settings")
+
+    # =========================================================================
+    # Button trigger: _on_button_trigger() / _handle_button_trigger()
+    # =========================================================================
+    # _on_button_trigger() is called from the hidraw monitor thread when the
+    # configured button is held past the threshold. It dispatches to
+    # _handle_button_trigger() on the async event loop.
+
+    def _on_button_trigger(self):
+        """
+        Called from the hidraw monitor thread when the hold threshold is met.
+
+        This method bridges the synchronous monitor thread to the async event
+        loop by scheduling _handle_button_trigger() as a coroutine. We use
+        run_coroutine_threadsafe() which is the standard way to call async
+        code from a non-async thread.
+        """
+        asyncio.run_coroutine_threadsafe(
+            self._handle_button_trigger(), self._event_loop
+        )
+
+    async def _handle_button_trigger(self):
+        """
+        Runs on the event loop — guards and triggers the Read Screen pipeline.
+
+        Guards:
+          - Plugin must be enabled (settings.enabled)
+          - Pipeline must not already be running
+          - GCP credentials must be configured
+
+        If all guards pass, calls read_screen() which runs the full pipeline
+        (capture → OCR → TTS → playback).
+        """
+        # Guard: plugin must be enabled
+        if not self.settings.get("enabled", True):
+            decky.logger.debug(f"{LOG} button trigger: plugin disabled, ignoring")
+            return
+
+        # Guard: don't start a second pipeline
+        if self._pipeline_running:
+            decky.logger.debug(f"{LOG} button trigger: pipeline already running, ignoring")
+            return
+
+        # Guard: credentials must be configured
+        creds_b64 = self.settings.get("gcp_credentials_base64", "")
+        if not creds_b64:
+            decky.logger.debug(f"{LOG} button trigger: no credentials, ignoring")
+            return
+
+        decky.logger.info(f"{LOG} button trigger: starting read_screen pipeline")
+        result = await self.read_screen()
+        decky.logger.info(f"{LOG} button trigger result: {result.get('message', '')}")
+
     # =========================================================================
     # Lifecycle: _unload()
     # =========================================================================
     # Called when the plugin is stopped (e.g., Decky Loader restarts, or the
     # user disables the plugin). The plugin is NOT removed from disk.
     async def _unload(self):
-        # Step 0: Cancel any running pipeline so it stops between steps
+        # Step 0a: Stop the hidraw button monitor (stops thread, closes device FD)
+        if self._hidraw_monitor:
+            self._hidraw_monitor.stop()
+            self._hidraw_monitor = None
+            decky.logger.info(f"{LOG} button monitor stopped")
+
+        # Step 0b: Cancel any running pipeline so it stops between steps
         self._pipeline_cancel.set()
         decky.logger.info(f"{LOG} pipeline cancel flag set")
+
+        # Step 0c: Stop the persistent GCP worker subprocess
+        self._stop_worker()
+        decky.logger.info(f"{LOG} worker stopped")
 
         # Step 1: Stop any running audio playback and clean up its temp file
         self._stop_playback()
@@ -515,97 +651,271 @@ class Plugin:
             }
 
     # =========================================================================
-    # Subprocess helper: _run_gcp_worker(action, args_list, timeout)
+    # Persistent GCP worker: _start_worker / _stop_worker / _send_to_worker
     # =========================================================================
-    # Runs gcp_worker.py as a subprocess under system Python. This is the
-    # generic launcher used by OCR (and later TTS in Phase 5).
+    # Instead of spawning a new subprocess for every OCR/TTS request (paying
+    # ~1.7s each time for Python startup + imports + client init), we keep a
+    # single gcp_worker.py running in "serve" mode. It initializes GCP clients
+    # once at startup and processes requests via stdin/stdout JSON lines.
     #
-    # The subprocess gets:
-    #   - PYTHONPATH pointing to py_modules/ (so it can import google-cloud libs)
-    #   - PYTHONNOUSERSITE=1 (ignore user site-packages to avoid conflicts)
-    #   - GCP_CREDENTIALS_BASE64 via env var (not CLI args — avoids ps exposure)
-    #
-    # Returns a dict parsed from the subprocess's JSON stdout output.
-    # On any error (timeout, missing Python, bad JSON), returns {success: False, message: "..."}.
-    def _run_gcp_worker(self, action, args_list, timeout=OCR_TIMEOUT):
-        """
-        Run gcp_worker.py with the given action and arguments.
+    # The worker is started lazily on first use and restarted automatically
+    # if it dies. Credential changes trigger a restart so the worker picks
+    # up new credentials.
 
-        Args:
-            action: The action to perform (e.g., "ocr", "tts").
-            args_list: List of additional CLI arguments (e.g., ["/tmp/image.png"]).
-            timeout: Maximum time to wait for the subprocess (seconds).
+    def _start_worker(self):
+        """
+        Launch the persistent gcp_worker.py subprocess in serve mode.
+
+        Pre-flight checks: system Python, gcp_worker.py, and credentials must
+        exist. The subprocess reads GCP_CREDENTIALS_BASE64 from its environment
+        at startup and initializes both Vision + TTS clients once.
+
+        After launch, waits for the {"ready": true} signal from the worker.
+        Starts a daemon thread to drain stderr (worker diagnostic logs).
 
         Returns:
-            Dict parsed from the subprocess's JSON stdout. On error, returns
-            {"success": False, "message": "<error description>"}.
+            True if the worker started and signaled ready, False otherwise.
         """
-        # Pre-flight checks: make sure we have the pieces we need
+        # Pre-flight checks
         if not self._system_python:
-            return {"success": False, "message": "System Python not found — cannot run GCP worker"}
+            decky.logger.error(f"{LOG} worker: system Python not found — cannot start")
+            return False
 
         if not os.path.exists(self._gcp_worker_path):
-            return {"success": False, "message": f"gcp_worker.py not found at {self._gcp_worker_path}"}
+            decky.logger.error(f"{LOG} worker: gcp_worker.py not found at {self._gcp_worker_path}")
+            return False
 
-        # Build the command: [/usr/bin/python3, /path/to/gcp_worker.py, action, ...args]
-        cmd = [self._system_python, self._gcp_worker_path, action] + args_list
-
-        # Build the environment for the subprocess
-        env = os.environ.copy()
-        # Tell Python where to find google-cloud packages (installed in py_modules/)
-        env["PYTHONPATH"] = self._py_modules_path
-        # Prevent system Python from loading user-installed packages that might conflict
-        env["PYTHONNOUSERSITE"] = "1"
-        # Pass GCP credentials securely via environment variable
         creds_b64 = self.settings.get("gcp_credentials_base64", "")
-        if creds_b64:
-            env["GCP_CREDENTIALS_BASE64"] = creds_b64
+        if not creds_b64:
+            decky.logger.error(f"{LOG} worker: no GCP credentials configured")
+            return False
 
-        decky.logger.info(f"{LOG} running gcp_worker: {action} {' '.join(args_list)}")
-        decky.logger.debug(f"{LOG} gcp_worker command: {' '.join(cmd)}")
+        # Build subprocess environment
+        env = os.environ.copy()
+        env["PYTHONPATH"] = self._py_modules_path
+        env["PYTHONNOUSERSITE"] = "1"
+        env["GCP_CREDENTIALS_BASE64"] = creds_b64
+
+        cmd = [self._system_python, self._gcp_worker_path, "serve"]
+        decky.logger.info(f"{LOG} worker: starting persistent subprocess...")
 
         try:
-            # subprocess.run() is used (not Popen) because this is a
-            # request-response call: we send input, wait for output, done.
-            # run() automatically waits for the process to exit, so no zombies.
-            result = subprocess.run(
+            self._worker_process = subprocess.Popen(
                 cmd,
                 env=env,
-                capture_output=True,  # Capture both stdout (JSON) and stderr (logs)
-                text=True,            # Decode output as UTF-8 strings
-                timeout=timeout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,  # Line-buffered for JSON line protocol
             )
+        except Exception as e:
+            decky.logger.error(f"{LOG} worker: failed to launch: {e}")
+            self._worker_process = None
+            return False
 
-            # Log stderr from the worker (diagnostic messages, not errors necessarily)
-            if result.stderr:
-                for line in result.stderr.strip().split("\n"):
-                    decky.logger.debug(f"{LOG} worker: {line}")
+        # Start a daemon thread to drain stderr. Without this, the stderr pipe
+        # buffer fills up and the worker blocks trying to write diagnostic logs.
+        self._worker_stderr_thread = threading.Thread(
+            target=self._drain_worker_stderr,
+            daemon=True,
+            name="dcr_worker_stderr",
+        )
+        self._worker_stderr_thread.start()
 
-            # Parse the JSON result from stdout
-            if not result.stdout.strip():
-                decky.logger.error(f"{LOG} gcp_worker produced no stdout (exit code {result.returncode})")
-                return {"success": False, "message": "GCP worker produced no output"}
+        # Wait for the ready signal — the first line the worker writes to stdout.
+        # We use a reader thread + join(timeout) so we don't block forever if
+        # the worker hangs during initialization.
+        ready_result = [None]  # Mutable container for thread result
 
+        def _read_ready():
             try:
-                parsed = json.loads(result.stdout.strip())
-                return parsed
-            except json.JSONDecodeError as e:
-                decky.logger.error(f"{LOG} gcp_worker output not valid JSON: {e}")
-                decky.logger.error(f"{LOG} raw stdout: {result.stdout[:500]}")
-                return {"success": False, "message": f"GCP worker output parse error: {e}"}
+                line = self._worker_process.stdout.readline()
+                if line:
+                    ready_result[0] = json.loads(line.strip())
+            except Exception as e:
+                ready_result[0] = {"ready": False, "message": f"Ready read error: {e}"}
 
-        except subprocess.TimeoutExpired:
-            decky.logger.error(f"{LOG} gcp_worker timed out after {timeout}s")
-            return {"success": False, "message": f"GCP worker timed out after {timeout} seconds"}
+        reader = threading.Thread(target=_read_ready, daemon=True)
+        reader.start()
+        reader.join(timeout=30)  # 30s should be plenty for imports + client init
 
-        except FileNotFoundError:
-            decky.logger.error(f"{LOG} system Python not found at {self._system_python}")
-            return {"success": False, "message": f"System Python not found at {self._system_python}"}
+        if reader.is_alive():
+            # Timed out waiting for ready signal
+            decky.logger.error(f"{LOG} worker: timed out waiting for ready signal (30s)")
+            self._stop_worker()
+            return False
+
+        ready = ready_result[0]
+        if ready is None or not ready.get("ready", False):
+            msg = ready.get("message", "unknown") if ready else "no response"
+            decky.logger.error(f"{LOG} worker: not ready: {msg}")
+            self._stop_worker()
+            return False
+
+        decky.logger.info(f"{LOG} worker: persistent worker ready (pid={self._worker_process.pid})")
+        return True
+
+    def _stop_worker(self):
+        """
+        Stop the persistent GCP worker subprocess gracefully.
+
+        Shutdown sequence:
+          1. Send {"action": "shutdown"} via stdin (graceful exit)
+          2. wait(timeout=3) for the process to exit
+          3. SIGTERM + wait(timeout=2) if still alive
+          4. SIGKILL as last resort
+
+        Safe to call when worker is None or already dead — it's a no-op.
+        """
+        if self._worker_process is None:
+            return
+
+        pid = self._worker_process.pid
+
+        try:
+            # Step 1: Try graceful shutdown via the JSON protocol
+            if self._worker_process.poll() is None:
+                try:
+                    self._worker_process.stdin.write('{"action":"shutdown"}\n')
+                    self._worker_process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass  # Pipe already closed — process may have crashed
+
+                try:
+                    self._worker_process.wait(timeout=3)
+                    decky.logger.info(f"{LOG} worker: stopped gracefully (pid={pid})")
+                except subprocess.TimeoutExpired:
+                    # Step 2: SIGTERM
+                    decky.logger.warning(f"{LOG} worker: graceful shutdown timed out, sending SIGTERM")
+                    try:
+                        self._worker_process.send_signal(signal.SIGTERM)
+                        self._worker_process.wait(timeout=2)
+                        decky.logger.info(f"{LOG} worker: stopped via SIGTERM (pid={pid})")
+                    except subprocess.TimeoutExpired:
+                        # Step 3: SIGKILL as last resort
+                        decky.logger.warning(f"{LOG} worker: SIGTERM timed out, sending SIGKILL")
+                        self._worker_process.kill()
+                        self._worker_process.wait(timeout=2)
+                    except ProcessLookupError:
+                        pass  # Already exited between checks
+            else:
+                decky.logger.debug(f"{LOG} worker: already exited (pid={pid})")
+
+        except ProcessLookupError:
+            decky.logger.debug(f"{LOG} worker: process already gone (pid={pid})")
 
         except Exception as e:
-            decky.logger.error(f"{LOG} gcp_worker error: {e}")
-            decky.logger.error(traceback.format_exc())
-            return {"success": False, "message": f"GCP worker error: {e}"}
+            decky.logger.error(f"{LOG} worker: error stopping: {e}")
+
+        finally:
+            # Close all pipes and reset state
+            for pipe in (self._worker_process.stdin, self._worker_process.stdout, self._worker_process.stderr):
+                try:
+                    if pipe:
+                        pipe.close()
+                except Exception:
+                    pass
+            self._worker_process = None
+            self._worker_stderr_thread = None
+
+    def _send_to_worker(self, command_dict, timeout=OCR_TIMEOUT):
+        """
+        Send a command to the persistent worker and wait for a response.
+
+        Lazy start/restart: if the worker isn't running, starts it automatically.
+        If the worker crashes between requests, the next call restarts it.
+
+        Thread-safe: serializes access via _worker_lock so concurrent callers
+        (e.g., pipeline + standalone OCR) don't interleave stdin/stdout.
+
+        Args:
+            command_dict: Dict to send as JSON (e.g., {"action": "ocr", "image_path": "..."}).
+            timeout: Max seconds to wait for the worker's response.
+
+        Returns:
+            Dict parsed from the worker's JSON response. On error, returns
+            {"success": False, "message": "<error description>"}.
+        """
+        with self._worker_lock:
+            # Lazy start: if worker isn't running, start it now
+            if self._worker_process is None or self._worker_process.poll() is not None:
+                if self._worker_process is not None:
+                    decky.logger.warning(f"{LOG} worker: process died, restarting...")
+                    self._stop_worker()
+
+                if not self._start_worker():
+                    return {"success": False, "message": "Failed to start GCP worker subprocess"}
+
+            action = command_dict.get("action", "unknown")
+            decky.logger.info(f"{LOG} worker: sending command: {action}")
+
+            # Write the command as a JSON line to the worker's stdin
+            try:
+                self._worker_process.stdin.write(json.dumps(command_dict) + "\n")
+                self._worker_process.stdin.flush()
+            except (BrokenPipeError, OSError) as e:
+                decky.logger.error(f"{LOG} worker: stdin write error: {e}")
+                self._stop_worker()
+                return {"success": False, "message": f"Worker pipe error: {e}"}
+
+            # Read the response with a timeout.
+            # We use a reader thread + join(timeout) because stdout.readline()
+            # is blocking and there's no portable way to read with a timeout
+            # on a pipe file object.
+            response_holder = [None]
+
+            def _read_response():
+                try:
+                    line = self._worker_process.stdout.readline()
+                    if line:
+                        response_holder[0] = line.strip()
+                except Exception:
+                    pass
+
+            reader = threading.Thread(target=_read_response, daemon=True)
+            reader.start()
+            reader.join(timeout=timeout)
+
+            if reader.is_alive():
+                # Timed out — the worker is probably stuck
+                decky.logger.error(f"{LOG} worker: response timed out after {timeout}s")
+                self._stop_worker()
+                return {"success": False, "message": f"Worker response timed out after {timeout}s"}
+
+            raw_response = response_holder[0]
+            if not raw_response:
+                # Empty response — worker probably crashed
+                decky.logger.error(f"{LOG} worker: empty response (worker may have crashed)")
+                self._stop_worker()
+                return {"success": False, "message": "Worker returned empty response"}
+
+            # Parse the JSON response
+            try:
+                return json.loads(raw_response)
+            except json.JSONDecodeError as e:
+                decky.logger.error(f"{LOG} worker: invalid JSON response: {e}")
+                decky.logger.error(f"{LOG} worker: raw response: {raw_response[:500]}")
+                self._stop_worker()
+                return {"success": False, "message": f"Worker JSON parse error: {e}"}
+
+    def _drain_worker_stderr(self):
+        """
+        Drain the worker's stderr in a daemon thread.
+
+        Reads lines from the worker's stderr pipe and logs them via Decky's
+        logger. Without this thread, the stderr pipe buffer would fill up
+        (~64KB) and the worker would block trying to write diagnostic logs.
+
+        Runs until the pipe is closed (worker exits) or an error occurs.
+        """
+        try:
+            for line in self._worker_process.stderr:
+                stripped = line.strip()
+                if stripped:
+                    decky.logger.debug(f"{LOG} worker: {stripped}")
+        except (ValueError, OSError):
+            pass  # Pipe closed — worker exited, normal shutdown
 
     # =========================================================================
     # Audio playback: _start_playback(), _stop_playback(), _cleanup_tts_temp()
@@ -780,9 +1090,9 @@ class Plugin:
     # =========================================================================
     # Synchronous method that captures a screenshot and runs OCR on it.
     # Must be run in a thread pool (not on the async event loop) because
-    # both _capture_screenshot_sync() and _run_gcp_worker() are blocking.
+    # both _capture_screenshot_sync() and _send_to_worker() are blocking.
     #
-    # Pipeline: capture screenshot → write to temp file → run gcp_worker OCR → return result
+    # Pipeline: capture screenshot → write to temp file → send to persistent worker → return result
     def _perform_ocr_sync(self):
         """
         Capture a screenshot and perform OCR on it.
@@ -831,8 +1141,11 @@ class Plugin:
 
             decky.logger.info(f"{LOG} OCR pipeline: wrote temp image to {tmp_path}")
 
-            # Step 4: Run the GCP worker subprocess to perform OCR
-            result = self._run_gcp_worker("ocr", [tmp_path])
+            # Step 4: Send OCR request to the persistent GCP worker
+            result = self._send_to_worker(
+                {"action": "ocr", "image_path": tmp_path},
+                timeout=OCR_TIMEOUT,
+            )
 
             # Ensure the result has all expected keys (the worker should always
             # include these, but be defensive)
@@ -899,10 +1212,10 @@ class Plugin:
     # TTS pipeline: _perform_tts_sync(text) (internal helper)
     # =========================================================================
     # Synchronous method that synthesizes speech from text and starts playback.
-    # Must be run in a thread pool because _run_gcp_worker() and _start_playback()
+    # Must be run in a thread pool because _send_to_worker() and _start_playback()
     # are blocking calls.
     #
-    # Pipeline: validate → create temp file → gcp_worker TTS → start mpv playback
+    # Pipeline: validate → create temp file → send to persistent worker → start playback
     def _perform_tts_sync(self, text):
         """
         Synthesize speech from text and start playback.
@@ -947,12 +1260,14 @@ class Plugin:
             os.close(fd)
             fd = None  # Mark as closed so finally doesn't double-close
 
-            # Step 5: Run the GCP worker to synthesize speech
-            result = self._run_gcp_worker(
-                "tts",
-                [text, tmp_path, voice_id, speech_rate],
-                timeout=TTS_TIMEOUT,
-            )
+            # Step 5: Send TTS request to the persistent GCP worker
+            result = self._send_to_worker({
+                "action": "tts",
+                "text": text,
+                "output_path": tmp_path,
+                "voice_id": voice_id,
+                "speech_rate": speech_rate,
+            }, timeout=TTS_TIMEOUT)
 
             if not result.get("success", False):
                 return {
@@ -1016,17 +1331,20 @@ class Plugin:
     # =========================================================================
     # Pipeline: _read_screen_sync() (internal helper)
     # =========================================================================
-    # Synchronous method that chains capture → OCR → TTS → playback into a
-    # single pipeline. Each step checks the cancellation flag before proceeding.
-    # Cancellation is "between steps" only — once a subprocess starts, it runs
-    # to completion (bounded by OCR_TIMEOUT / TTS_TIMEOUT).
+    # Synchronous method that chains capture → OCR+TTS → playback into a
+    # pipeline. Sends the combined "ocr_tts" action to the persistent worker.
+    # With a warm worker, only the actual GCP API calls are paid — no Python
+    # startup, imports, or client init overhead.
+    #
+    # Cancellation is checked before the capture and before the worker call.
+    # Once the worker call starts, it runs to completion (bounded by
+    # OCR_TTS_TIMEOUT). The cancel flag is checked again before playback.
     #
     # This method does NOT call _perform_ocr_sync() or _perform_tts_sync()
-    # because we need per-step progress tracking and cancellation checks
-    # between sub-steps that those combined methods don't support.
+    # because those are standalone RPC helpers with their own capture logic.
     def _read_screen_sync(self):
         """
-        End-to-end Read Screen pipeline: capture → OCR → TTS → playback.
+        End-to-end Read Screen pipeline: capture → OCR+TTS → playback.
 
         Returns:
             Dict with keys: success, message, step, text, audio_size.
@@ -1036,6 +1354,9 @@ class Plugin:
         ocr_tmp_path = None   # Temp file for the screenshot PNG
         tts_tmp_path = None   # Temp file for the synthesized MP3
         playback_started = False
+
+        # Timing: track each step to identify bottlenecks
+        t_pipeline_start = time.monotonic()
 
         try:
             # ----- Pre-flight: check credentials -----
@@ -1054,6 +1375,7 @@ class Plugin:
                 return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
 
             self._pipeline_step = "capturing"
+            t_step = time.monotonic()
             decky.logger.info(f"{LOG} pipeline: capturing screenshot...")
             capture_result = self._capture_screenshot_sync()
 
@@ -1067,33 +1389,60 @@ class Plugin:
                 }
 
             image_bytes = capture_result["image_bytes"]
-            decky.logger.info(f"{LOG} pipeline: screenshot captured ({len(image_bytes):,} bytes)")
+            t_capture = time.monotonic() - t_step
+            decky.logger.info(f"{LOG} pipeline: screenshot captured ({len(image_bytes):,} bytes) [{t_capture:.2f}s]")
 
-            # ----- Step 2: OCR -----
+            # ----- Step 2: Combined OCR+TTS (single subprocess) -----
             if self._pipeline_cancel.is_set():
                 return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
 
             self._pipeline_step = "ocr"
-            decky.logger.info(f"{LOG} pipeline: running OCR...")
+            t_step = time.monotonic()
+            decky.logger.info(f"{LOG} pipeline: running OCR+TTS (combined subprocess)...")
 
             # Write image to temp file for the GCP worker subprocess
             fd, ocr_tmp_path = tempfile.mkstemp(suffix=".png", prefix="dcr_pipe_ocr_")
             os.write(fd, image_bytes)
             os.close(fd)
 
-            ocr_result = self._run_gcp_worker("ocr", [ocr_tmp_path])
+            # Create the TTS output temp file path
+            fd2, tts_tmp_path = tempfile.mkstemp(suffix=".mp3", prefix="dcr_pipe_tts_")
+            os.close(fd2)
 
-            if not ocr_result.get("success", False):
+            # Get voice and speech rate settings for the TTS portion
+            voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
+            speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
+
+            # Send combined OCR+TTS to the persistent worker.
+            # With a warm worker, this skips Python startup, imports, and
+            # client init — only the actual API calls are paid.
+            result = self._send_to_worker({
+                "action": "ocr_tts",
+                "image_path": ocr_tmp_path,
+                "output_path": tts_tmp_path,
+                "voice_id": voice_id,
+                "speech_rate": speech_rate,
+            }, timeout=OCR_TTS_TIMEOUT)
+
+            t_ocr_tts = time.monotonic() - t_step
+
+            if not result.get("success", False):
                 return {
                     "success": False,
-                    "message": f"OCR failed: {ocr_result.get('message', 'Unknown error')}",
+                    "message": f"OCR+TTS failed: {result.get('message', 'Unknown error')}",
                     "step": "ocr",
                     "text": "",
                     "audio_size": 0,
                 }
 
-            ocr_text = ocr_result.get("text", "")
+            # Extract OCR results from the combined response
+            ocr_text = result.get("text", "")
+            char_count = result.get("char_count", len(ocr_text))
+            audio_size = result.get("audio_size", 0)
+
+            # No text detected — the subprocess returned success with empty text
             if not ocr_text.strip():
+                decky.logger.info(f"{LOG} pipeline: no text detected [{t_ocr_tts:.2f}s]")
                 return {
                     "success": False,
                     "message": "No text detected on screen",
@@ -1102,36 +1451,10 @@ class Plugin:
                     "audio_size": 0,
                 }
 
-            char_count = ocr_result.get("char_count", len(ocr_text))
-            decky.logger.info(f"{LOG} pipeline: OCR detected {char_count} chars")
-
-            # ----- Step 3: TTS -----
-            if self._pipeline_cancel.is_set():
-                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": 0}
-
-            self._pipeline_step = "tts"
-            decky.logger.info(f"{LOG} pipeline: synthesizing speech...")
-
-            voice_id = self.settings.get("voice_id", DEFAULT_SETTINGS["voice_id"])
-            speech_rate = self.settings.get("speech_rate", DEFAULT_SETTINGS["speech_rate"])
-
-            fd, tts_tmp_path = tempfile.mkstemp(suffix=".mp3", prefix="dcr_pipe_tts_")
-            os.close(fd)
-
-            tts_result = self._run_gcp_worker(
-                "tts",
-                [ocr_text, tts_tmp_path, voice_id, speech_rate],
-                timeout=TTS_TIMEOUT,
+            decky.logger.info(
+                f"{LOG} pipeline: OCR+TTS complete: {char_count} chars, "
+                f"{audio_size:,} bytes [{t_ocr_tts:.2f}s]"
             )
-
-            if not tts_result.get("success", False):
-                return {
-                    "success": False,
-                    "message": f"TTS failed: {tts_result.get('message', 'Unknown error')}",
-                    "step": "tts",
-                    "text": ocr_text,
-                    "audio_size": 0,
-                }
 
             # Verify audio file exists and is non-empty
             if not os.path.exists(tts_tmp_path) or os.path.getsize(tts_tmp_path) == 0:
@@ -1143,21 +1466,22 @@ class Plugin:
                     "audio_size": 0,
                 }
 
-            audio_size = tts_result.get("audio_size", os.path.getsize(tts_tmp_path))
-            decky.logger.info(f"{LOG} pipeline: TTS synthesized {audio_size:,} bytes")
-
-            # ----- Step 4: Playback -----
+            # ----- Step 3: Playback -----
             if self._pipeline_cancel.is_set():
                 return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": audio_size}
 
             self._pipeline_step = "playing"
             playback_started = self._start_playback(tts_tmp_path)
 
+            t_total = time.monotonic() - t_pipeline_start
             if playback_started:
-                decky.logger.info(f"{LOG} pipeline: playback started")
+                decky.logger.info(
+                    f"{LOG} pipeline: complete [{t_total:.2f}s total] "
+                    f"(capture={t_capture:.2f}s, ocr_tts={t_ocr_tts:.2f}s)"
+                )
                 return {
                     "success": True,
-                    "message": f"Playing: {char_count} chars, {audio_size:,} bytes",
+                    "message": f"Playing: {char_count} chars, {audio_size:,} bytes ({t_total:.1f}s)",
                     "step": "playing",
                     "text": ocr_text,
                     "audio_size": audio_size,
@@ -1251,8 +1575,8 @@ class Plugin:
     # audio playback immediately if currently playing.
     #
     # Note: this does NOT kill in-flight GCP worker subprocesses. They will
-    # complete naturally within their timeouts (45s OCR / 30s TTS). The cancel
-    # flag is checked after each subprocess returns.
+    # complete naturally within their timeout (60s for combined OCR+TTS). The
+    # cancel flag is checked after the subprocess returns.
     #
     # Called from the frontend via:
     #   const stopPipeline = callable<[], StopPipelineResult>("stop_pipeline");
@@ -1399,7 +1723,42 @@ class Plugin:
             decky.logger.warning(f"{LOG} direct credential setting not allowed")
             return False
 
-        return self.settings.set(key, value)
+        result = self.settings.set(key, value)
+
+        # Handle trigger button changes — start/stop/reconfigure the monitor
+        if key == "trigger_button":
+            if value == "disabled":
+                # Stop the monitor entirely
+                if self._hidraw_monitor:
+                    self._hidraw_monitor.stop()
+                    self._hidraw_monitor = None
+                    decky.logger.info(f"{LOG} button monitor stopped (trigger disabled)")
+            else:
+                if self._hidraw_monitor:
+                    # Monitor already running — just change the target button
+                    self._hidraw_monitor.configure(target_button=value)
+                else:
+                    # Monitor not running — create and start it
+                    hold_time_ms = self.settings.get("hold_time_ms", DEFAULT_SETTINGS["hold_time_ms"])
+                    self._hidraw_monitor = HidrawButtonMonitor(
+                        target_button=value,
+                        hold_threshold_ms=hold_time_ms,
+                        on_trigger=self._on_button_trigger,
+                        logger=decky.logger,
+                        log_prefix=LOG,
+                    )
+                    started = self._hidraw_monitor.start()
+                    if started:
+                        decky.logger.info(f"{LOG} button monitor started: button={value}")
+                    else:
+                        decky.logger.warning(f"{LOG} button monitor failed to start")
+
+        elif key == "hold_time_ms":
+            # Update hold threshold on the running monitor (no restart needed)
+            if self._hidraw_monitor:
+                self._hidraw_monitor.configure(hold_threshold_ms=value)
+
+        return result
 
     # =========================================================================
     # RPC: list_directory(path)
@@ -1542,6 +1901,12 @@ class Plugin:
             encoded = base64.b64encode(raw_content.encode("utf-8")).decode("utf-8")
             self.settings.set("gcp_credentials_base64", encoded)
 
+            # Stop the persistent worker so it restarts with the new
+            # credentials on the next request. Without this, the worker
+            # would keep using the old credentials until plugin reload.
+            self._stop_worker()
+            decky.logger.info(f"{LOG} worker stopped for credential refresh")
+
             project_id = creds.get("project_id", "unknown")
             decky.logger.info(f"{LOG} credentials loaded for project: {project_id}")
 
@@ -1581,5 +1946,44 @@ class Plugin:
     #   const clearCredentials = callable<[], boolean>("clear_credentials");
     async def clear_credentials(self):
         decky.logger.info(f"{LOG} clear_credentials() called")
+        # Stop the persistent worker before clearing credentials —
+        # it holds initialized clients with the old credentials.
+        self._stop_worker()
         return self.settings.set("gcp_credentials_base64", "")
+
+    # =========================================================================
+    # RPC: get_button_monitor_status()
+    # =========================================================================
+    # Returns the current state of the hidraw button monitor for the UI
+    # status indicator. Lightweight — no subprocess or I/O involved.
+    #
+    # Called from the frontend via:
+    #   const getButtonMonitorStatus = callable<[], ButtonMonitorStatus>("get_button_monitor_status");
+    async def get_button_monitor_status(self):
+        decky.logger.debug(f"{LOG} get_button_monitor_status() called")
+
+        trigger_button = self.settings.get("trigger_button", DEFAULT_SETTINGS["trigger_button"])
+
+        if trigger_button == "disabled":
+            return {
+                "running": False,
+                "initialized": False,
+                "device_path": None,
+                "error_count": 0,
+                "target_button": "disabled",
+                "hold_threshold_ms": self.settings.get("hold_time_ms", DEFAULT_SETTINGS["hold_time_ms"]),
+            }
+
+        if self._hidraw_monitor:
+            return self._hidraw_monitor.get_status()
+
+        # Monitor should be running but isn't (failed to start)
+        return {
+            "running": False,
+            "initialized": False,
+            "device_path": None,
+            "error_count": 0,
+            "target_button": trigger_button,
+            "hold_threshold_ms": self.settings.get("hold_time_ms", DEFAULT_SETTINGS["hold_time_ms"]),
+        }
 

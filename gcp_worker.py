@@ -8,13 +8,17 @@
 #   - Decky's embedded Python can't load google-cloud native libraries (C extensions)
 #   - System Python can, with PYTHONPATH pointing to py_modules/
 #
-# Communication contract:
-#   - Input:  CLI args for action + file paths; credentials via env var
-#   - Output: Single JSON object to stdout (success/error result)
-#   - Logs:   All diagnostic messages go to stderr (picked up by parent process)
+# Two operating modes:
+#   1. CLI mode (one-shot): run a single action, output JSON, exit
+#      GCP_CREDENTIALS_BASE64=... python3 gcp_worker.py ocr /tmp/screenshot.png
+#   2. Serve mode (persistent): stay alive, read JSON commands from stdin,
+#      write JSON responses to stdout, reuse pre-initialized GCP clients
+#      GCP_CREDENTIALS_BASE64=... python3 gcp_worker.py serve
 #
-# Usage:
-#   GCP_CREDENTIALS_BASE64=... python3 gcp_worker.py ocr /tmp/screenshot.png
+# Communication contract:
+#   - CLI mode: CLI args for action + file paths; single JSON to stdout; exit
+#   - Serve mode: JSON lines on stdin/stdout; first line is {"ready": true}
+#   - Logs: All diagnostic messages go to stderr (picked up by parent process)
 #
 # IMPORTANT: This file must NOT import `decky` — it doesn't exist in system Python.
 # =============================================================================
@@ -99,47 +103,107 @@ def log_debug(msg):
 
 
 # ---------------------------------------------------------------------------
-# Output helpers — JSON to stdout
+# Exception-based flow control
 # ---------------------------------------------------------------------------
-# The parent process (main.py) reads stdout and parses it as JSON.
-# We must output exactly ONE JSON object, then exit.
+# The do_* action functions use these exceptions to deliver results back to
+# the dispatcher (CLI main() or persistent serve() loop). This replaces the
+# old sys.exit() pattern, allowing the same do_* functions to work in both
+# one-shot CLI mode and long-running serve mode.
+#
+# Flow: do_ocr() → output_result(data) → raises WorkerResult → caught by
+#       main() or serve(), which writes JSON to stdout.
+
+class WorkerResult(Exception):
+    """Raised to deliver a successful result from a do_* function."""
+    def __init__(self, data):
+        self.data = data
+
+class WorkerError(Exception):
+    """Raised to deliver an error result from a do_* function."""
+    def __init__(self, message):
+        self.data = {"success": False, "message": message}
+
 
 def output_result(data):
     """
-    Write a success result as JSON to stdout and exit cleanly.
+    Deliver a success result by raising WorkerResult.
+
+    In CLI mode (main()), the exception propagates up to the dispatcher
+    which prints JSON to stdout and calls sys.exit(0).
+    In serve mode (serve()), the exception is caught and the JSON is
+    written to stdout, then the loop continues to the next command.
 
     Args:
         data: Dictionary to serialize as JSON. Should contain at minimum
               a "success" key.
     """
-    print(json.dumps(data), flush=True)
-    sys.exit(0)
+    raise WorkerResult(data)
 
 
 def output_error(message):
     """
-    Write an error result as JSON to stdout and exit with code 1.
+    Deliver an error result by raising WorkerError.
+
+    Same propagation pattern as output_result() — the dispatcher catches
+    the exception and handles JSON output + exit/continue.
 
     Args:
         message: Human-readable error description.
     """
-    print(json.dumps({"success": False, "message": message}), flush=True)
-    sys.exit(1)
+    raise WorkerError(message)
+
+
+# ---------------------------------------------------------------------------
+# Credential helpers — shared by all client initializations
+# ---------------------------------------------------------------------------
+# When running the combined ocr_tts action, we decode the base64 credentials
+# ONCE and pass the resulting dict to both Vision and TTS client init. This
+# avoids paying the JSON parse + base64 decode cost twice.
+
+def _decode_credentials(creds_b64):
+    """
+    Decode base64-encoded GCP service account credentials to a Python dict.
+
+    Args:
+        creds_b64: Base64-encoded string containing the full service account JSON.
+
+    Returns:
+        Dict with the service account JSON fields (project_id, private_key, etc.)
+    """
+    return json.loads(base64.b64decode(creds_b64))
+
+
+def _make_oauth_credentials(creds_json):
+    """
+    Create Google OAuth2 credentials from a decoded service account dict.
+
+    Args:
+        creds_json: Dict from _decode_credentials() — the parsed service account JSON.
+
+    Returns:
+        A google.oauth2.service_account.Credentials object.
+    """
+    from google.oauth2 import service_account
+    return service_account.Credentials.from_service_account_info(creds_json)
 
 
 # ---------------------------------------------------------------------------
 # Vision client initialization
 # ---------------------------------------------------------------------------
 
-def init_vision_client(creds_b64):
+def init_vision_client(creds_b64, creds_json=None):
     """
-    Create a Google Cloud Vision client from base64-encoded service account JSON.
+    Create a Google Cloud Vision client from GCP service account credentials.
 
-    The credentials are passed via environment variable (not CLI args) to avoid
-    exposing them in `ps` output on the system.
+    Supports two modes:
+      1. Pass creds_b64 (base64 string) — decodes internally (used by standalone OCR)
+      2. Pass creds_json (pre-decoded dict) — skips decoding (used by combined ocr_tts)
 
     Args:
         creds_b64: Base64-encoded string containing the full service account JSON.
+                   Ignored if creds_json is provided.
+        creds_json: Optional pre-decoded credentials dict. If provided, creds_b64
+                    is not decoded again (saves time in combined actions).
 
     Returns:
         An initialized ImageAnnotatorClient ready to make API calls.
@@ -147,16 +211,13 @@ def init_vision_client(creds_b64):
     Raises:
         Exception: If credentials are invalid or client creation fails.
     """
-    # Step 1: Decode the base64 string back to JSON
-    creds_json = json.loads(base64.b64decode(creds_b64))
+    # Decode credentials if not already provided as a dict
+    if creds_json is None:
+        creds_json = _decode_credentials(creds_b64)
 
-    # Step 2: Create Google OAuth2 credentials from the service account info.
-    # This is the standard way to authenticate with GCP APIs using a service account.
-    from google.oauth2 import service_account
-    credentials = service_account.Credentials.from_service_account_info(creds_json)
+    # Create OAuth2 credentials and the Vision API client
+    credentials = _make_oauth_credentials(creds_json)
 
-    # Step 3: Create the Vision API client with these credentials.
-    # The client handles HTTP transport, request serialization, etc.
     from google.cloud import vision
     client = vision.ImageAnnotatorClient(credentials=credentials)
 
@@ -168,13 +229,18 @@ def init_vision_client(creds_b64):
 # TTS client initialization
 # ---------------------------------------------------------------------------
 
-def init_tts_client(creds_b64):
+def init_tts_client(creds_b64, creds_json=None):
     """
-    Create a Google Cloud Text-to-Speech client from base64-encoded service
-    account JSON. Same pattern as init_vision_client().
+    Create a Google Cloud Text-to-Speech client from GCP service account credentials.
+
+    Supports two modes (same as init_vision_client):
+      1. Pass creds_b64 — decodes internally (used by standalone TTS)
+      2. Pass creds_json — skips decoding (used by combined ocr_tts)
 
     Args:
         creds_b64: Base64-encoded string containing the full service account JSON.
+                   Ignored if creds_json is provided.
+        creds_json: Optional pre-decoded credentials dict.
 
     Returns:
         An initialized TextToSpeechClient ready to make API calls.
@@ -182,14 +248,13 @@ def init_tts_client(creds_b64):
     Raises:
         Exception: If credentials are invalid or client creation fails.
     """
-    # Step 1: Decode the base64 string back to JSON
-    creds_json = json.loads(base64.b64decode(creds_b64))
+    # Decode credentials if not already provided as a dict
+    if creds_json is None:
+        creds_json = _decode_credentials(creds_b64)
 
-    # Step 2: Create Google OAuth2 credentials from the service account info
-    from google.oauth2 import service_account
-    credentials = service_account.Credentials.from_service_account_info(creds_json)
+    # Create OAuth2 credentials and the TTS API client
+    credentials = _make_oauth_credentials(creds_json)
 
-    # Step 3: Create the TTS API client with these credentials
     from google.cloud import texttospeech
     client = texttospeech.TextToSpeechClient(credentials=credentials)
 
@@ -279,23 +344,25 @@ def resize_image_if_needed(image_bytes):
 # OCR action — the main text detection pipeline
 # ---------------------------------------------------------------------------
 
-def do_ocr(image_path, creds_b64):
+def do_ocr(image_path, creds_b64, vision_client=None):
     """
     Perform OCR on an image file using Google Cloud Vision API.
 
     Steps:
       1. Read the image file from disk
       2. Resize if over 10 MB
-      3. Initialize the Vision client with credentials
+      3. Initialize the Vision client with credentials (skip if pre-initialized)
       4. Call text_detection() with retry on transient errors
       5. Parse the response and extract detected text
 
     Args:
         image_path: Absolute path to the screenshot PNG file.
         creds_b64: Base64-encoded GCP service account JSON.
+        vision_client: Optional pre-initialized Vision client. When provided
+                       (in serve mode), skips client creation for speed.
 
     Returns:
-        Never returns — calls output_result() or output_error() which exit.
+        Never returns — raises WorkerResult or WorkerError via output_result/output_error.
     """
     # Step 1: Read the image file
     if not os.path.exists(image_path):
@@ -313,12 +380,15 @@ def do_ocr(image_path, creds_b64):
     # Step 2: Resize if needed (Vision API has a size limit)
     image_bytes = resize_image_if_needed(image_bytes)
 
-    # Step 3: Initialize the Vision client
-    try:
-        client = init_vision_client(creds_b64)
-    except Exception as e:
-        log_error(f"Failed to init Vision client: {e}")
-        output_error(f"Failed to initialize GCP credentials: {e}")
+    # Step 3: Initialize the Vision client (skip if pre-initialized in serve mode)
+    if vision_client is not None:
+        client = vision_client
+    else:
+        try:
+            client = init_vision_client(creds_b64)
+        except Exception as e:
+            log_error(f"Failed to init Vision client: {e}")
+            output_error(f"Failed to initialize GCP credentials: {e}")
 
     # Step 4: Call the Vision API with retry logic
     from google.cloud import vision
@@ -402,14 +472,14 @@ def do_ocr(image_path, creds_b64):
 # TTS action — synthesize speech from text
 # ---------------------------------------------------------------------------
 
-def do_tts(text, output_path, voice_id, speech_rate, creds_b64):
+def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None):
     """
     Synthesize speech from text using Google Cloud Text-to-Speech API.
 
     Steps:
       1. Validate and truncate text if needed
       2. Look up voice language code and speaking rate
-      3. Initialize the TTS client with credentials
+      3. Initialize the TTS client with credentials (skip if pre-initialized)
       4. Build synthesis request (input, voice, audio config)
       5. Call synthesize_speech() with retry on transient errors
       6. Write audio content to output file
@@ -420,9 +490,11 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64):
         voice_id: Voice name from VOICE_REGISTRY (e.g., "en-US-Neural2-C").
         speech_rate: Speed preset from SPEECH_RATE_MAP (e.g., "medium").
         creds_b64: Base64-encoded GCP service account JSON.
+        tts_client: Optional pre-initialized TTS client. When provided
+                    (in serve mode), skips client creation for speed.
 
     Returns:
-        Never returns — calls output_result() or output_error() which exit.
+        Never returns — raises WorkerResult or WorkerError via output_result/output_error.
     """
     # Step 1: Validate text input
     if not text or not text.strip():
@@ -450,12 +522,15 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64):
     if speech_rate not in SPEECH_RATE_MAP:
         log_info(f"Unknown speech rate '{speech_rate}', defaulting to 1.0")
 
-    # Step 3: Initialize the TTS client
-    try:
-        client = init_tts_client(creds_b64)
-    except Exception as e:
-        log_error(f"Failed to init TTS client: {e}")
-        output_error(f"Failed to initialize GCP credentials: {e}")
+    # Step 3: Initialize the TTS client (skip if pre-initialized in serve mode)
+    if tts_client is not None:
+        client = tts_client
+    else:
+        try:
+            client = init_tts_client(creds_b64)
+        except Exception as e:
+            log_error(f"Failed to init TTS client: {e}")
+            output_error(f"Failed to initialize GCP credentials: {e}")
 
     # Step 4: Build the synthesis request components
     from google.cloud import texttospeech
@@ -543,7 +618,368 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Combined OCR+TTS action — single subprocess for the pipeline
+# ---------------------------------------------------------------------------
+
+def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
+               vision_client=None, tts_client=None):
+    """
+    Perform OCR and TTS in a single invocation.
+
+    In CLI mode, this is the speed-optimized path: one subprocess for both
+    OCR and TTS, sharing Python startup, imports, and credential decode.
+
+    In serve mode, pre-initialized clients are passed in, so credential
+    decode and client init are skipped entirely (already done at startup).
+
+    Steps:
+      1. Decode credentials once (skipped if both clients provided)
+      2. Read and resize image
+      3. Init Vision client → call text_detection() with retry
+      4. If no text → return early (success with empty text, no audio)
+      5. Init TTS client (reuses decoded credentials) → synthesize_speech()
+      6. Write MP3 to output path
+
+    Args:
+        image_path: Absolute path to the screenshot PNG file.
+        output_mp3_path: Absolute path where the MP3 file will be written.
+        voice_id: Voice name from VOICE_REGISTRY (e.g., "en-US-Neural2-C").
+        speech_rate: Speed preset from SPEECH_RATE_MAP (e.g., "medium").
+        creds_b64: Base64-encoded GCP service account JSON.
+        vision_client: Optional pre-initialized Vision client (serve mode).
+        tts_client: Optional pre-initialized TTS client (serve mode).
+
+    Returns:
+        Never returns — raises WorkerResult or WorkerError via output_result/output_error.
+    """
+    # ---- Step 1: Decode credentials ONCE for both clients ----
+    # In serve mode, both clients are pre-initialized, so skip credential
+    # decode entirely. If only one is missing, decode and init that one.
+    creds_json = None
+    if vision_client is None or tts_client is None:
+        try:
+            creds_json = _decode_credentials(creds_b64)
+        except Exception as e:
+            log_error(f"Failed to decode credentials: {e}")
+            output_error(f"Failed to decode GCP credentials: {e}")
+
+    # ---- Step 2: Read and resize the image ----
+    if not os.path.exists(image_path):
+        output_error(f"Image file not found: {image_path}")
+
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+
+    file_size = len(image_bytes)
+    log_info(f"Read image: {file_size:,} bytes from {image_path}")
+
+    if file_size == 0:
+        output_error("Image file is empty (0 bytes)")
+
+    image_bytes = resize_image_if_needed(image_bytes)
+
+    # ---- Step 3: OCR — init Vision client and call text_detection() ----
+    if vision_client is None:
+        try:
+            vision_client = init_vision_client(creds_b64, creds_json=creds_json)
+        except Exception as e:
+            log_error(f"Failed to init Vision client: {e}")
+            output_error(f"Failed to initialize Vision credentials: {e}")
+
+    from google.cloud import vision
+    from google.api_core import exceptions as google_exceptions
+
+    image = vision.Image(content=image_bytes)
+    log_info(f"Sending {len(image_bytes):,} bytes to Vision API...")
+
+    # Retry loop for OCR (same pattern as do_ocr)
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = vision_client.text_detection(image=image)
+            break
+        except (
+            google_exceptions.ServiceUnavailable,
+            google_exceptions.ResourceExhausted,
+            google_exceptions.DeadlineExceeded,
+            ConnectionError,
+            ConnectionResetError,
+        ) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+                log_info(
+                    f"OCR transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            else:
+                log_error(f"OCR failed after {MAX_RETRIES} attempts: {e}")
+                output_error(f"Vision API failed after {MAX_RETRIES} retries: {e}")
+        except Exception as e:
+            log_error(f"Vision API error: {e}")
+            log_error(traceback.format_exc())
+            output_error(f"Vision API error: {e}")
+    else:
+        output_error(f"Vision API failed after {MAX_RETRIES} retries: {last_error}")
+
+    # Check for API-level errors
+    if response.error.message:
+        log_error(f"Vision API response error: {response.error.message}")
+        output_error(f"Vision API error: {response.error.message}")
+
+    # ---- Step 4: Extract text — return early if none detected ----
+    if not response.text_annotations:
+        log_info("No text detected in image")
+        output_result({
+            "success": True,
+            "text": "",
+            "char_count": 0,
+            "line_count": 0,
+            "audio_size": 0,
+            "output_path": "",
+            "voice_id": voice_id,
+            "message": "No text detected in image",
+        })
+
+    detected_text = response.text_annotations[0].description
+    char_count = len(detected_text)
+    line_count = detected_text.count("\n") + 1 if detected_text else 0
+    log_info(f"OCR detected {char_count:,} chars, {line_count} lines")
+
+    # ---- Step 5: TTS — init TTS client (reuses creds_json) and synthesize ----
+    # Truncate text if over the API limit
+    tts_text = detected_text
+    if len(tts_text) > MAX_TEXT_LENGTH:
+        tts_text = tts_text[:MAX_TEXT_LENGTH - 30] + "\n... (text truncated)"
+        log_info(f"Text truncated from {len(detected_text):,} to {len(tts_text):,} chars")
+
+    # Look up voice language code and speaking rate
+    language_code = VOICE_REGISTRY.get(voice_id, "en-US")
+    if voice_id not in VOICE_REGISTRY:
+        log_info(f"Unknown voice '{voice_id}', defaulting to language_code='en-US'")
+
+    speaking_rate = SPEECH_RATE_MAP.get(speech_rate, 1.0)
+    if speech_rate not in SPEECH_RATE_MAP:
+        log_info(f"Unknown speech rate '{speech_rate}', defaulting to 1.0")
+
+    if tts_client is None:
+        try:
+            tts_client = init_tts_client(creds_b64, creds_json=creds_json)
+        except Exception as e:
+            log_error(f"Failed to init TTS client: {e}")
+            # OCR succeeded but TTS init failed — return OCR text so it's not lost
+            output_error(f"TTS credential init failed (OCR text available): {e}")
+
+    from google.cloud import texttospeech
+
+    synthesis_input = texttospeech.SynthesisInput(text=tts_text)
+    voice_params = texttospeech.VoiceSelectionParams(
+        language_code=language_code,
+        name=voice_id,
+    )
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        speaking_rate=speaking_rate,
+    )
+
+    log_info(f"Sending TTS request: {len(tts_text):,} chars, voice={voice_id}, rate={speech_rate}")
+
+    # Retry loop for TTS (same pattern as do_tts)
+    last_error = None
+    tts_response = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            tts_response = tts_client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice_params,
+                audio_config=audio_config,
+            )
+            break
+        except (
+            google_exceptions.ServiceUnavailable,
+            google_exceptions.ResourceExhausted,
+            google_exceptions.DeadlineExceeded,
+            ConnectionError,
+            ConnectionResetError,
+        ) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+                log_info(
+                    f"TTS transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            else:
+                log_error(f"TTS failed after {MAX_RETRIES} attempts: {e}")
+                output_error(f"TTS API failed after {MAX_RETRIES} retries: {e}")
+        except Exception as e:
+            log_error(f"TTS API error: {e}")
+            log_error(traceback.format_exc())
+            output_error(f"TTS API error: {e}")
+    else:
+        output_error(f"TTS API failed after {MAX_RETRIES} retries: {last_error}")
+
+    # ---- Step 6: Write audio to output file ----
+    audio_size = len(tts_response.audio_content)
+    log_info(f"TTS response: {audio_size:,} bytes of audio")
+
+    try:
+        with open(output_mp3_path, "wb") as f:
+            f.write(tts_response.audio_content)
+        log_info(f"Audio written to {output_mp3_path}")
+    except Exception as e:
+        log_error(f"Failed to write audio file: {e}")
+        output_error(f"Failed to write audio file: {e}")
+
+    # ---- Return combined result ----
+    output_result({
+        "success": True,
+        "text": detected_text,
+        "char_count": char_count,
+        "line_count": line_count,
+        "audio_size": audio_size,
+        "output_path": output_mp3_path,
+        "voice_id": voice_id,
+        "message": f"OCR+TTS complete: {char_count:,} chars, {audio_size:,} bytes",
+    })
+
+
+# ---------------------------------------------------------------------------
+# Persistent worker mode: serve()
+# ---------------------------------------------------------------------------
+# When launched with `python3 gcp_worker.py serve`, the process stays alive
+# and reads JSON commands from stdin, one per line. This eliminates the
+# ~1.7s per-call overhead of Python startup + imports + client initialization
+# by paying it once at startup. gRPC connections are also kept warm across
+# requests, which can significantly reduce API call latency.
+#
+# Protocol:
+#   Parent → Worker (stdin):  {"action": "ocr", "image_path": "/tmp/img.png"}\n
+#   Worker → Parent (stdout): {"success": true, "text": "...", ...}\n
+#   Ready signal (first line): {"ready": true}\n
+#   Shutdown: {"action": "shutdown"}\n  or  close stdin (EOF)
+
+def serve():
+    """
+    Persistent worker mode — reads JSON commands from stdin, dispatches to
+    do_* functions with pre-initialized clients, writes JSON responses to stdout.
+
+    Startup sequence:
+      1. Reconfigure stdout for line buffering (ensures each JSON line is flushed)
+      2. Read credentials from environment
+      3. Import google-cloud libs and init both Vision + TTS clients (pay once)
+      4. Send {"ready": true} to stdout
+      5. Enter command loop
+
+    The command loop runs until stdin is closed (EOF) or a {"action": "shutdown"}
+    command is received.
+    """
+    # Step 1: Ensure stdout flushes after every line (critical for JSON protocol).
+    # Without this, responses may sit in the buffer and the parent hangs waiting.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    # Step 2: Read credentials from environment
+    creds_b64 = os.environ.get("GCP_CREDENTIALS_BASE64", "")
+    if not creds_b64:
+        print(json.dumps({"ready": False, "message": "GCP_CREDENTIALS_BASE64 not set"}), flush=True)
+        return
+
+    # Step 3: Import all google-cloud libs and init clients upfront.
+    # This is the ~1.5s we're paying ONCE instead of every call.
+    try:
+        log_info("serve: initializing clients...")
+        creds_json = _decode_credentials(creds_b64)
+        vision_client = init_vision_client(creds_b64, creds_json=creds_json)
+        tts_client = init_tts_client(creds_b64, creds_json=creds_json)
+        log_info("serve: both clients initialized")
+    except Exception as e:
+        log_error(f"serve: client init failed: {e}")
+        print(json.dumps({"ready": False, "message": f"Client init failed: {e}"}), flush=True)
+        return
+
+    # Step 4: Signal to parent that we're ready to accept commands
+    print(json.dumps({"ready": True}), flush=True)
+    log_info("serve: ready, waiting for commands...")
+
+    # Step 5: Command loop — read JSON from stdin, dispatch, write JSON to stdout
+    while True:
+        try:
+            line = sys.stdin.readline()
+        except (IOError, OSError):
+            # Stdin pipe broken — parent closed it or crashed
+            log_info("serve: stdin read error, exiting")
+            break
+
+        if not line:
+            # EOF — parent closed stdin, time to exit gracefully
+            log_info("serve: stdin closed (EOF), exiting")
+            break
+
+        line = line.strip()
+        if not line:
+            # Blank line — skip (shouldn't happen in normal operation)
+            continue
+
+        # Parse the command JSON
+        try:
+            cmd = json.loads(line)
+        except json.JSONDecodeError as e:
+            log_error(f"serve: invalid JSON: {e}")
+            print(json.dumps({"success": False, "message": f"Invalid command JSON: {e}"}), flush=True)
+            continue
+
+        action = cmd.get("action", "")
+
+        # Shutdown command — exit the loop cleanly
+        if action == "shutdown":
+            log_info("serve: shutdown command received, exiting")
+            break
+
+        # Dispatch to the appropriate action handler.
+        # The do_* functions raise WorkerResult/WorkerError which we catch here
+        # and write as JSON to stdout, then continue to the next command.
+        try:
+            if action == "ocr":
+                do_ocr(cmd.get("image_path", ""), creds_b64,
+                       vision_client=vision_client)
+
+            elif action == "tts":
+                do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
+                       cmd.get("voice_id", "en-US-Neural2-C"),
+                       cmd.get("speech_rate", "medium"), creds_b64,
+                       tts_client=tts_client)
+
+            elif action == "ocr_tts":
+                do_ocr_tts(cmd.get("image_path", ""), cmd.get("output_path", ""),
+                           cmd.get("voice_id", "en-US-Neural2-C"),
+                           cmd.get("speech_rate", "medium"), creds_b64,
+                           vision_client=vision_client, tts_client=tts_client)
+
+            else:
+                print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)
+
+        except WorkerResult as r:
+            # Successful result from do_* function
+            print(json.dumps(r.data), flush=True)
+
+        except WorkerError as e:
+            # Error result from do_* function
+            print(json.dumps(e.data), flush=True)
+
+        except Exception as e:
+            # Unexpected error — log it and return an error response.
+            # The worker stays alive; only individual requests fail.
+            log_error(f"serve: unexpected error: {e}")
+            log_error(traceback.format_exc())
+            print(json.dumps({"success": False, "message": f"Worker error: {e}"}), flush=True)
+
+    log_info("serve: exiting")
+
+
+# ---------------------------------------------------------------------------
+# Entry point — CLI mode (one-shot) dispatcher
 # ---------------------------------------------------------------------------
 
 def main():
@@ -553,42 +989,65 @@ def main():
     Usage: python3 gcp_worker.py <action> [args...]
 
     Actions:
-      ocr <image_path>                              — Perform OCR on the given image file
-      tts <text> <output_path> <voice_id> <rate>     — Synthesize speech from text
+      ocr <image_path>                                              — Perform OCR on the given image file
+      tts <text> <output_path> <voice_id> <rate>                     — Synthesize speech from text
+      ocr_tts <image_path> <output_mp3_path> <voice_id> <rate>      — Combined OCR+TTS in one process
+      serve                                                          — Persistent mode (stdin/stdout JSON)
 
     Credentials are read from the GCP_CREDENTIALS_BASE64 environment variable.
     """
     # Validate we got at least an action argument
     if len(sys.argv) < 2:
-        output_error("Usage: gcp_worker.py <action> [args...]")
+        # Can't use output_error here for "serve" since it raises an exception,
+        # but for the CLI usage case, we wrap everything in try/except below.
+        print(json.dumps({"success": False, "message": "Usage: gcp_worker.py <action> [args...]"}), flush=True)
+        sys.exit(1)
 
     action = sys.argv[1]
+
+    # "serve" mode has its own credential handling and loop — not wrapped
+    # by the one-shot try/except below.
+    if action == "serve":
+        serve()
+        return
 
     # Read credentials from environment (not CLI args — avoids ps exposure)
     creds_b64 = os.environ.get("GCP_CREDENTIALS_BASE64", "")
     if not creds_b64:
-        output_error("GCP_CREDENTIALS_BASE64 environment variable not set")
+        print(json.dumps({"success": False, "message": "GCP_CREDENTIALS_BASE64 environment variable not set"}), flush=True)
+        sys.exit(1)
 
-    # Dispatch to the appropriate action handler
-    if action == "ocr":
-        # OCR requires an image path argument
-        if len(sys.argv) < 3:
-            output_error("Usage: gcp_worker.py ocr <image_path>")
-        image_path = sys.argv[2]
-        do_ocr(image_path, creds_b64)
+    # Dispatch to the appropriate action handler.
+    # Each do_* function raises WorkerResult or WorkerError instead of
+    # writing to stdout directly. We catch those here and handle output + exit.
+    try:
+        if action == "ocr":
+            if len(sys.argv) < 3:
+                raise WorkerError("Usage: gcp_worker.py ocr <image_path>")
+            do_ocr(sys.argv[2], creds_b64)
 
-    elif action == "tts":
-        # TTS requires: text, output_path, voice_id, speech_rate
-        if len(sys.argv) < 6:
-            output_error("Usage: gcp_worker.py tts <text> <output_path> <voice_id> <speech_rate>")
-        text = sys.argv[2]
-        output_path = sys.argv[3]
-        voice_id = sys.argv[4]
-        speech_rate = sys.argv[5]
-        do_tts(text, output_path, voice_id, speech_rate, creds_b64)
+        elif action == "tts":
+            if len(sys.argv) < 6:
+                raise WorkerError("Usage: gcp_worker.py tts <text> <output_path> <voice_id> <speech_rate>")
+            do_tts(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], creds_b64)
 
-    else:
-        output_error(f"Unknown action: {action}")
+        elif action == "ocr_tts":
+            if len(sys.argv) < 6:
+                raise WorkerError("Usage: gcp_worker.py ocr_tts <image_path> <output_mp3_path> <voice_id> <speech_rate>")
+            do_ocr_tts(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], creds_b64)
+
+        else:
+            raise WorkerError(f"Unknown action: {action}")
+
+    except WorkerResult as r:
+        # Success — print JSON and exit cleanly
+        print(json.dumps(r.data), flush=True)
+        sys.exit(0)
+
+    except WorkerError as e:
+        # Error — print JSON and exit with error code
+        print(json.dumps(e.data), flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

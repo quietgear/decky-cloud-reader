@@ -43,7 +43,7 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 
 ### Architecture Overview
 
-Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles screen capture, subprocess launching, and audio playback. GCP API calls are delegated to `gcp_worker.py` running under system Python. The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings and status.
+Everything runs inside the standard Decky plugin process — no separate service. The Python backend (`main.py`) handles screen capture, worker management, and audio playback. GCP API calls are delegated to a **persistent** `gcp_worker.py` subprocess running under system Python. The TypeScript frontend (`src/index.tsx`) provides the UI panel with settings and status.
 
 ```
 Frontend (TypeScript/React)         Backend (Python)
@@ -52,16 +52,21 @@ Frontend (TypeScript/React)         Backend (Python)
 │  - Read Screen (primary)│◄──────►│  - Pipeline orchestration    │
 │  - Credentials section  │        │  - GCP credentials mgmt     │
 │  - Settings section     │        │  - Screen capture (GStreamer)│
-│  - OCR/TTS controls     │        │  - Subprocess launcher       │
-│                         │        │  - Audio playback (Popen)    │
-│ Global Overlay          │        │  - L4 button monitor (hidraw)│
-│  - OCR text display     │        │                              │
-└─────────────────────────┘        │  Subprocesses (system Python)│
+│  - Button trigger config│        │  - Worker lifecycle mgmt     │
+│  - OCR/TTS controls     │        │  - Audio playback (Popen)    │
+│                         │        │                              │
+│ Global Overlay          │        │  hidraw_monitor.py (thread)  │
+│  - OCR text display     │        │  - Button hold detection     │
+│                         │        │  - Auto-reconnect            │
+└─────────────────────────┘        │                              │
+                                   │  Persistent subprocess       │
                                    │  ┌──────────────────────────┐│
-                                   │  │ gcp_worker.py            ││
+                                   │  │ gcp_worker.py (serve)    ││
+                                   │  │  - stdin/stdout JSON     ││
+                                   │  │  - Pre-init GCP clients  ││
                                    │  │  - OCR (Cloud Vision)    ││
                                    │  │  - TTS (Cloud TTS)       ││
-                                   │  │  - CLI args + env / JSON ││
+                                   │  │  - Warm gRPC connections ││
                                    │  └──────────────────────────┘│
                                    └──────────────────────────────┘
 ```
@@ -138,15 +143,16 @@ Frontend (TypeScript/React)         Backend (Python)
 ### Phase 6: End-to-End OCR+TTS Pipeline `[DONE]`
 
 **Pipeline orchestration:**
-- [x] `read_screen()` RPC: capture → `_run_gcp_worker("ocr", ...)` → `_run_gcp_worker("tts", ...)` → `_start_playback()`
+- [x] `read_screen()` RPC: capture → `_run_gcp_worker("ocr_tts", ...)` → `_start_playback()` (later replaced by `_send_to_worker()` in Phase 6.5)
+- [x] Combined `ocr_tts` subprocess action: OCR+TTS in single process, sharing Python startup, imports, and credential decode (~2-3s faster than separate calls)
 - [x] Each step checks for cancellation flag (`self._pipeline_cancel`) before proceeding
 - [x] `stop_pipeline()` RPC: sets cancel flag + stops any running playback
 - [x] Loading/progress states in UI during pipeline execution (`get_pipeline_status()` polled at 1s)
 
-**Subprocess lifecycle guarantees:**
+**Subprocess lifecycle guarantees (before Phase 6.5 persistent worker):**
 - [x] `_unload()` sets pipeline cancel flag + stops playback + sweeps orphaned temp files
 - [x] Temp file cleanup in `_read_screen_sync()` finally block — OCR temp always cleaned, TTS temp only if playback didn't start
-- [x] No Popen without corresponding `wait()` — the golden rule against zombies
+- [x] No Popen without corresponding `wait()` — the golden rule against zombies (relaxed in Phase 6.5 for the persistent worker, which uses its own shutdown protocol)
 
 **Frontend (Read Screen section):**
 - [x] "Read Screen" / "Stop" toggle button with icons (FaBook / FaStop), placed as first section in panel
@@ -155,12 +161,69 @@ Frontend (TypeScript/React)         Backend (Python)
 - [x] Standalone buttons (Test Capture, Test OCR, Read Text) disabled while pipeline is running
 - [x] Concurrent pipeline rejection ("Pipeline already running")
 
-### Phase 7: L4 Button Trigger `[NOT STARTED]`
-- [ ] Implement hidraw-based button monitoring in Python backend (background thread)
-- [ ] L4 press triggers `read_screen()` pipeline without opening UI
-- [ ] Settings UI — button selection (L4/R4/L5/R5)
-- [ ] Hold-time detection with configurable threshold
-- [ ] Health monitoring and auto-reconnect
+### Phase 6.5: Persistent GCP Worker Subprocess `[DONE]`
+
+**Problem:** After Phase 6, the end-to-end pipeline took ~5.2s. Instrumented timing inside the subprocess revealed that ~1.7s was wasted on per-call overhead (Python startup + google-cloud imports + GCP client initialization + subprocess spawn) and the TTS API call took ~2.8s partly because every call opened a fresh gRPC connection. The combined `ocr_tts` action helped by sharing imports and credential decode within one call, but couldn't eliminate the overhead of spawning a new process every time.
+
+**Solution:** Convert `gcp_worker.py` from a one-shot CLI tool into a persistent subprocess that stays alive between requests. Initialize Python imports and GCP API clients **once** at startup, then communicate via stdin/stdout JSON lines. gRPC connections stay warm across requests (HTTP/2 reuse).
+
+**Timing improvement:**
+| Metric | Before (Phase 6) | After (Phase 6.5) |
+|--------|-------------------|--------------------|
+| 1st trigger (cold worker) | 5.2s | 4.7s |
+| 2nd+ trigger (warm worker) | 5.2s | 3.2s |
+| Per-call overhead eliminated | — | ~1.5s (imports + client init + subprocess spawn) |
+
+**gcp_worker.py refactoring:**
+- [x] Exception-based flow control: `WorkerResult`/`WorkerError` exceptions replace `sys.exit()` in `output_result()`/`output_error()` — same `do_*` functions work in both CLI mode (exit after one call) and serve mode (continue looping)
+- [x] Optional pre-initialized client parameters on `do_ocr(vision_client=)`, `do_tts(tts_client=)`, `do_ocr_tts(vision_client=, tts_client=)` — skip client creation when in serve mode
+- [x] `serve()` function: reconfigure stdout for line buffering → read credentials → import all google-cloud libs → init both clients → send `{"ready": true}` → enter command loop
+- [x] Command loop: read JSON from stdin → dispatch to `do_*` → catch `WorkerResult`/`WorkerError` → write JSON to stdout → continue
+- [x] Shutdown: `{"action": "shutdown"}` command or stdin EOF
+- [x] CLI `main()` dispatcher updated: wraps one-shot calls in try/except for `WorkerResult`/`WorkerError`, delegates to `serve()` for persistent mode
+
+**main.py worker management:**
+- [x] `_start_worker()`: launch `gcp_worker.py serve` via Popen (stdin/stdout/stderr PIPE), start stderr drain thread, wait for `{"ready": true}` with 30s timeout
+- [x] `_stop_worker()`: send `{"action":"shutdown"}` → `wait(3)` → SIGTERM → `wait(2)` → SIGKILL, close all pipes
+- [x] `_send_to_worker(command_dict, timeout)`: acquire `_worker_lock` → lazy start/restart if worker is dead → write JSON to stdin → read response with timeout thread → parse JSON → return dict
+- [x] `_drain_worker_stderr()`: daemon thread reading stderr lines, logging via `decky.logger.debug` — prevents pipe buffer deadlock
+- [x] All callers (`_perform_ocr_sync`, `_perform_tts_sync`, `_read_screen_sync`) migrated from `_run_gcp_worker()` to `_send_to_worker()`
+- [x] `_run_gcp_worker()` removed entirely
+
+**Lifecycle integration:**
+- [x] `_main()`: initialize `_worker_process = None`, `_worker_lock`, `_worker_stderr_thread` (no eager start — lazy on first use)
+- [x] `_unload()`: `_stop_worker()` early in cleanup (before temp file sweep)
+- [x] `load_credentials_file()`: `_stop_worker()` after saving new credentials so next request lazy-starts with new creds
+- [x] `clear_credentials()`: `_stop_worker()` before clearing the setting
+
+### Phase 7: L4 Button Trigger `[DONE]`
+
+**Hidraw button monitor (hidraw_monitor.py):**
+- [x] HidrawButtonMonitor class — self-contained module adapted from Decky-Translator
+- [x] Device discovery: scan `/sys/class/hidraw/`, match Valve VID `0x28DE` / PID `0x1205`, prefer interface `:1.2/`
+- [x] HID initialization: disable lizard mode + trackpad emulation + watchdog via feature reports
+- [x] Button masks for all Steam Deck buttons (L4/R4/L5/R5/L1/R1/A/B/X/Y/etc.)
+- [x] Background daemon thread with `select()` polling (0.1s timeout for clean shutdown)
+- [x] Hold-time detection: track press start, fire callback once when threshold met, 2s cooldown
+- [x] Runtime reconfiguration via `configure()` — change target button / hold threshold without restart
+- [x] Auto-reconnect: 10 errors → close device → 2s delay → reinitialize
+- [x] Thread-safe state with `threading.Lock`
+
+**Backend integration (main.py):**
+- [x] Event loop capture in `_main()` for cross-thread async dispatch
+- [x] Monitor lifecycle: create, start, stop in `_main()` / `_unload()`
+- [x] Button trigger callback: `_on_button_trigger()` → `asyncio.run_coroutine_threadsafe()` → `_handle_button_trigger()`
+- [x] Trigger guards: check enabled, not already running, credentials configured
+- [x] Settings handling: `trigger_button` changes start/stop/reconfigure monitor; `hold_time_ms` updates threshold
+- [x] `get_button_monitor_status()` RPC for UI status indicator
+- [x] Graceful degradation: if hidraw device not found, plugin works via UI only
+
+**Frontend (src/index.tsx):**
+- [x] "Button Trigger" settings section between "Read Screen" and "GCP Credentials"
+- [x] Trigger button dropdown: Disabled / L4 / R4 / L5 / R5
+- [x] Hold time dropdown: 300ms / 500ms / 750ms / 1000ms / 1500ms
+- [x] Status indicator: Connected / Not connected (fetched via `get_button_monitor_status()`)
+- [x] Hint text explaining current configuration
 
 ### Phase 8: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Global overlay for displaying OCR text on screen
@@ -184,13 +247,15 @@ Frontend (TypeScript/React)         Backend (Python)
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Architecture | Single Decky plugin, GCP calls via subprocess | main.py runs under Decky's embedded Python; gcp_worker.py runs under system Python (`/usr/bin/python3`) with `py_modules/` on PYTHONPATH to access google-cloud libs |
+| Architecture | Single Decky plugin, GCP calls via persistent subprocess | main.py runs under Decky's embedded Python; gcp_worker.py runs under system Python (`/usr/bin/python3`) in persistent "serve" mode with `py_modules/` on PYTHONPATH |
+| GCP worker mode | Persistent subprocess with stdin/stdout JSON lines | Eliminates ~1.7s per-call overhead (Python startup + imports + client init). GCP clients initialized once at startup; gRPC connections stay warm across requests |
 | Screen capture | GStreamer + PipeWire | Native to Steam Deck, hardware-accelerated |
 | Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; ffplay is reliably present on Steam Deck, mpv is not pre-installed. Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root |
 | GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
 | Button input | Hidraw direct device reading | Works in background without opening UI |
 | Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |
-| Pipeline cancellation | `threading.Event` checked between steps | Subprocess timeouts are bounded (45s/30s); killing mid-subprocess adds complexity for marginal benefit |
+| Pipeline optimization | Combined `ocr_tts` action via persistent worker | Read Screen pipeline sends single command to warm worker — no subprocess spawn, no imports, no client init |
+| Pipeline cancellation | `threading.Event` checked between steps | Worker call timeout is bounded (60s); killing mid-request adds complexity for marginal benefit |
 | Python deps | Bundled in py_modules/ via Docker build | Runs on Steam Deck without internet |
 
 ## File Structure
@@ -199,8 +264,9 @@ Frontend (TypeScript/React)         Backend (Python)
 decky-cloud-reader/
 ├── src/
 │   └── index.tsx              # Plugin entry, all UI (sections, file browser)
-├── main.py                    # Python backend (lifecycle, RPC, pipeline, subprocess launcher)
-├── gcp_worker.py              # GCP subprocess (OCR + TTS, runs under system Python)
+├── main.py                    # Python backend (lifecycle, RPC, pipeline, worker management)
+├── hidraw_monitor.py          # Hidraw button monitor (hold-to-trigger, background thread)
+├── gcp_worker.py              # GCP worker (persistent serve mode or one-shot CLI, system Python)
 ├── requirements.txt           # Python dependencies
 ├── package.json
 ├── plugin.json

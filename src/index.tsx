@@ -118,15 +118,27 @@ interface StopPipelineResult {
   message: string;     // Human-readable message
 }
 
+// Response from the get_button_monitor_status() backend RPC
+interface ButtonMonitorStatus {
+  running: boolean;          // true if the monitor thread is alive
+  initialized: boolean;      // true if the hidraw device is open and initialized
+  device_path: string | null;// e.g., "/dev/hidraw2" or null if not found
+  error_count: number;       // consecutive read errors (0 = healthy)
+  target_button: string;     // current target button (e.g., "L4") or "disabled"
+  hold_threshold_ms: number; // current hold threshold in milliseconds
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
-  voice_id: string;        // TTS voice (Phase 5)
-  speech_rate: string;     // TTS speed preset (Phase 5)
-  volume: number;          // TTS volume 0-100 (Phase 5)
-  enabled: boolean;        // Master on/off
-  debug: boolean;          // Verbose logging
-  is_configured: boolean;  // Computed: are GCP credentials loaded?
-  project_id: string;      // Computed: GCP project ID from credentials
+  voice_id: string;         // TTS voice (Phase 5)
+  speech_rate: string;      // TTS speed preset (Phase 5)
+  volume: number;           // TTS volume 0-100 (Phase 5)
+  enabled: boolean;         // Master on/off
+  debug: boolean;           // Verbose logging
+  trigger_button: string;   // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
+  hold_time_ms: number;     // Hold threshold in ms (Phase 7)
+  is_configured: boolean;   // Computed: are GCP credentials loaded?
+  project_id: string;       // Computed: GCP project ID from credentials
 }
 
 
@@ -175,6 +187,9 @@ const stopPipeline = callable<[], StopPipelineResult>("stop_pipeline");
 // Lightweight poll for pipeline progress (step, running, is_playing)
 const getPipelineStatus = callable<[], PipelineStatus>("get_pipeline_status");
 
+// Phase 7: Get button monitor status (running, device_path, error_count, etc.)
+const getButtonMonitorStatus = callable<[], ButtonMonitorStatus>("get_button_monitor_status");
+
 
 // =============================================================================
 // Helper: format file size in human-readable form
@@ -210,6 +225,29 @@ const SPEECH_RATE_OPTIONS = [
   { data: "medium", label: "Normal (1.0x)" },
   { data: "fast",   label: "Fast (1.25x)" },
   { data: "x-fast", label: "Very Fast (1.5x)" },
+];
+
+
+// =============================================================================
+// Button trigger options for the dropdown selectors (Phase 7)
+// =============================================================================
+// "disabled" turns off the hardware button trigger entirely.
+// L4/R4/L5/R5 are the back grip buttons on the Steam Deck.
+
+const TRIGGER_BUTTON_OPTIONS = [
+  { data: "disabled", label: "Disabled" },
+  { data: "L4",       label: "L4 (Back Left Upper)" },
+  { data: "R4",       label: "R4 (Back Right Upper)" },
+  { data: "L5",       label: "L5 (Back Left Lower)" },
+  { data: "R5",       label: "R5 (Back Right Lower)" },
+];
+
+const HOLD_TIME_OPTIONS = [
+  { data: 300,  label: "300ms (Quick)" },
+  { data: 500,  label: "500ms (Default)" },
+  { data: 750,  label: "750ms" },
+  { data: 1000, label: "1000ms (Long)" },
+  { data: 1500, label: "1500ms (Very Long)" },
 ];
 
 
@@ -447,6 +485,10 @@ function Content() {
   // Ref for the volume save debounce timeout
   const volumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // --- Button monitor state (Phase 7: L4 Button Trigger) ---
+  // Status of the hidraw button monitor (fetched on mount and after changes)
+  const [monitorStatus, setMonitorStatus] = useState<ButtonMonitorStatus | null>(null);
+
   // --- Pipeline state (Phase 6: Read Screen) ---
   // Whether the end-to-end pipeline is currently running
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
@@ -459,12 +501,15 @@ function Content() {
   // Ref for the pipeline polling interval
   const pipelinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Load settings from the backend when the component first mounts.
-  // Also reload when returning from file browser mode.
+  // Load settings and monitor status from the backend when the component
+  // first mounts. Also reload when returning from file browser mode.
   useEffect(() => {
     const loadSettings = async () => {
       const result = await getSettings();
       setSettings(result);
+      // Also fetch button monitor status for the status indicator
+      const status = await getButtonMonitorStatus();
+      setMonitorStatus(status);
     };
     loadSettings();
   }, [mode]);  // Re-fetch settings when mode changes (e.g., after loading creds)
@@ -807,6 +852,95 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
+      </PanelSection>
+
+      {/* ---- Button Trigger Section (Phase 7) ---- */}
+      {/* Configures which hardware button triggers the Read Screen pipeline
+          without opening the Decky panel. This is the key UX feature for
+          in-game use — press-and-hold a back button to hear screen text. */}
+      <PanelSection title="Button Trigger">
+        {/* Button selection dropdown */}
+        <PanelSectionRow>
+          <DropdownItem
+            label="Trigger Button"
+            description="Hold to trigger Read Screen"
+            menuLabel="Select Button"
+            rgOptions={TRIGGER_BUTTON_OPTIONS.map((o) => ({
+              data: o.data,
+              label: o.label,
+            }))}
+            selectedOption={
+              TRIGGER_BUTTON_OPTIONS.find((o) => o.data === settings.trigger_button)?.data
+              ?? TRIGGER_BUTTON_OPTIONS[0].data  // Default: disabled
+            }
+            onChange={async (option) => {
+              await saveSetting("trigger_button", option.data);
+              if (settings) {
+                setSettings({ ...settings, trigger_button: option.data as string });
+              }
+              // Re-fetch monitor status after changing the button
+              const status = await getButtonMonitorStatus();
+              setMonitorStatus(status);
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* Hold time dropdown — only shown when trigger is not disabled */}
+        {settings.trigger_button !== "disabled" && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Hold Time"
+              description="How long to hold before triggering"
+              menuLabel="Select Hold Time"
+              rgOptions={HOLD_TIME_OPTIONS.map((o) => ({
+                data: o.data,
+                label: o.label,
+              }))}
+              selectedOption={
+                HOLD_TIME_OPTIONS.find((o) => o.data === settings.hold_time_ms)?.data
+                ?? HOLD_TIME_OPTIONS[1].data  // Default: 500ms
+              }
+              onChange={async (option) => {
+                await saveSetting("hold_time_ms", option.data);
+                if (settings) {
+                  setSettings({ ...settings, hold_time_ms: option.data as number });
+                }
+                // Re-fetch monitor status after changing hold time
+                const status = await getButtonMonitorStatus();
+                setMonitorStatus(status);
+              }}
+            />
+          </PanelSectionRow>
+        )}
+
+        {/* Monitor status indicator — shows whether the device is connected */}
+        {settings.trigger_button !== "disabled" && monitorStatus && (
+          <PanelSectionRow>
+            <Field label="Status">
+              <div style={{
+                color: monitorStatus.initialized ? "#2ecc71" : "#e74c3c",
+                fontWeight: "bold",
+                fontSize: "13px",
+              }}>
+                {monitorStatus.initialized ? "Connected" : "Not connected"}
+              </div>
+            </Field>
+          </PanelSectionRow>
+        )}
+
+        {/* Hint text explaining what the button trigger does */}
+        <PanelSectionRow>
+          <div style={{
+            color: "#b8bcbf",
+            fontSize: "12px",
+            padding: "4px 0",
+          }}>
+            {settings.trigger_button === "disabled"
+              ? "Enable a button to trigger Read Screen without opening this panel"
+              : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to trigger Read Screen`
+            }
+          </div>
+        </PanelSectionRow>
       </PanelSection>
 
       {/* ---- GCP Credentials Section ---- */}
