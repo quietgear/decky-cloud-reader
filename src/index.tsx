@@ -128,6 +128,17 @@ interface ButtonMonitorStatus {
   hold_threshold_ms: number; // current hold threshold in milliseconds
 }
 
+// Response from the get_touchscreen_status() backend RPC (Phase 9)
+interface TouchscreenStatus {
+  running: boolean;              // true if the monitor thread is alive
+  initialized: boolean;          // true if the evdev device is open
+  device_path: string | null;    // e.g., "/dev/input/event5" or null
+  error_count: number;           // consecutive read errors (0 = healthy)
+  physical_max_x: number;        // Physical X axis max (short axis)
+  physical_max_y: number;        // Physical Y axis max (long axis)
+  last_touch: { x: number; y: number } | null;  // Last tap in logical coords
+}
+
 // Info about a single Piper voice from get_available_voices()
 interface VoiceInfo {
   label: string;       // Human-readable name (e.g., "US English - Amy (Female)")
@@ -166,6 +177,7 @@ interface PluginSettings {
   debug: boolean;               // Verbose logging
   trigger_button: string;       // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
   hold_time_ms: number;         // Hold threshold in ms (Phase 7)
+  touchscreen_enabled: boolean; // Touchscreen tap input (Phase 9)
   // Computed fields
   is_configured: boolean;       // Whether current providers are ready
   is_gcp_configured: boolean;   // Whether GCP credentials are loaded
@@ -226,6 +238,10 @@ const getButtonMonitorStatus = callable<[], ButtonMonitorStatus>("get_button_mon
 const getAvailableVoices = callable<[], VoiceRegistry>("get_available_voices");
 const downloadVoice = callable<[string], VoiceActionResult>("download_voice");
 const deleteVoice = callable<[string], VoiceActionResult>("delete_voice");
+
+// Phase 9: Touchscreen monitor status and last touch coordinates
+const getTouchscreenStatus = callable<[], TouchscreenStatus>("get_touchscreen_status");
+const getLastTouch = callable<[], { x: number; y: number } | null>("get_last_touch");
 
 
 // =============================================================================
@@ -564,6 +580,12 @@ function Content() {
   // Whether the voice message is a success (green) or error (red)
   const [voiceIsSuccess, setVoiceIsSuccess] = useState(false);
 
+  // --- Touchscreen state (Phase 9) ---
+  // Status of the touchscreen monitor (fetched on mount and after changes)
+  const [touchscreenStatus, setTouchscreenStatus] = useState<TouchscreenStatus | null>(null);
+  // Ref for the touchscreen polling interval
+  const touchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // --- Pipeline state (Phase 6: Read Screen) ---
   // Whether the end-to-end pipeline is currently running
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
@@ -588,6 +610,9 @@ function Content() {
       // Fetch available voices with download status
       const voices = await getAvailableVoices();
       setLocalVoices(voices);
+      // Fetch touchscreen monitor status
+      const touchStatus = await getTouchscreenStatus();
+      setTouchscreenStatus(touchStatus);
     };
     loadSettings();
   }, [mode]);  // Re-fetch settings when mode changes (e.g., after loading creds)
@@ -851,12 +876,45 @@ function Content() {
     setTimeout(() => setVoiceMessage(null), 5000);
   };
 
+  // --- Touchscreen polling helpers (Phase 9) ---
+
+  // Start polling the touchscreen status (every 500ms when enabled)
+  const startTouchPoll = () => {
+    stopTouchPoll();
+    touchPollRef.current = setInterval(async () => {
+      const status = await getTouchscreenStatus();
+      setTouchscreenStatus(status);
+    }, 500);
+  };
+
+  // Stop the touchscreen polling interval
+  const stopTouchPoll = () => {
+    if (touchPollRef.current) {
+      clearInterval(touchPollRef.current);
+      touchPollRef.current = null;
+    }
+  };
+
+  // Start/stop touchscreen polling based on the touchscreen_enabled setting
+  // AND whether the monitor is actually connected. Only poll when both are
+  // true to avoid spamming the backend with status calls when the device
+  // isn't available.
+  useEffect(() => {
+    if (settings?.touchscreen_enabled && touchscreenStatus?.initialized) {
+      startTouchPoll();
+    } else {
+      stopTouchPoll();
+    }
+    return () => stopTouchPoll();
+  }, [settings?.touchscreen_enabled, touchscreenStatus?.initialized]);
+
   // Cleanup: clear intervals and timeouts when the component unmounts
   // to prevent memory leaks and stale state updates.
   useEffect(() => {
     return () => {
       stopPlaybackPoll();
       stopPipelinePoll();
+      stopTouchPoll();
       if (volumeSaveTimeoutRef.current) {
         clearTimeout(volumeSaveTimeoutRef.current);
       }
@@ -1066,6 +1124,106 @@ function Content() {
             {settings.trigger_button === "disabled"
               ? "Enable a button to trigger Read Screen without opening this panel"
               : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to trigger Read Screen`
+            }
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
+      {/* ---- Touchscreen Section (Phase 9) ---- */}
+      {/* Experimental touchscreen input — reads tap coordinates from the Steam
+          Deck's capacitive touchscreen. Currently just displays coordinates for
+          testing; future phases will add region selection and tap-to-read. */}
+      <PanelSection title="Touchscreen">
+        {/* Enable/disable toggle */}
+        <PanelSectionRow>
+          <ToggleField
+            label="Touch Input"
+            description="Read tap coordinates from touchscreen"
+            checked={settings.touchscreen_enabled}
+            onChange={async (value) => {
+              await saveSetting("touchscreen_enabled", value);
+              if (settings) {
+                setSettings({ ...settings, touchscreen_enabled: value });
+              }
+              // Fetch updated status after toggling
+              if (value) {
+                // Small delay for the monitor to initialize
+                setTimeout(async () => {
+                  const status = await getTouchscreenStatus();
+                  setTouchscreenStatus(status);
+                }, 500);
+              } else {
+                setTouchscreenStatus(null);
+              }
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* Status indicator — shown when touchscreen is enabled */}
+        {settings.touchscreen_enabled && touchscreenStatus && (
+          <>
+            <PanelSectionRow>
+              <Field label="Status">
+                <div style={{
+                  color: touchscreenStatus.initialized ? "#2ecc71" : "#e74c3c",
+                  fontWeight: "bold",
+                  fontSize: "13px",
+                }}>
+                  {touchscreenStatus.initialized ? "Connected" : "Not connected"}
+                </div>
+              </Field>
+            </PanelSectionRow>
+
+            {/* Device path — shown when connected */}
+            {touchscreenStatus.initialized && touchscreenStatus.device_path && (
+              <PanelSectionRow>
+                <Field label="Device">
+                  <div style={{ color: "#b8bcbf", fontSize: "12px" }}>
+                    {touchscreenStatus.device_path}
+                  </div>
+                </Field>
+              </PanelSectionRow>
+            )}
+
+            {/* Last touch coordinates — shown when connected */}
+            {touchscreenStatus.initialized && (
+              <PanelSectionRow>
+                <Field label="Last Touch">
+                  <div style={{ color: "#67b7dc", fontSize: "13px" }}>
+                    {touchscreenStatus.last_touch
+                      ? `(${touchscreenStatus.last_touch.x}, ${touchscreenStatus.last_touch.y})`
+                      : "Tap the screen to test"
+                    }
+                  </div>
+                </Field>
+              </PanelSectionRow>
+            )}
+
+            {/* Physical dimensions info — shown when connected */}
+            {touchscreenStatus.initialized && touchscreenStatus.physical_max_x > 0 && (
+              <PanelSectionRow>
+                <div style={{
+                  color: "#b8bcbf",
+                  fontSize: "11px",
+                  padding: "4px 0",
+                }}>
+                  Physical: {touchscreenStatus.physical_max_x} x {touchscreenStatus.physical_max_y} → Logical: 1280 x 800
+                </div>
+              </PanelSectionRow>
+            )}
+          </>
+        )}
+
+        {/* Hint text */}
+        <PanelSectionRow>
+          <div style={{
+            color: "#b8bcbf",
+            fontSize: "12px",
+            padding: "4px 0",
+          }}>
+            {settings.touchscreen_enabled
+              ? "Tap coordinates will appear above. Used for future region selection."
+              : "Enable to read touchscreen tap positions (experimental)"
             }
           </div>
         </PanelSectionRow>

@@ -49,6 +49,11 @@ if _plugin_dir not in sys.path:
 # controller. It's in a separate file to keep main.py focused on plugin logic.
 from hidraw_monitor import HidrawButtonMonitor, TRIGGER_BUTTONS
 
+# Import the touchscreen monitor for capacitive touch input support (Phase 9).
+# This module reads raw input events from /dev/input/eventN to detect taps
+# on the Steam Deck's touchscreen.
+from touchscreen_monitor import TouchscreenMonitor
+
 # Log prefix — makes our messages easy to find in the Decky Loader journal.
 # Usage: decky.logger.info(f"{LOG} message here")
 # In the journal, lines will look like: "[DCR] backend loaded"
@@ -196,6 +201,11 @@ DEFAULT_SETTINGS = {
     # How long the trigger button must be held before the pipeline fires (ms).
     # Range: 300-1500ms. Higher values prevent accidental triggers.
     "hold_time_ms": 500,
+
+    # Touchscreen input monitor (Phase 9). When True, reads touch events from
+    # /dev/input/eventN to detect taps. Currently just logs coordinates —
+    # future phases will add region selection and tap-to-read.
+    "touchscreen_enabled": False,
 }
 
 # Fields that must be present in a valid GCP service account JSON file.
@@ -528,6 +538,30 @@ class Plugin:
         else:
             decky.logger.info(f"{LOG} button trigger disabled by settings")
 
+        # -----------------------------------------------------------------
+        # Start touchscreen monitor (Phase 9)
+        # -----------------------------------------------------------------
+        # The touchscreen monitor reads input events from /dev/input/eventN
+        # to detect taps. Currently just logs coordinates — Phase 10 will
+        # add region selection and tap-to-read functionality.
+        # Experimental feature: disabled by default, users opt in via settings.
+        self._touchscreen_monitor = None
+        touchscreen_enabled = self.settings.get("touchscreen_enabled", DEFAULT_SETTINGS["touchscreen_enabled"])
+
+        if touchscreen_enabled:
+            self._touchscreen_monitor = TouchscreenMonitor(
+                on_touch=self._on_touch_tap,
+                logger=decky.logger,
+                log_prefix=LOG,
+            )
+            started = self._touchscreen_monitor.start()
+            if started:
+                decky.logger.info(f"{LOG} touchscreen monitor started")
+            else:
+                decky.logger.warning(f"{LOG} touchscreen monitor failed to start — touch input disabled")
+        else:
+            decky.logger.info(f"{LOG} touchscreen monitor disabled by settings")
+
     # =========================================================================
     # Button trigger: _on_button_trigger() / _handle_button_trigger()
     # =========================================================================
@@ -597,6 +631,23 @@ class Plugin:
         decky.logger.info(f"{LOG} button trigger result: {result.get('message', '')}")
 
     # =========================================================================
+    # Touch callback: _on_touch_tap()
+    # =========================================================================
+    # Called from the touchscreen monitor thread when a tap is detected.
+    # Phase 9: just log the coordinates. Phase 10 will use these for region
+    # selection and tap-to-read.
+
+    def _on_touch_tap(self, x, y):
+        """
+        Called from the touchscreen monitor thread when a tap is detected.
+
+        Args:
+            x: Logical X coordinate (0-1280, horizontal).
+            y: Logical Y coordinate (0-800, vertical).
+        """
+        decky.logger.info(f"{LOG} touchscreen tap: ({x}, {y})")
+
+    # =========================================================================
     # Lifecycle: _unload()
     # =========================================================================
     # Called when the plugin is stopped (e.g., Decky Loader restarts, or the
@@ -607,6 +658,12 @@ class Plugin:
             self._hidraw_monitor.stop()
             self._hidraw_monitor = None
             decky.logger.info(f"{LOG} button monitor stopped")
+
+        # Step 0a2: Stop the touchscreen monitor (stops thread, closes device FD)
+        if self._touchscreen_monitor:
+            self._touchscreen_monitor.stop()
+            self._touchscreen_monitor = None
+            decky.logger.info(f"{LOG} touchscreen monitor stopped")
 
         # Step 0b: Cancel any running pipeline so it stops between steps
         self._pipeline_cancel.set()
@@ -2334,18 +2391,46 @@ class Plugin:
                 decky.logger.info(f"{LOG} debug logging disabled")
                 decky.logger.setLevel(logging.INFO)
 
+        elif key == "touchscreen_enabled":
+            # Start or stop the touchscreen monitor based on the toggle.
+            if value:
+                if not self._touchscreen_monitor:
+                    self._touchscreen_monitor = TouchscreenMonitor(
+                        on_touch=self._on_touch_tap,
+                        logger=decky.logger,
+                        log_prefix=LOG,
+                    )
+                    started = self._touchscreen_monitor.start()
+                    if started:
+                        decky.logger.info(f"{LOG} touchscreen monitor started")
+                    else:
+                        decky.logger.warning(f"{LOG} touchscreen monitor failed to start")
+                else:
+                    decky.logger.debug(f"{LOG} touchscreen monitor already running")
+            else:
+                if self._touchscreen_monitor:
+                    self._touchscreen_monitor.stop()
+                    self._touchscreen_monitor = None
+                    decky.logger.info(f"{LOG} touchscreen monitor stopped")
+
         elif key == "enabled":
             # When the master switch is toggled, actively manage background
             # resources. Disabling stops any running pipeline, kills audio
             # playback, and shuts down both worker subprocesses (freeing
-            # memory, gRPC connections, and ONNX models). Enabling is a no-op
-            # — workers lazy-start on the next request.
+            # memory, gRPC connections, and ONNX models). Also stops the
+            # touchscreen monitor. Enabling is a no-op — workers lazy-start
+            # on the next request.
             if not value:
                 decky.logger.info(f"{LOG} plugin disabled — stopping background activity")
                 self._pipeline_cancel.set()
                 self._stop_playback()
                 self._stop_worker()
                 self._stop_local_worker()
+                # Stop touchscreen monitor when disabled
+                if self._touchscreen_monitor:
+                    self._touchscreen_monitor.stop()
+                    self._touchscreen_monitor = None
+                    decky.logger.info(f"{LOG} touchscreen monitor stopped (plugin disabled)")
             else:
                 decky.logger.info(f"{LOG} plugin enabled")
 
@@ -2599,6 +2684,43 @@ class Plugin:
             "target_button": trigger_button,
             "hold_threshold_ms": self.settings.get("hold_time_ms", DEFAULT_SETTINGS["hold_time_ms"]),
         }
+
+    # =========================================================================
+    # RPC: get_touchscreen_status()
+    # =========================================================================
+    # Returns the current state of the touchscreen monitor for the UI status
+    # indicator. Lightweight — no subprocess or I/O involved.
+    #
+    # Called from the frontend via:
+    #   const getTouchscreenStatus = callable<[], TouchscreenStatus>("get_touchscreen_status");
+    async def get_touchscreen_status(self):
+        decky.logger.debug(f"{LOG} get_touchscreen_status() called")
+
+        if self._touchscreen_monitor:
+            return self._touchscreen_monitor.get_status()
+
+        # Monitor not running — return empty status
+        return {
+            "running": False,
+            "initialized": False,
+            "device_path": None,
+            "error_count": 0,
+            "physical_max_x": 0,
+            "physical_max_y": 0,
+            "last_touch": None,
+        }
+
+    # =========================================================================
+    # RPC: get_last_touch()
+    # =========================================================================
+    # Returns the coordinates of the last detected tap. Lightweight poll target.
+    #
+    # Called from the frontend via:
+    #   const getLastTouch = callable<[], {x: number, y: number} | null>("get_last_touch");
+    async def get_last_touch(self):
+        if self._touchscreen_monitor:
+            return self._touchscreen_monitor.get_last_touch()
+        return None
 
     # =========================================================================
     # RPC: get_available_voices()

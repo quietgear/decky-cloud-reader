@@ -56,14 +56,19 @@ Frontend (TypeScript/React)           Backend (Python)
 │  - Credentials section   │         │  - GCP credentials mgmt       │
 │  - Settings section      │         │  - Screen capture (GStreamer) │
 │  - Button trigger config │         │  - Dual worker lifecycle mgmt │
-│  - OCR/TTS controls      │         │  - Audio playback (Popen)     │
-│  - Enabled toggle gates  │         │  - Enabled toggle teardown    │
-│    provider-aware buttons│         │    (workers + playback + pipe)│
+│  - Touchscreen config    │         │  - Audio playback (Popen)     │
+│  - OCR/TTS controls      │         │  - Enabled toggle teardown    │
+│  - Enabled toggle gates  │         │    (workers + playback + pipe)│
+│    provider-aware buttons│         │                               │
+│                          │         │  hidraw_monitor.py (thread)   │
+│ Global Overlay           │         │  - Button hold detection      │
+│  - OCR text display      │         │  - Auto-reconnect             │
 │                          │         │                               │
-│ Global Overlay           │         │  hidraw_monitor.py (thread)   │
-│  - OCR text display      │         │  - Button hold detection      │
-│                          │         │  - Auto-reconnect             │
-└──────────────────────────┘         │                               │
+└──────────────────────────┘         │  touchscreen_monitor.py (thread)│
+                                     │  - Evdev touch event reading  │
+                                     │  - Tap detection + coords     │
+                                     │  - Auto-reconnect             │
+                                     │                               │
                                      │  Persistent subprocesses      │
                                      │  ┌──────────────────────────┐ │
                                      │  │ gcp_worker.py (serve)    │ │
@@ -447,8 +452,62 @@ Frontend (TypeScript/React)           Backend (Python)
 |---------|---------|-------------|
 | `local_voice_id` | `"en_US-amy-medium"` (changed from `"en_US-lessac-medium"`) | Default voice auto-downloads on first TTS use |
 
-### Phase 9: Touch screen support `[NOT STARTED]`
-- [ ]  Analyze `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin` for touch screen support. We need to be able to read inputs from touch screen too. Add a simple test to make sure it is working and we can read coordinates.
+### Phase 9: Touchscreen Input `[DONE]`
+
+**Problem:** The plugin could only be triggered via UI buttons or holding a back grip button (hidraw monitor). Adding touchscreen input reading is a foundation for future touch-based interactions (region selection, tap-to-read, etc.).
+
+**Scope:** Prove we can read touch coordinates from the Steam Deck's capacitive touchscreen and display them in the UI. No pipeline integration or gesture detection yet — Phase 9 is infrastructure only.
+
+**New file: `touchscreen_monitor.py`** (~400 lines):
+- [x] Self-contained module using only stdlib (`os`, `struct`, `fcntl`, `select`, `time`, `threading`)
+- [x] Device discovery: scan `/sys/class/input/` for `FTS3528:00 2808:1015`
+- [x] Axis calibration via `EVIOCGABS` ioctl to read physical axis ranges
+- [x] Coordinate transform: physical portrait (800x1280) → logical landscape (1280x800) via 90° CW rotation
+- [x] Multitouch Protocol B event parsing (slot 0 / first finger only)
+- [x] Tap detection: touch down → touch up within 0.5s timeout, 0.3s cooldown between taps
+- [x] Auto-reconnect: 10 consecutive errors → close device → 2s delay → reinitialize
+- [x] Thread-safe state with `threading.Lock`
+
+**Coordinate transform** (same approach as reference plugin `decky-ocr-tts-claude-service-plugin`):
+```python
+logical_x = phys_y * LOGICAL_WIDTH / physical_max_y    # Physical Y → logical X
+logical_y = (physical_max_x - phys_x) * LOGICAL_HEIGHT / physical_max_x  # Inverted physical X → logical Y
+```
+
+**Backend (main.py):**
+- [x] Import `TouchscreenMonitor` (with `sys.path` fix for Decky sandbox)
+- [x] Default setting: `touchscreen_enabled: False` (opt-in)
+- [x] Init/start in `_main()` after hidraw monitor block
+- [x] `_on_touch_tap(x, y)` callback — logs coordinates (Phase 9: no pipeline integration)
+- [x] Stop in `_unload()` (after hidraw stop)
+- [x] `save_setting("touchscreen_enabled")` handler — creates/starts or stops monitor
+- [x] `save_setting("enabled", False)` extended to also stop touchscreen monitor
+- [x] `get_touchscreen_status()` and `get_last_touch()` RPCs
+
+**Frontend (src/index.tsx):**
+- [x] `TouchscreenStatus` interface
+- [x] `touchscreen_enabled` in `PluginSettings`
+- [x] RPC bindings: `getTouchscreenStatus`, `getLastTouch`
+- [x] Polling effect: 500ms interval when enabled AND initialized (avoids polling when device not connected)
+- [x] "Touchscreen" PanelSection with toggle, status indicator, device path, last touch coords, physical dimensions
+
+**Docker (Dockerfile.plugin):**
+- [x] Added `cp /app/touchscreen_monitor.py` to Stage 4 assembly
+
+**Design decisions:**
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Input reading | Raw `/dev/input/eventN` + `struct.unpack` | No pip deps needed; matches `hidraw_monitor.py` pattern |
+| Device discovery | Scan `/sys/class/input/event*/device/name` | Same approach as hidraw uses for `/sys/class/hidraw/` |
+| Axis dimensions | Read from device via `EVIOCGABS` ioctl | Avoids hardcoding; adapts to hardware variations |
+| Multitouch | Track first finger only (slot 0) | Phase 9 only needs single-tap coordinates |
+| Default enabled | `False` | Experimental feature — users opt in |
+| Pipeline integration | None | Phase 10 territory |
+
+**New settings:**
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `touchscreen_enabled` | `false` | Enable/disable touchscreen tap detection |
 
 ### Phase 10: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Analyze `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin` plugin UI and main to uderstand what modes we want to run our OCR+TSS in. Essentially we want `decky-ocr-tts-claude-service-plugin` functionality matched in our plugin. You may  walk me through quetionare to determine what to keep.
@@ -484,6 +543,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; supports both MP3 (GCP) and WAV (Piper). Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root. A daemon reaper thread prevents zombies |
 | GCP credentials | Base64-encoded service account JSON | Simple storage, same pattern as reference plugin |
 | Button input | Hidraw direct device reading | Works in background without opening UI |
+| Touchscreen input | Raw evdev `/dev/input/eventN` + `struct.unpack` | Stdlib only, no pip deps; matches hidraw_monitor pattern; ioctl axis calibration; 90° CW coordinate transform for rotated panel |
 | Settings storage | JSON file in DECKY_PLUGIN_SETTINGS_DIR | Standard Decky convention |
 | Pipeline optimization | Combined `ocr_tts` action when both providers are the same | Single command to warm worker; mixed providers run OCR then TTS sequentially |
 | Pipeline cancellation | `threading.Event` checked between steps | Worker call timeout is bounded (60s); killing mid-request adds complexity for marginal benefit |
@@ -503,6 +563,7 @@ decky-cloud-reader/
 │   └── index.tsx              # Plugin entry, all UI (sections, file browser, provider selection)
 ├── main.py                    # Python backend (lifecycle, RPC, pipeline, dual worker management)
 ├── hidraw_monitor.py          # Hidraw button monitor (hold-to-trigger, background thread)
+├── touchscreen_monitor.py     # Touchscreen tap monitor (evdev input events, background thread)
 ├── gcp_worker.py              # GCP worker (persistent serve mode or one-shot CLI, system Python 3.13)
 ├── local_worker.py            # Local worker (persistent serve mode or one-shot CLI, bundled Python 3.12)
 ├── requirements.txt           # GCP Python dependencies (system Python 3.13)
