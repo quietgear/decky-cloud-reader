@@ -447,8 +447,12 @@ Frontend (TypeScript/React)           Backend (Python)
 |---------|---------|-------------|
 | `local_voice_id` | `"en_US-amy-medium"` (changed from `"en_US-lessac-medium"`) | Default voice auto-downloads on first TTS use |
 
-### Phase 9: UI Polish & Advanced Features `[NOT STARTED]`
-- [ ] Global overlay for displaying OCR text on screen
+### Phase 9: Touch screen support `[NOT STARTED]`
+- [ ]  Analyze `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin` for touch screen support. We need to be able to read inputs from touch screen too. Add a simple test to make sure it is working and we can read coordinates.
+
+### Phase 10: UI Polish & Advanced Features `[NOT STARTED]`
+- [ ] Analyze `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin` plugin UI and main to uderstand what modes we want to run our OCR+TSS in. Essentially we want `decky-ocr-tts-claude-service-plugin` functionality matched in our plugin. You may  walk me through quetionare to determine what to keep.
+- [ ] Global overlay for displaying selected zones on screen
 - [ ] Region selection (crop to area instead of full screen)
 - [ ] Text filtering (ignore specific words/patterns)
 - [ ] Visual progress indicator during hold-to-activate
