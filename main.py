@@ -76,10 +76,78 @@ TTS_TIMEOUT = 30  # seconds
 # 60 seconds is generous — the combined call typically takes ~3s.
 OCR_TTS_TIMEOUT = 60  # seconds
 
+# Timeout for voice model downloads from HuggingFace. Each voice is ~63MB,
+# so 120s should be plenty even on slow connections.
+VOICE_DOWNLOAD_TIMEOUT = 120  # seconds
+
 # Thread pool for running blocking subprocess calls (like gst-launch-1.0)
 # without blocking the async event loop. Only 1 worker needed since we
 # only ever capture one screenshot at a time.
 _capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dcr_capture")
+
+
+# =============================================================================
+# Piper TTS Voice Registry — curated list of available voices
+# =============================================================================
+# These voices are NOT bundled in the plugin zip. They are downloaded on demand
+# from HuggingFace and stored in DECKY_PLUGIN_SETTINGS_DIR/voices/ so they
+# persist across plugin updates.
+#
+# URL pattern: https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/{lang_family}/{lang_code}/{speaker}/{quality}/{voice_id}.onnx
+#
+# Each voice has two files:
+#   - {voice_id}.onnx       (~63MB, the ONNX model)
+#   - {voice_id}.onnx.json  (~2KB, model config with sample rate, phoneme map, etc.)
+
+PIPER_VOICE_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
+
+PIPER_VOICES = {
+    "en_US-amy-medium":       {"label": "US English - Amy (Female)",            "language": "English (US)",       "speakers": 1},
+    "en_US-ryan-medium":      {"label": "US English - Ryan (Male)",             "language": "English (US)",       "speakers": 1},
+    "en_GB-cori-medium":      {"label": "UK English - Cori (Female)",           "language": "English (UK)",       "speakers": 1},
+    "en_GB-alan-medium":      {"label": "UK English - Alan (Male)",             "language": "English (UK)",       "speakers": 1},
+    "de_DE-thorsten-medium":  {"label": "German - Thorsten (Male)",             "language": "German",             "speakers": 1},
+    "es_ES-davefx-medium":    {"label": "Spanish (Spain) - Davefx",             "language": "Spanish (Spain)",    "speakers": 1},
+    "es_MX-coconut-medium":   {"label": "Spanish (Mexico) - Coconut",           "language": "Spanish (Mexico)",   "speakers": 1},
+    "fr_FR-gilles-medium":    {"label": "French - Gilles (Male)",               "language": "French",             "speakers": 1},
+    "it_IT-paola-medium":     {"label": "Italian - Paola (Female)",              "language": "Italian",            "speakers": 1},
+    "ja_JP-kokoro-medium":    {"label": "Japanese - Kokoro",                    "language": "Japanese",           "speakers": 1},
+    "ko_KR-kss-medium":       {"label": "Korean - KSS",                        "language": "Korean",             "speakers": 1},
+    "pl_PL-gosia-medium":     {"label": "Polish - Gosia (Female)",              "language": "Polish",             "speakers": 1},
+    "pt_BR-edresson-medium":  {"label": "Portuguese (Brazil) - Edresson",       "language": "Portuguese (BR)",    "speakers": 1},
+    "ru_RU-irina-medium":     {"label": "Russian - Irina (Female)",             "language": "Russian",            "speakers": 1},
+    "uk_UA-ukrainian_tts-medium": {"label": "Ukrainian - Ukrainian TTS",        "language": "Ukrainian",          "speakers": 3, "speaker_id": 1},
+    "zh_CN-huayan-medium":    {"label": "Chinese - Huayan",                     "language": "Chinese",            "speakers": 1},
+}
+
+# Default voice — auto-downloaded on first TTS use if not yet present.
+DEFAULT_LOCAL_VOICE = "en_US-amy-medium"
+
+
+def _piper_voice_url(voice_id, ext=".onnx"):
+    """
+    Construct the HuggingFace download URL for a Piper voice file.
+
+    The URL structure is:
+      {base}/{lang_family}/{lang_code}/{speaker}/{quality}/{voice_id}{ext}
+
+    For example, voice_id="en_US-amy-medium" gives:
+      .../en/en_US/amy/medium/en_US-amy-medium.onnx
+
+    Args:
+        voice_id: e.g., "en_US-amy-medium"
+        ext: File extension, either ".onnx" or ".onnx.json"
+
+    Returns:
+        Full URL string for the voice file.
+    """
+    # Parse voice_id parts: "en_US-amy-medium" → lang_code="en_US", speaker="amy", quality="medium"
+    parts = voice_id.split("-")
+    lang_code = parts[0]              # "en_US"
+    quality = parts[-1]               # "medium"
+    speaker = "-".join(parts[1:-1])   # "amy" (handles multi-part names like "davefx")
+    lang_family = lang_code.split("_")[0]  # "en"
+    return f"{PIPER_VOICE_BASE_URL}/{lang_family}/{lang_code}/{speaker}/{quality}/{voice_id}{ext}"
 
 
 # =============================================================================
@@ -104,8 +172,8 @@ DEFAULT_SETTINGS = {
     # GCP TTS speech rate preset. One of: x-slow, slow, medium, fast, x-fast.
     "speech_rate": "medium",
 
-    # Local (Piper) TTS voice. Currently only one bundled voice.
-    "local_voice_id": "en_US-lessac-medium",
+    # Local (Piper) TTS voice. Downloaded on demand from HuggingFace.
+    "local_voice_id": "en_US-amy-medium",
 
     # Local (Piper) TTS speech rate preset. Same keys as GCP but maps to
     # Piper's length_scale (inverse: lower = faster).
@@ -379,6 +447,24 @@ class Plugin:
             decky.logger.info(f"{LOG} py_modules_local found: {self._local_py_modules_path}")
         else:
             decky.logger.warning(f"{LOG} py_modules_local NOT found at {self._local_py_modules_path}")
+
+        # -----------------------------------------------------------------
+        # Set up voices directory for on-demand Piper TTS voice downloads
+        # -----------------------------------------------------------------
+        # Voice models are stored in the settings directory (not the plugin
+        # directory) so they persist across plugin updates. The plugin dir
+        # is wiped on every install, but settings dir is preserved.
+        self._voices_dir = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "voices")
+        os.makedirs(self._voices_dir, exist_ok=True)
+        decky.logger.info(f"{LOG} voices dir: {self._voices_dir}")
+
+        # Clean up any partial downloads (.tmp files) left from crashes
+        for tmp_file in glob.glob(os.path.join(self._voices_dir, "*.tmp")):
+            try:
+                os.remove(tmp_file)
+                decky.logger.debug(f"{LOG} cleaned up partial download: {tmp_file}")
+            except OSError:
+                pass
 
         # -----------------------------------------------------------------
         # Discover audio player for TTS playback
@@ -1038,6 +1124,7 @@ class Plugin:
         env["PYTHONPATH"] = self._local_py_modules_path
         env["PYTHONNOUSERSITE"] = "1"
         env["LOCAL_MODELS_DIR"] = self._local_models_dir
+        env["LOCAL_VOICES_DIR"] = self._voices_dir  # On-demand voice downloads dir
         # Limit CPU threads — leave cores for the game
         env["OMP_NUM_THREADS"] = "2"
 
@@ -1615,6 +1702,13 @@ class Plugin:
             voice_id = self.settings.get("local_voice_id", DEFAULT_SETTINGS["local_voice_id"])
             speech_rate = self.settings.get("local_speech_rate", DEFAULT_SETTINGS["local_speech_rate"])
 
+            # Auto-download voice if not yet present (on-demand download)
+            if not self._is_voice_downloaded(voice_id):
+                decky.logger.info(f"{LOG} TTS pipeline: voice '{voice_id}' not downloaded, downloading...")
+                dl_result = self._download_voice_sync(voice_id)
+                if not dl_result["success"]:
+                    return {"success": False, "message": f"Voice download failed: {dl_result['message']}", "audio_size": 0}
+
         decky.logger.info(f"{LOG} TTS pipeline ({tts_provider}): {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
 
         # Step 4: Create a temp file for the audio output.
@@ -1629,7 +1723,9 @@ class Plugin:
             os.close(fd)
             fd = None
 
-            # Step 5: Send TTS request to the appropriate worker
+            # Step 5: Send TTS request to the appropriate worker.
+            # For multi-speaker Piper voices, include speaker_id from the
+            # PIPER_VOICES registry so the worker knows which speaker to use.
             command = {
                 "action": "tts",
                 "text": text,
@@ -1637,6 +1733,9 @@ class Plugin:
                 "speech_rate": speech_rate,
                 "voice_id": voice_id,
             }
+            voice_meta = PIPER_VOICES.get(voice_id, {})
+            if "speaker_id" in voice_meta:
+                command["speaker_id"] = voice_meta["speaker_id"]
 
             result = self._send_command(command, provider=tts_provider, timeout=TTS_TIMEOUT)
 
@@ -1800,6 +1899,22 @@ class Plugin:
                 voice_id = self.settings.get("local_voice_id", DEFAULT_SETTINGS["local_voice_id"])
                 speech_rate = self.settings.get("local_speech_rate", DEFAULT_SETTINGS["local_speech_rate"])
 
+                # Auto-download voice if not yet present (on-demand download)
+                if not self._is_voice_downloaded(voice_id):
+                    if self._pipeline_cancel.is_set():
+                        return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+
+                    self._pipeline_step = "downloading"
+                    decky.logger.info(f"{LOG} pipeline: voice '{voice_id}' not downloaded, downloading...")
+                    dl_result = self._download_voice_sync(voice_id)
+                    if not dl_result["success"]:
+                        return {
+                            "success": False,
+                            "message": f"Voice download failed: {dl_result['message']}",
+                            "step": "downloading", "text": "", "audio_size": 0,
+                        }
+                    decky.logger.info(f"{LOG} pipeline: voice downloaded, continuing...")
+
             # Route based on whether both providers are the same
             if ocr_provider == tts_provider:
                 # Same provider — use combined ocr_tts action for efficiency
@@ -1811,6 +1926,9 @@ class Plugin:
                     "speech_rate": speech_rate,
                     "voice_id": voice_id,
                 }
+                voice_meta = PIPER_VOICES.get(voice_id, {})
+                if "speaker_id" in voice_meta:
+                    command["speaker_id"] = voice_meta["speaker_id"]
 
                 result = self._send_command(command, provider=ocr_provider, timeout=OCR_TTS_TIMEOUT)
                 t_ocr_tts = time.monotonic() - t_step
@@ -1868,6 +1986,9 @@ class Plugin:
                     "speech_rate": speech_rate,
                     "voice_id": voice_id,
                 }
+                voice_meta = PIPER_VOICES.get(voice_id, {})
+                if "speaker_id" in voice_meta:
+                    tts_command["speaker_id"] = voice_meta["speaker_id"]
 
                 tts_result = self._send_command(tts_command, provider=tts_provider, timeout=TTS_TIMEOUT)
                 t_ocr_tts = time.monotonic() - t_step
@@ -2478,4 +2599,203 @@ class Plugin:
             "target_button": trigger_button,
             "hold_threshold_ms": self.settings.get("hold_time_ms", DEFAULT_SETTINGS["hold_time_ms"]),
         }
+
+    # =========================================================================
+    # RPC: get_available_voices()
+    # =========================================================================
+    # Returns the PIPER_VOICES registry enriched with download status for each
+    # voice. The frontend uses this to populate the voice dropdown with
+    # indicators showing which voices are downloaded and which need downloading.
+    #
+    # Called from the frontend via:
+    #   const getAvailableVoices = callable<[], VoiceRegistry>("get_available_voices");
+    async def get_available_voices(self):
+        decky.logger.debug(f"{LOG} get_available_voices() called")
+
+        voices = {}
+        for voice_id, info in PIPER_VOICES.items():
+            onnx_path = os.path.join(self._voices_dir, f"{voice_id}.onnx")
+            downloaded = os.path.exists(onnx_path)
+            file_size = 0
+            if downloaded:
+                try:
+                    file_size = os.path.getsize(onnx_path)
+                except OSError:
+                    pass
+            voices[voice_id] = {
+                "label": info["label"],
+                "language": info["language"],
+                "speakers": info["speakers"],
+                "downloaded": downloaded,
+                "file_size": file_size,
+            }
+
+        return voices
+
+    # =========================================================================
+    # RPC: download_voice(voice_id)
+    # =========================================================================
+    # Downloads a Piper voice model (.onnx + .onnx.json) from HuggingFace.
+    # Downloads to .tmp files first, then renames on success to avoid partial
+    # files from interrupted downloads.
+    #
+    # Called from the frontend via:
+    #   const downloadVoice = callable<[string], DownloadResult>("download_voice");
+    async def download_voice(self, voice_id):
+        decky.logger.info(f"{LOG} download_voice({voice_id}) called")
+
+        if voice_id not in PIPER_VOICES:
+            return {"success": False, "message": f"Unknown voice: {voice_id}", "file_size": 0}
+
+        # Run the blocking download in the thread pool
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            _capture_executor,
+            lambda: self._download_voice_sync(voice_id),
+        )
+        return result
+
+    def _download_voice_sync(self, voice_id):
+        """
+        Download a Piper voice model (.onnx + .onnx.json) from HuggingFace.
+
+        Uses curl for reliable HTTPS/redirect handling. Downloads to .tmp files
+        first, then renames on success (atomic-ish, prevents partial files).
+
+        Args:
+            voice_id: The voice identifier (e.g., "en_US-amy-medium").
+
+        Returns:
+            Dict with keys: success, message, file_size.
+        """
+        onnx_url = _piper_voice_url(voice_id, ".onnx")
+        json_url = _piper_voice_url(voice_id, ".onnx.json")
+
+        onnx_path = os.path.join(self._voices_dir, f"{voice_id}.onnx")
+        json_path = os.path.join(self._voices_dir, f"{voice_id}.onnx.json")
+        onnx_tmp = onnx_path + ".tmp"
+        json_tmp = json_path + ".tmp"
+
+        # Build a clean environment for curl. Decky Loader is a PyInstaller
+        # bundle that sets LD_LIBRARY_PATH to its temp dir (e.g., /tmp/_MEI*/)
+        # containing an older libssl.so.3. System curl links against the
+        # system's newer OpenSSL, so inheriting PyInstaller's LD_LIBRARY_PATH
+        # causes "OPENSSL_3.2.0 not found" errors. Stripping these vars lets
+        # curl use the system's native libraries.
+        curl_env = os.environ.copy()
+        curl_env.pop("LD_LIBRARY_PATH", None)
+        curl_env.pop("LD_PRELOAD", None)
+
+        try:
+            # Download .onnx.json first (small file, quick validation)
+            decky.logger.info(f"{LOG} downloading voice config: {json_url}")
+            result = subprocess.run(
+                ["curl", "-L", "-f", "-o", json_tmp, json_url],
+                capture_output=True, text=True,
+                timeout=VOICE_DOWNLOAD_TIMEOUT,
+                env=curl_env,
+            )
+            if result.returncode != 0:
+                decky.logger.error(f"{LOG} voice config download failed: {result.stderr[:200]}")
+                return {"success": False, "message": "Voice config download failed — check internet connection", "file_size": 0}
+
+            # Download .onnx model (large file, ~63MB)
+            decky.logger.info(f"{LOG} downloading voice model: {onnx_url}")
+            result = subprocess.run(
+                ["curl", "-L", "-f", "-o", onnx_tmp, onnx_url],
+                capture_output=True, text=True,
+                timeout=VOICE_DOWNLOAD_TIMEOUT,
+                env=curl_env,
+            )
+            if result.returncode != 0:
+                decky.logger.error(f"{LOG} voice model download failed: {result.stderr[:200]}")
+                return {"success": False, "message": "Voice model download failed — check internet connection", "file_size": 0}
+
+            # Validate downloaded files exist and aren't empty
+            if not os.path.exists(onnx_tmp) or os.path.getsize(onnx_tmp) == 0:
+                return {"success": False, "message": "Downloaded model file is empty", "file_size": 0}
+            if not os.path.exists(json_tmp) or os.path.getsize(json_tmp) == 0:
+                return {"success": False, "message": "Downloaded config file is empty", "file_size": 0}
+
+            # Rename from .tmp to final paths (atomic-ish on same filesystem)
+            os.rename(json_tmp, json_path)
+            os.rename(onnx_tmp, onnx_path)
+
+            file_size = os.path.getsize(onnx_path)
+            decky.logger.info(f"{LOG} voice downloaded: {voice_id} ({file_size:,} bytes)")
+
+            return {
+                "success": True,
+                "message": f"Voice downloaded: {PIPER_VOICES[voice_id]['label']}",
+                "file_size": file_size,
+            }
+
+        except subprocess.TimeoutExpired:
+            decky.logger.error(f"{LOG} voice download timed out after {VOICE_DOWNLOAD_TIMEOUT}s")
+            return {"success": False, "message": "Download timed out — check internet connection", "file_size": 0}
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} voice download error: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {"success": False, "message": f"Download error: {e}", "file_size": 0}
+
+        finally:
+            # Clean up temp files on failure
+            for tmp in (onnx_tmp, json_tmp):
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+
+    # =========================================================================
+    # RPC: delete_voice(voice_id)
+    # =========================================================================
+    # Removes a downloaded Piper voice model. If the deleted voice is currently
+    # selected, stops the local worker so its in-memory cache is cleared.
+    #
+    # Called from the frontend via:
+    #   const deleteVoice = callable<[string], DeleteResult>("delete_voice");
+    async def delete_voice(self, voice_id):
+        decky.logger.info(f"{LOG} delete_voice({voice_id}) called")
+
+        onnx_path = os.path.join(self._voices_dir, f"{voice_id}.onnx")
+        json_path = os.path.join(self._voices_dir, f"{voice_id}.onnx.json")
+
+        deleted = False
+        for path in (onnx_path, json_path):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    deleted = True
+                    decky.logger.debug(f"{LOG} deleted: {path}")
+            except OSError as e:
+                decky.logger.error(f"{LOG} failed to delete {path}: {e}")
+                return {"success": False, "message": f"Failed to delete voice: {e}"}
+
+        # If the deleted voice is the currently selected one, stop the local
+        # worker so its in-memory voice cache is cleared. Next TTS call will
+        # restart the worker and load a different voice (or trigger re-download).
+        current_voice = self.settings.get("local_voice_id", DEFAULT_SETTINGS["local_voice_id"])
+        if current_voice == voice_id:
+            decky.logger.info(f"{LOG} deleted current voice — stopping local worker to clear cache")
+            self._stop_local_worker()
+
+        if deleted:
+            return {"success": True, "message": f"Voice deleted: {voice_id}"}
+        else:
+            return {"success": True, "message": f"Voice not found: {voice_id}"}
+
+    def _is_voice_downloaded(self, voice_id):
+        """
+        Quick check whether a voice model file exists in the voices directory.
+
+        Args:
+            voice_id: The voice identifier (e.g., "en_US-amy-medium").
+
+        Returns:
+            True if the .onnx file exists, False otherwise.
+        """
+        onnx_path = os.path.join(self._voices_dir, f"{voice_id}.onnx")
+        return os.path.exists(onnx_path)
 

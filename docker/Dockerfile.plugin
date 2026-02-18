@@ -6,7 +6,7 @@
 #   1. Builds the frontend: TypeScript → bundled JavaScript (via Rollup)
 #   2. Installs GCP Python dependencies into py_modules/ (Python 3.13 pip)
 #   3. Downloads bundled Python 3.12 + local inference deps into py_modules_local/
-#   4. Downloads OCR + TTS models into models/
+#   4. Downloads OCR models into models/ (TTS voices downloaded on demand at runtime)
 #
 # We need x86_64 because:
 #   - The Steam Deck runs x86_64 Linux
@@ -108,7 +108,7 @@ RUN /app/python312/python/bin/python3.12 -m pip install \
     -r requirements_local.txt
 
 # ---------------------------------------------------------------------------
-# Stage 2d: Download OCR + TTS models
+# Stage 2d: Download OCR models
 # ---------------------------------------------------------------------------
 # RapidOCR ONNX models (PaddleOCR v4):
 #   - det: text detection (finds text regions in the image)
@@ -119,35 +119,18 @@ RUN /app/python312/python/bin/python3.12 -m pip install \
 #   Providing a separately downloaded keys file causes IndexError due to
 #   model-dictionary version mismatch (same approach as Decky-Translator).
 #
-# Piper TTS voice models (4 voices: 2 US + 2 UK, 1 male + 1 female each):
-#   - en_US-lessac-medium: US English female (~63MB ONNX)
-#   - en_US-ryan-medium:   US English male (~63MB ONNX)
-#   - en_GB-cori-medium:   UK English female (~63MB ONNX)
-#   - en_GB-alan-medium:   UK English male (~63MB ONNX)
-#   Each voice has a .onnx model file + .onnx.json config (sample rate, phoneme map, etc.)
-RUN mkdir -p /app/models/ocr /app/models/tts && \
+# Piper TTS voice models are NOT bundled — they are downloaded on demand
+# at runtime by main.py and stored in the plugin's settings directory
+# (DECKY_PLUGIN_SETTINGS_DIR/voices/). This keeps the plugin zip small
+# (~241MB instead of ~493MB) and lets users access 16+ voices in 13
+# languages instead of only 4 bundled English voices.
+RUN mkdir -p /app/models/ocr && \
     curl -L -o /app/models/ocr/ch_PP-OCRv4_det_infer.onnx \
       "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx" && \
     curl -L -o /app/models/ocr/ch_PP-OCRv4_rec_infer.onnx \
       "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx" && \
     curl -L -o /app/models/ocr/ch_ppocr_mobile_v2.0_cls_infer.onnx \
-      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_ppocr_mobile_v2.0_cls_train.onnx" && \
-    curl -L -o /app/models/tts/en_US-lessac-medium.onnx \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx" && \
-    curl -L -o /app/models/tts/en_US-lessac-medium.onnx.json \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" && \
-    curl -L -o /app/models/tts/en_US-ryan-medium.onnx \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/medium/en_US-ryan-medium.onnx" && \
-    curl -L -o /app/models/tts/en_US-ryan-medium.onnx.json \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/medium/en_US-ryan-medium.onnx.json" && \
-    curl -L -o /app/models/tts/en_GB-cori-medium.onnx \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium/en_GB-cori-medium.onnx" && \
-    curl -L -o /app/models/tts/en_GB-cori-medium.onnx.json \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium/en_GB-cori-medium.onnx.json" && \
-    curl -L -o /app/models/tts/en_GB-alan-medium.onnx \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/alan/medium/en_GB-alan-medium.onnx" && \
-    curl -L -o /app/models/tts/en_GB-alan-medium.onnx.json \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/alan/medium/en_GB-alan-medium.onnx.json"
+      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_ppocr_mobile_v2.0_cls_train.onnx"
 
 # ---------------------------------------------------------------------------
 # Stage 3: Copy source and build frontend
@@ -179,9 +162,8 @@ RUN pnpm build
 #   ├── py_modules_local/       ← Local inference deps (bundled Python 3.12)
 #   ├── python312/              ← Bundled Python 3.12 interpreter
 #   │   └── python/bin/python3.12
-#   └── models/                 ← OCR + TTS model files
-#       ├── ocr/                ← RapidOCR (PaddleOCR v4) ONNX models (no keys file)
-#       └── tts/                ← Piper voice models (4 voices: lessac, ryan, cori, alan)
+#   └── models/                 ← OCR model files (TTS voices downloaded on demand)
+#       └── ocr/                ← RapidOCR (PaddleOCR v4) ONNX models (no keys file)
 RUN mkdir -p /app/output/decky-cloud-reader/dist && \
     cp /app/dist/index.js /app/output/decky-cloud-reader/dist/ && \
     cp /app/plugin.json /app/output/decky-cloud-reader/ && \

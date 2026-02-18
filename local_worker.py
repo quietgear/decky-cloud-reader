@@ -57,18 +57,8 @@ PIPER_RATE_MAP = {
     "x-fast": 0.6,
 }
 
-# Registry of bundled Piper voices. Each key is the voice_id (used in settings
-# and worker commands), and the value is a display-friendly description for logs.
-# All models live in LOCAL_MODELS_DIR/tts/ as <voice_id>.onnx + <voice_id>.onnx.json.
-PIPER_VOICES = {
-    "en_US-lessac-medium": "US Female - Lessac",
-    "en_US-ryan-medium":   "US Male - Ryan",
-    "en_GB-cori-medium":   "UK Female - Cori",
-    "en_GB-alan-medium":   "UK Male - Alan",
-}
-
-# Default voice used when no voice_id is specified or an unknown voice is requested.
-DEFAULT_PIPER_VOICE = "en_US-lessac-medium"
+# Default voice used when no voice_id is specified.
+DEFAULT_PIPER_VOICE = "en_US-amy-medium"
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +220,7 @@ def do_ocr(image_path, ocr_engine=None):
 # TTS action — synthesize speech using Piper TTS (offline)
 # ---------------------------------------------------------------------------
 
-def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None):
+def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, speaker_id=None):
     """
     Synthesize speech from text using Piper TTS (offline, local inference).
 
@@ -248,6 +238,9 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None):
                   to DEFAULT_PIPER_VOICE if None or unknown.
         voice_cache: Dict of cached PiperVoice instances (serve mode). When None
                      (CLI mode), voice is loaded fresh and not cached.
+        speaker_id: Integer speaker index for multi-speaker voices (e.g., 1).
+                    When None, Piper defaults to speaker 0 for multi-speaker
+                    voices. Only used with synthesize(), not synthesize_wav().
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -278,12 +271,14 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None):
     # Step 4: Synthesize audio using piper-tts v1.3+ API.
     # synthesize_wav() writes a complete WAV file directly — simpler than
     # collecting raw PCM chunks manually. SynthesisConfig controls speech rate.
-    log_info(f"Synthesizing speech with '{resolved_voice_id}' (length_scale={length_scale})...")
+    log_info(f"Synthesizing speech with '{resolved_voice_id}' (length_scale={length_scale}, speaker_id={speaker_id})...")
     t_start = time.monotonic()
 
     try:
+        # SynthesisConfig accepts both length_scale and speaker_id (for
+        # multi-speaker voices). speaker_id is None for single-speaker voices.
         from piper.voice import SynthesisConfig
-        syn_config = SynthesisConfig(length_scale=length_scale)
+        syn_config = SynthesisConfig(length_scale=length_scale, speaker_id=speaker_id)
 
         with wave.open(output_path, "wb") as wav_file:
             piper_voice.synthesize_wav(text, wav_file, syn_config=syn_config)
@@ -312,7 +307,7 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None):
 # ---------------------------------------------------------------------------
 
 def do_ocr_tts(image_path, output_audio_path, speech_rate,
-               ocr_engine=None, voice_id=None, voice_cache=None):
+               ocr_engine=None, voice_id=None, voice_cache=None, speaker_id=None):
     """
     Perform OCR and TTS in a single invocation (same as GCP's combined action).
 
@@ -330,6 +325,8 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
                   to DEFAULT_PIPER_VOICE if None or unknown.
         voice_cache: Dict of cached PiperVoice instances (serve mode). When None
                      (CLI mode), voice is loaded fresh and not cached.
+        speaker_id: Integer speaker index for multi-speaker voices (e.g., 1).
+                    When None, Piper defaults to speaker 0 for multi-speaker voices.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -370,7 +367,7 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
 
     # ---- Step 4: Handle no text detected ----
     # Resolve voice_id early so it appears in the result even when no text is found
-    resolved_voice_id = voice_id if (voice_id and voice_id in PIPER_VOICES) else DEFAULT_PIPER_VOICE
+    resolved_voice_id = voice_id if voice_id else DEFAULT_PIPER_VOICE
 
     if not result or not result[0]:
         log_info("No text detected in image")
@@ -407,12 +404,12 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
     if speech_rate not in PIPER_RATE_MAP:
         log_info(f"Unknown speech rate '{speech_rate}', defaulting to length_scale=1.0")
 
-    log_info(f"Synthesizing speech: {len(detected_text):,} chars, length_scale={length_scale}")
+    log_info(f"Synthesizing speech: {len(detected_text):,} chars, length_scale={length_scale}, speaker_id={speaker_id}")
     t_tts_start = time.monotonic()
 
     try:
         from piper.voice import SynthesisConfig
-        syn_config = SynthesisConfig(length_scale=length_scale)
+        syn_config = SynthesisConfig(length_scale=length_scale, speaker_id=speaker_id)
 
         with wave.open(output_audio_path, "wb") as wav_file:
             piper_voice.synthesize_wav(detected_text, wav_file, syn_config=syn_config)
@@ -492,31 +489,29 @@ def _init_piper_voice(voice_id=None):
     """
     Load a Piper TTS voice model by voice_id.
 
-    Model files are expected in LOCAL_MODELS_DIR/tts/:
-      - <voice_id>.onnx      (the voice model)
-      - <voice_id>.onnx.json  (model config with sample_rate etc.)
+    Voice models are stored in LOCAL_VOICES_DIR (the settings dir's voices/
+    subdirectory) — they're downloaded on demand by main.py, not bundled in
+    the plugin zip. This function accepts any voice_id as long as the files
+    exist on disk (no validation against a hardcoded list).
 
     Args:
-        voice_id: The voice identifier (e.g., "en_US-lessac-medium"). Falls back
-                  to DEFAULT_PIPER_VOICE if None or not in PIPER_VOICES.
+        voice_id: The voice identifier (e.g., "en_US-amy-medium"). Falls back
+                  to DEFAULT_PIPER_VOICE if None or empty.
 
     Returns:
         A tuple of (PiperVoice, resolved_voice_id) — the resolved ID may differ
-        from input if the requested voice was unknown or None.
+        from input if the requested voice was None/empty.
     """
-    # Resolve voice_id — fall back to default if unknown or missing
-    if not voice_id or voice_id not in PIPER_VOICES:
-        if voice_id:
-            log_info(f"Unknown voice_id '{voice_id}', falling back to {DEFAULT_PIPER_VOICE}")
+    # Resolve voice_id — fall back to default if empty
+    if not voice_id:
         voice_id = DEFAULT_PIPER_VOICE
 
-    models_dir = os.environ.get("LOCAL_MODELS_DIR", "")
-    if not models_dir:
-        raise RuntimeError("LOCAL_MODELS_DIR environment variable not set")
+    voices_dir = os.environ.get("LOCAL_VOICES_DIR", "")
+    if not voices_dir:
+        raise RuntimeError("LOCAL_VOICES_DIR environment variable not set")
 
-    tts_dir = os.path.join(models_dir, "tts")
-    model_path = os.path.join(tts_dir, f"{voice_id}.onnx")
-    config_path = os.path.join(tts_dir, f"{voice_id}.onnx.json")
+    model_path = os.path.join(voices_dir, f"{voice_id}.onnx")
+    config_path = os.path.join(voices_dir, f"{voice_id}.onnx.json")
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Piper voice model not found: {model_path}")
@@ -527,6 +522,12 @@ def _init_piper_voice(voice_id=None):
 
     log_info(f"Loading Piper voice '{voice_id}' from {model_path}")
     voice = PiperVoice.load(model_path, config_path=config_path)
+
+    # Check for multi-speaker voice — log it so we know speaker_id is needed
+    num_speakers = getattr(voice.config, "num_speakers", 1)
+    if num_speakers > 1:
+        log_info(f"Piper voice '{voice_id}' is multi-speaker ({num_speakers} speakers, using speaker 0)")
+
     log_info(f"Piper voice '{voice_id}' loaded")
     return voice, voice_id
 
@@ -540,6 +541,9 @@ def _get_or_load_voice(voice_id, voice_cache):
     worker doesn't pay the ~1s load cost for voices that are never used, and
     switching between previously-used voices is free.
 
+    Accepts any voice_id — no validation against a hardcoded list. The caller
+    (main.py) ensures the voice files exist before sending commands.
+
     Args:
         voice_id: The voice identifier (e.g., "en_US-ryan-medium").
         voice_cache: Dict mapping voice_id → PiperVoice (mutated in place).
@@ -547,8 +551,8 @@ def _get_or_load_voice(voice_id, voice_cache):
     Returns:
         A tuple of (PiperVoice, resolved_voice_id).
     """
-    # Resolve to default if missing/unknown before checking cache
-    resolved_id = voice_id if (voice_id and voice_id in PIPER_VOICES) else DEFAULT_PIPER_VOICE
+    # Resolve to default if empty
+    resolved_id = voice_id if voice_id else DEFAULT_PIPER_VOICE
 
     if resolved_id in voice_cache:
         log_debug(f"Using cached voice '{resolved_id}'")
@@ -588,6 +592,10 @@ def serve():
 
     # Step 2: Ensure stdout flushes after every line (critical for JSON protocol).
     sys.stdout.reconfigure(line_buffering=True)
+
+    # Log the voices directory so we can verify it in debug output
+    voices_dir = os.environ.get("LOCAL_VOICES_DIR", "")
+    log_info(f"serve: voices dir = {voices_dir}")
 
     # Step 3: Initialize OCR engine upfront, but use lazy-loading for TTS voices.
     # OCR engine is always needed and there's only one, so we pay the ~1.5s load
@@ -649,14 +657,16 @@ def serve():
                 do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
                        cmd.get("speech_rate", "medium"),
                        voice_id=cmd.get("voice_id"),
-                       voice_cache=voice_cache)
+                       voice_cache=voice_cache,
+                       speaker_id=cmd.get("speaker_id"))
 
             elif action == "ocr_tts":
                 do_ocr_tts(cmd.get("image_path", ""), cmd.get("output_path", ""),
                            cmd.get("speech_rate", "medium"),
                            ocr_engine=ocr_engine,
                            voice_id=cmd.get("voice_id"),
-                           voice_cache=voice_cache)
+                           voice_cache=voice_cache,
+                           speaker_id=cmd.get("speaker_id"))
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)

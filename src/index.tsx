@@ -128,6 +128,27 @@ interface ButtonMonitorStatus {
   hold_threshold_ms: number; // current hold threshold in milliseconds
 }
 
+// Info about a single Piper voice from get_available_voices()
+interface VoiceInfo {
+  label: string;       // Human-readable name (e.g., "US English - Amy (Female)")
+  language: string;    // Language group (e.g., "English (US)")
+  speakers: number;    // Number of speakers (1 = single, >1 = multi-speaker)
+  downloaded: boolean; // Whether the .onnx file exists in the voices dir
+  file_size: number;   // Size of the .onnx file in bytes (0 if not downloaded)
+}
+
+// Voice registry returned by get_available_voices(): voice_id → VoiceInfo
+interface VoiceRegistry {
+  [voice_id: string]: VoiceInfo;
+}
+
+// Response from download_voice() or delete_voice() backend RPCs
+interface VoiceActionResult {
+  success: boolean;
+  message: string;
+  file_size?: number;   // Only present in download response
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   // Provider selection (Phase 8)
@@ -201,6 +222,11 @@ const getPipelineStatus = callable<[], PipelineStatus>("get_pipeline_status");
 // Phase 7: Get button monitor status (running, device_path, error_count, etc.)
 const getButtonMonitorStatus = callable<[], ButtonMonitorStatus>("get_button_monitor_status");
 
+// Phase 8.6: Voice management — on-demand Piper voice downloads
+const getAvailableVoices = callable<[], VoiceRegistry>("get_available_voices");
+const downloadVoice = callable<[string], VoiceActionResult>("download_voice");
+const deleteVoice = callable<[string], VoiceActionResult>("delete_voice");
+
 
 // =============================================================================
 // Helper: format file size in human-readable form
@@ -255,15 +281,6 @@ const TTS_PROVIDER_OPTIONS = [
   { data: "gcp",   label: "Google Cloud (online)" },
 ];
 
-// Local (Piper) voice options — 4 bundled voices (2 US + 2 UK, male + female each).
-// Each voice has a .onnx model + .onnx.json config in models/tts/.
-const LOCAL_VOICE_OPTIONS = [
-  { data: "en_US-lessac-medium", label: "US Female - Lessac" },
-  { data: "en_US-ryan-medium",   label: "US Male - Ryan" },
-  { data: "en_GB-cori-medium",   label: "UK Female - Cori" },
-  { data: "en_GB-alan-medium",   label: "UK Male - Alan" },
-];
-
 // Speech rate options for Piper TTS. Same labels as GCP but maps to
 // Piper's length_scale internally (inverse: lower = faster).
 const LOCAL_SPEECH_RATE_OPTIONS = [
@@ -305,13 +322,14 @@ const HOLD_TIME_OPTIONS = [
 // knows what's happening. Each label uses present progressive tense.
 function getPipelineStepLabel(step: string): string {
   switch (step) {
-    case "starting":   return "Starting...";
-    case "capturing":  return "Capturing screen...";
-    case "ocr":        return "Detecting text...";
-    case "tts":        return "Generating speech...";
-    case "playing":    return "Playing audio...";
-    case "cancelled":  return "Cancelled";
-    default:           return "";
+    case "starting":     return "Starting...";
+    case "capturing":    return "Capturing screen...";
+    case "downloading":  return "Downloading voice...";
+    case "ocr":          return "Detecting text...";
+    case "tts":          return "Generating speech...";
+    case "playing":      return "Playing audio...";
+    case "cancelled":    return "Cancelled";
+    default:             return "";
   }
 }
 
@@ -536,6 +554,16 @@ function Content() {
   // Status of the hidraw button monitor (fetched on mount and after changes)
   const [monitorStatus, setMonitorStatus] = useState<ButtonMonitorStatus | null>(null);
 
+  // --- Voice management state (Phase 8.6: On-Demand Voice Downloads) ---
+  // Registry of all available Piper voices with download status
+  const [localVoices, setLocalVoices] = useState<VoiceRegistry | null>(null);
+  // Whether a voice download is in progress (disables buttons)
+  const [isVoiceDownloading, setIsVoiceDownloading] = useState(false);
+  // Status message from the last voice download/delete operation
+  const [voiceMessage, setVoiceMessage] = useState<string | null>(null);
+  // Whether the voice message is a success (green) or error (red)
+  const [voiceIsSuccess, setVoiceIsSuccess] = useState(false);
+
   // --- Pipeline state (Phase 6: Read Screen) ---
   // Whether the end-to-end pipeline is currently running
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
@@ -548,8 +576,8 @@ function Content() {
   // Ref for the pipeline polling interval
   const pipelinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Load settings and monitor status from the backend when the component
-  // first mounts. Also reload when returning from file browser mode.
+  // Load settings, monitor status, and voice list from the backend when
+  // the component first mounts. Also reload when returning from file browser mode.
   useEffect(() => {
     const loadSettings = async () => {
       const result = await getSettings();
@@ -557,6 +585,9 @@ function Content() {
       // Also fetch button monitor status for the status indicator
       const status = await getButtonMonitorStatus();
       setMonitorStatus(status);
+      // Fetch available voices with download status
+      const voices = await getAvailableVoices();
+      setLocalVoices(voices);
     };
     loadSettings();
   }, [mode]);  // Re-fetch settings when mode changes (e.g., after loading creds)
@@ -790,6 +821,34 @@ function Content() {
     setPipelineMessage("Pipeline stopped");
     setPipelineIsSuccess(true);
     setTimeout(() => setPipelineMessage(null), 5000);
+  };
+
+  // --- Voice management handlers (Phase 8.6) ---
+
+  // Handle downloading a Piper voice model from HuggingFace
+  const handleDownloadVoice = async (voiceId: string) => {
+    setIsVoiceDownloading(true);
+    setVoiceMessage(null);
+    const result = await downloadVoice(voiceId);
+    setIsVoiceDownloading(false);
+    setVoiceMessage(result.message);
+    setVoiceIsSuccess(result.success);
+    // Refresh voice list to update download status
+    const voices = await getAvailableVoices();
+    setLocalVoices(voices);
+    setTimeout(() => setVoiceMessage(null), 5000);
+  };
+
+  // Handle deleting a downloaded Piper voice model
+  const handleDeleteVoice = async (voiceId: string) => {
+    setVoiceMessage(null);
+    const result = await deleteVoice(voiceId);
+    setVoiceMessage(result.message);
+    setVoiceIsSuccess(result.success);
+    // Refresh voice list to update download status
+    const voices = await getAvailableVoices();
+    setLocalVoices(voices);
+    setTimeout(() => setVoiceMessage(null), 5000);
   };
 
   // Cleanup: clear intervals and timeouts when the component unmounts
@@ -1324,20 +1383,23 @@ function Content() {
           </>
         ) : (
           <>
-            {/* Local (Piper) Voice selection dropdown */}
+            {/* Local (Piper) Voice selection dropdown — populated from backend */}
             <PanelSectionRow>
               <DropdownItem
                 label="Voice"
                 description="Piper voice for offline speech synthesis"
                 menuLabel="Select Voice"
-                rgOptions={LOCAL_VOICE_OPTIONS.map((v) => ({
-                  data: v.data,
-                  label: v.label,
-                }))}
-                selectedOption={
-                  LOCAL_VOICE_OPTIONS.find((v) => v.data === settings.local_voice_id)?.data
-                  ?? LOCAL_VOICE_OPTIONS[0].data
+                rgOptions={
+                  localVoices
+                    ? Object.entries(localVoices).map(([id, info]) => ({
+                        data: id,
+                        label: info.downloaded
+                          ? info.label
+                          : `${info.label} [~63 MB]`,
+                      }))
+                    : [{ data: settings.local_voice_id, label: "Loading..." }]
                 }
+                selectedOption={settings.local_voice_id}
                 onChange={(option) => {
                   saveSetting("local_voice_id", option.data);
                   if (settings) {
@@ -1346,6 +1408,75 @@ function Content() {
                 }}
               />
             </PanelSectionRow>
+
+            {/* Voice download/delete buttons and status */}
+            {localVoices && (() => {
+              const selectedVoice = localVoices[settings.local_voice_id];
+              const isDownloaded = selectedVoice?.downloaded ?? false;
+              return (
+                <>
+                  {/* Voice status message */}
+                  {voiceMessage && (
+                    <PanelSectionRow>
+                      <div style={{
+                        color: voiceIsSuccess ? "#2ecc71" : "#e74c3c",
+                        padding: "4px 0",
+                        fontSize: "13px"
+                      }}>
+                        {voiceMessage}
+                      </div>
+                    </PanelSectionRow>
+                  )}
+
+                  {isDownloaded ? (
+                    <>
+                      {/* Show downloaded indicator + file size */}
+                      <PanelSectionRow>
+                        <div style={{
+                          color: "#2ecc71",
+                          fontSize: "12px",
+                          padding: "4px 0"
+                        }}>
+                          Downloaded ({formatSize(selectedVoice.file_size)})
+                        </div>
+                      </PanelSectionRow>
+                      {/* Delete button */}
+                      <PanelSectionRow>
+                        <ButtonItem
+                          layout="below"
+                          onClick={() => handleDeleteVoice(settings.local_voice_id)}
+                        >
+                          Delete Voice
+                        </ButtonItem>
+                      </PanelSectionRow>
+                    </>
+                  ) : (
+                    <>
+                      {/* Not downloaded hint */}
+                      <PanelSectionRow>
+                        <div style={{
+                          color: "#b8bcbf",
+                          fontSize: "12px",
+                          padding: "4px 0"
+                        }}>
+                          Voice will auto-download on first use
+                        </div>
+                      </PanelSectionRow>
+                      {/* Download button */}
+                      <PanelSectionRow>
+                        <ButtonItem
+                          layout="below"
+                          onClick={() => handleDownloadVoice(settings.local_voice_id)}
+                          disabled={isVoiceDownloading}
+                        >
+                          {isVoiceDownloading ? "Downloading..." : "Download Voice"}
+                        </ButtonItem>
+                      </PanelSectionRow>
+                    </>
+                  )}
+                </>
+              );
+            })()}
 
             {/* Local Speech rate dropdown */}
             <PanelSectionRow>

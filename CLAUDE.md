@@ -31,6 +31,7 @@ This is a **Decky Loader plugin** for Steam Deck. It is a classic Decky plugin t
 - Reference for:
   - Using the **L4 button** on Steam Deck to trigger plugin actions without opening the plugin UI
   - **RapidOCR integration pattern**: uses `rapidocr-onnxruntime` with custom ONNX model paths but NO `rec_keys_path` (avoids model-dictionary mismatch)
+  - Never check this for TTS related topics
 
 ### decky-ocr-tts-claude-service-plugin (feature reference)
 - **Path:** `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin`
@@ -324,7 +325,9 @@ Frontend (TypeScript/React)           Backend (Python)
    - `rapidocr-onnxruntime` returns a tuple-like object. `result[0]` is a list of `[bounding_box, text, confidence]` items (or `None`). Do NOT tuple-unpack (`result, elapse = ...`).
 
 4. **Piper TTS API: use `synthesize_wav()` (v1.3+ API)**
-   - `piper-tts>=1.4.0` removed the old `synthesize_stream_raw()` method. The new API uses `voice.synthesize_wav(text, wav_file, syn_config=SynthesisConfig(length_scale=...))` which writes WAV directly — simpler than manually collecting PCM chunks and writing WAV headers.
+   - `piper-tts>=1.4.0` removed the old `synthesize_stream_raw()` method. The new API uses `voice.synthesize_wav(text, wav_file, syn_config=SynthesisConfig(length_scale=..., speaker_id=...))` which writes WAV directly — simpler than manually collecting PCM chunks and writing WAV headers.
+   - **Multi-speaker voices**: `speaker_id` is passed via `SynthesisConfig(speaker_id=N)`, NOT as a method argument. Neither `synthesize_wav()` nor `synthesize()` accept `speaker_id` directly in piper-tts >=1.4.0.
+   - **Language mismatch**: Non-English voices (e.g., Ukrainian) can only phonemize their own script. Feeding English text produces "Missing phoneme from id map" warnings and garbled/silent output — this is expected, not a bug.
 
 **Performance (measured on Steam Deck):**
 | Metric | 1st trigger (cold worker) | Warm worker |
@@ -371,6 +374,79 @@ Frontend (TypeScript/React)           Backend (Python)
 
 **Plugin zip size:** ~493 MB total (up from ~304 MB, +189MB for 3 new voice model pairs)
 
+### Phase 8.6: On-Demand Piper Voice Downloads `[DONE]`
+
+**Problem:** The plugin bundled 4 Piper voices (~252MB of voice models) in the zip, inflating total size to ~493MB. Users only got English voices, and adding more would bloat it further.
+
+**Solution:** Switch to on-demand voice downloads — no voices bundled, 16 curated voices across 13 languages downloadable from HuggingFace. Downloaded voices persist in `DECKY_PLUGIN_SETTINGS_DIR/voices/` across plugin updates.
+
+**Curated voices (16 total, 13 languages):**
+| Voice ID | Language | Label | Speakers |
+|----------|----------|-------|----------|
+| `en_US-amy-medium` (default) | English (US) | US English - Amy (Female) | 1 |
+| `en_US-ryan-medium` | English (US) | US English - Ryan (Male) | 1 |
+| `en_GB-cori-medium` | English (UK) | UK English - Cori (Female) | 1 |
+| `en_GB-alan-medium` | English (UK) | UK English - Alan (Male) | 1 |
+| `de_DE-thorsten-medium` | German | German - Thorsten (Male) | 1 |
+| `es_ES-davefx-medium` | Spanish (Spain) | Spanish (Spain) - Davefx | 1 |
+| `es_MX-coconut-medium` | Spanish (Mexico) | Spanish (Mexico) - Coconut | 1 |
+| `fr_FR-gilles-medium` | French | French - Gilles (Male) | 1 |
+| `it_IT-paola-medium` | Italian | Italian - Paola (Female) | 1 |
+| `ja_JP-kokoro-medium` | Japanese | Japanese - Kokoro | 1 |
+| `ko_KR-kss-medium` | Korean | Korean - KSS | 1 |
+| `pl_PL-gosia-medium` | Polish | Polish - Gosia (Female) | 1 |
+| `pt_BR-edresson-medium` | Portuguese (BR) | Portuguese (Brazil) - Edresson | 1 |
+| `ru_RU-irina-medium` | Russian | Russian - Irina (Female) | 1 |
+| `uk_UA-ukrainian_tts-medium` | Ukrainian | Ukrainian - Ukrainian TTS | 3 |
+| `zh_CN-huayan-medium` | Chinese | Chinese - Huayan | 1 |
+
+**Backend (main.py):**
+- [x] `PIPER_VOICES` registry (16 voices) with metadata (label, language, speakers)
+- [x] `_piper_voice_url()` helper to construct HuggingFace download URLs
+- [x] `_voices_dir` setup in `_main()` — `DECKY_PLUGIN_SETTINGS_DIR/voices/`
+- [x] Startup cleanup of partial `.tmp` downloads from crashes
+- [x] `LOCAL_VOICES_DIR` env var passed to local worker
+- [x] `get_available_voices()` RPC — returns voice list with download status
+- [x] `download_voice(voice_id)` RPC — curl-based download to `.tmp`, rename on success. Uses clean env (strips `LD_LIBRARY_PATH`/`LD_PRELOAD`) to avoid PyInstaller's bundled libssl conflicting with system curl.
+- [x] `delete_voice(voice_id)` RPC — removes files, stops worker if current voice deleted
+- [x] `_is_voice_downloaded()` helper for pipeline checks
+- [x] Auto-download in `_read_screen_sync()` with "downloading" pipeline step
+- [x] Auto-download in `_perform_tts_sync()` before sending TTS command
+- [x] Default voice changed to `en_US-amy-medium`
+
+**Worker (local_worker.py):**
+- [x] Removed `PIPER_VOICES` dict (moved to main.py as metadata registry)
+- [x] `_init_piper_voice()` reads from `LOCAL_VOICES_DIR` env var (not `LOCAL_MODELS_DIR/tts/`)
+- [x] Accepts any voice_id (no validation against hardcoded list)
+- [x] `_get_or_load_voice()` resolves to default only if voice_id is empty
+- [x] Multi-speaker support: `speaker_id` passed via `SynthesisConfig(speaker_id=N)` from voice metadata in main.py
+- [x] `serve()` logs `LOCAL_VOICES_DIR` at startup
+- [x] Default voice changed to `en_US-amy-medium`
+
+**Frontend (src/index.tsx):**
+- [x] Removed static `LOCAL_VOICE_OPTIONS`
+- [x] New interfaces: `VoiceInfo`, `VoiceRegistry`, `VoiceActionResult`
+- [x] New RPC bindings: `getAvailableVoices`, `downloadVoice`, `deleteVoice`
+- [x] `localVoices` state fetched from backend on mount
+- [x] Dynamic voice dropdown with `[~63 MB]` suffix for undownloaded voices
+- [x] Download/Delete buttons below voice dropdown with status messages
+- [x] "Voice will auto-download on first use" hint for undownloaded voices
+- [x] "Downloaded (X MB)" indicator with file size for downloaded voices
+- [x] `isVoiceDownloading` state disables button during download
+- [x] "Downloading voice..." pipeline step label
+
+**Docker (Dockerfile.plugin):**
+- [x] Removed all Piper voice model `curl` commands from Stage 2d
+- [x] Removed `mkdir -p /app/models/tts` — only `models/ocr/` remains
+- [x] Updated assembly stage comments
+
+**Plugin zip size:** ~241 MB (down from ~493 MB, -252MB voice models removed)
+
+**New settings:**
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `local_voice_id` | `"en_US-amy-medium"` (changed from `"en_US-lessac-medium"`) | Default voice auto-downloads on first TTS use |
+
 ### Phase 9: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Global overlay for displaying OCR text on screen
 - [ ] Region selection (crop to area instead of full screen)
@@ -398,7 +474,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | GCP worker | System Python 3.13 + persistent subprocess | Matches Steam Deck's system Python; gRPC connections stay warm across requests |
 | Local worker | Bundled Python 3.12 + persistent subprocess | rapidocr-onnxruntime requires Python <3.13; ONNX models loaded once at startup |
 | Local OCR package | `rapidocr-onnxruntime` (not `rapidocr` v3.x) | Same as Decky-Translator. Lighter deps, proven API. Pass custom ONNX model paths but NOT `rec_keys_path` — the library's built-in keys file avoids model-dictionary mismatch |
-| Local TTS package | `piper-tts>=1.4.0` | v1.3+ API uses `synthesize_wav()` + `SynthesisConfig(length_scale=...)`. Old `synthesize_stream_raw()` was removed |
+| Local TTS package | `piper-tts>=1.4.0` | v1.3+ API uses `synthesize_wav()` + `SynthesisConfig(length_scale=..., speaker_id=...)`. Old `synthesize_stream_raw()` was removed. `speaker_id` must go through `SynthesisConfig`, not as a method arg |
 | Bundled Python 3.12 | python-build-standalone install_only_stripped | Self-contained ~40MB interpreter, no system install needed, same approach as Decky-Translator |
 | Screen capture | GStreamer + PipeWire | Native to Steam Deck, hardware-accelerated |
 | Audio playback | ffplay (primary), mpv, or pw-play | Auto-discovered at startup; supports both MP3 (GCP) and WAV (Piper). Requires `XDG_RUNTIME_DIR=/run/user/1000` since Decky runs as root. A daemon reaper thread prevents zombies |
@@ -411,6 +487,8 @@ Frontend (TypeScript/React)           Backend (Python)
 | Local Python deps | Bundled in py_modules_local/ via Docker build (Python 3.12) | Separate from GCP deps due to different Python versions |
 | Default provider | Local (offline) | Works out of the box without any setup; GCP requires service account |
 | Voice loading strategy | Lazy-load + in-memory cache per voice_id | Only used voices consume memory (~63MB each); first use pays ~1s load, subsequent uses are instant from cache; worker startup is faster (OCR only, no voice pre-loaded) |
+| Voice distribution | On-demand download from HuggingFace to settings dir | No voices bundled in zip (saves ~252MB); 16 voices in 13 languages; auto-download on first TTS use; persists across plugin updates; curl-based with .tmp rename for safety |
+| Subprocess env for curl | Strip `LD_LIBRARY_PATH` and `LD_PRELOAD` from env | Decky Loader is a PyInstaller bundle that sets `LD_LIBRARY_PATH` to its bundled (older) libssl.so.3, which conflicts with system curl's OpenSSL requirements. Must use clean env for curl subprocesses |
 | Docker build | Layer caching enabled for speed | Use `docker compose build --no-cache` manually when requirements.txt or model URLs change |
 
 ## File Structure
@@ -443,21 +521,20 @@ decky-cloud-reader/
 ├── py_modules_local/          # Local inference packages (compiled for cpython-312-x86_64)
 ├── python312/                 # Bundled Python 3.12 interpreter
 │   └── python/bin/python3.12
-└── models/                    # OCR + TTS model files
-    ├── ocr/                   # RapidOCR (PaddleOCR v4) ONNX models
-    │   ├── ch_PP-OCRv4_det_infer.onnx
-    │   ├── ch_PP-OCRv4_rec_infer.onnx
-    │   └── ch_ppocr_mobile_v2.0_cls_infer.onnx
-    │   # NOTE: NO ppocr_keys_v1.txt — library's built-in keys used instead
-    └── tts/                   # Piper voice models (4 voices, lazy-loaded)
-        ├── en_US-lessac-medium.onnx      # US Female (default)
-        ├── en_US-lessac-medium.onnx.json
-        ├── en_US-ryan-medium.onnx        # US Male
-        ├── en_US-ryan-medium.onnx.json
-        ├── en_GB-cori-medium.onnx        # UK Female
-        ├── en_GB-cori-medium.onnx.json
-        ├── en_GB-alan-medium.onnx        # UK Male
-        └── en_GB-alan-medium.onnx.json
+└── models/                    # OCR model files (TTS voices downloaded on demand)
+    └── ocr/                   # RapidOCR (PaddleOCR v4) ONNX models
+        ├── ch_PP-OCRv4_det_infer.onnx
+        ├── ch_PP-OCRv4_rec_infer.onnx
+        └── ch_ppocr_mobile_v2.0_cls_infer.onnx
+        # NOTE: NO ppocr_keys_v1.txt — library's built-in keys used instead
+```
+
+**Downloaded on demand to DECKY_PLUGIN_SETTINGS_DIR/voices/ (persists across updates):**
+```
+voices/
+├── en_US-amy-medium.onnx          # ~63MB each, downloaded on first use
+├── en_US-amy-medium.onnx.json
+└── ...                            # Up to 16 voices, 13 languages
 ```
 
 Components may be split out of `index.tsx` into separate files if it grows too large, but there's no predetermined file split — keep it simple until complexity demands it.
