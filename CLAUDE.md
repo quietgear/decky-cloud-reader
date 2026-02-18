@@ -73,7 +73,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **8.6: On-Demand Voices** | No bundled voices; 16 curated voices (13 languages) downloaded from HuggingFace on demand to `DECKY_PLUGIN_SETTINGS_DIR/voices/` |
 | **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform. Infrastructure only (no pipeline integration) |
 
-### Phase 10 Clenup in Setting file, prepare new variables for future functions `[NOT STARTED]`
+### Phase 10 Cleanup in Settings file, prepare new variables for future functions `[DONE]`
 - [ ] add following variables to already existing in settings file:
 
 #### Config Fields
@@ -116,15 +116,16 @@ Frontend (TypeScript/React)           Backend (Python)
 #### Full Screen Mode (default)
 - Press selected `trigger_button` (L4, L5, R4, R5) to trigger
 - Captures entire screen for OCR
+- Touchscreen input is ignored in this mode — button only
 - UI Sound plays after button press was registered right before processing (selection end)
 - Pressing same selected `trigger_button` (L4, L5, R4, R5) during speech playback will stop and finish pipeline
 
 #### Swipe Selection Mode
-- Draw a line across the region for OCR (direction doesn't metter)
+- Finger-down = corner 1, finger-up = corner 2; defines a bounding box for OCR (direction doesn't matter)
 - UI Sound plays on finger down (selection start)
 - UI Sound plays on finger up (selection end)
 - Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
-- Minimum selection size: 50x50 pixels, ignore smaller regions to avoid accident touches
+- Minimum selection size: 50x50 pixels, ignore smaller regions to avoid accidental touches
 - Remember `last_selection` coordinates of a region in settings for `Fixed Region` and `Hybrid` modes
 
 #### Two-Tap Selection Mode
@@ -137,7 +138,7 @@ Frontend (TypeScript/React)           Backend (Python)
 - Remember `last_selection` coordinates of a region in settings for `Fixed Region` and `Hybrid` modes
 
 #### Fixed Region Mode
-- Press selected `trigger_button` (L4, L5, R4, R5) to to capture pre-defined region
+- Press selected `trigger_button` (L4, L5, R4, R5) to capture pre-defined region
 - Region coordinates configured via text fields in plugin to enter coordinates manually. coordinates are stored in `fixed_region` variables in settings file.
 - There is plugin button to apply `last_selection` coordinates from swipe/two-tap mode last selection. It has some default values in settings file, if not set by user before.
 - Coordinates are validated and clamped to screen bounds (1280x800)
@@ -147,7 +148,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 #### Hybrid Mode (Fixed Region + Two-Tap Selection)
 - Combines fixed region quick-access with flexible two-tap selection
-- Press selected `trigger_button` (L4, L5, R4, R5) to to capture pre-defined region
+- Press selected `trigger_button` (L4, L5, R4, R5) to capture pre-defined region
 - Tap anywhere starts two-tap selection (5-second timeout)
 - Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
 - Custom selections are saved to `last_selection_*` for later use
@@ -156,7 +157,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ### Phase 13: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Global overlay for displaying selected zones on screen as in `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin`
-- [ ] Text filtering (ignore specific words/patterns). `ignored_words` in settings file
+- [ ] Text filtering (ignore specific words/patterns). Uses `ignored_words_always`, `ignored_words_always_enabled`, `ignored_words_beginning`, `ignored_words_beginning_enabled`, `ignored_words_count` in settings file
 
 ---
 
@@ -206,13 +207,29 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | `debug` | `false` | Enables `DEBUG` log level (no restart needed) |
 | `ocr_provider` | `"local"` | `"gcp"` or `"local"` |
 | `tts_provider` | `"local"` | `"gcp"` or `"local"` |
+| `voice_id` | `"en-US-Neural2-C"` | GCP Neural2 voice |
+| `speech_rate` | `"medium"` | GCP speech rate |
 | `local_voice_id` | `"en_US-amy-medium"` | Piper voice (auto-downloads on first use) |
 | `local_speech_rate` | `"medium"` | Piper speech rate |
-| `trigger_button` | `"disabled"` | Hidraw button: disabled/L4/R4/L5/R5 |
+| `volume` | `100` | TTS volume 0-100 |
+| `trigger_button` | `"L4"` | Hidraw button: disabled/L4/R4/L5/R5 |
 | `hold_time_ms` | `500` | Button hold threshold |
 | `touchscreen_enabled` | `false` | Evdev touchscreen tap detection (experimental) |
-| `gcp_voice_id` | varies | GCP Neural2 voice |
-| `gcp_speech_rate` | `"medium"` | GCP speech rate |
+| `capture_mode` | `"full_screen"` | Capture method: full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid |
+| `mute_interface_sounds` | `false` | Disable/enable playback of UI feedback sounds |
+| `fixed_region_x1` | `0` | Fixed region left X coordinate |
+| `fixed_region_y1` | `0` | Fixed region top Y coordinate |
+| `fixed_region_x2` | `1280` | Fixed region right X coordinate |
+| `fixed_region_y2` | `800` | Fixed region bottom Y coordinate |
+| `last_selection_x1` | `0` | Last selection left X (auto-saved) |
+| `last_selection_y1` | `0` | Last selection top Y (auto-saved) |
+| `last_selection_x2` | `1280` | Last selection right X (auto-saved) |
+| `last_selection_y2` | `800` | Last selection bottom Y (auto-saved) |
+| `ignored_words_always` | `""` | Comma-separated words to remove anywhere in text |
+| `ignored_words_always_enabled` | `false` | Enable/disable the "always ignore" list |
+| `ignored_words_beginning` | `""` | Comma-separated words to remove from start of text |
+| `ignored_words_beginning_enabled` | `false` | Enable/disable the "ignore at beginning" list |
+| `ignored_words_count` | `3` | How many leading words to check for "beginning" list |
 
 ---
 
@@ -257,6 +274,7 @@ decky-cloud-reader/
 ├── requirements.txt           # GCP deps (Python 3.13)
 ├── requirements_local.txt     # Local inference deps (Python 3.12)
 ├── package.json / plugin.json / tsconfig.json / rollup.config.js
+├── audio/                     # Sound effect WAV files (Phase 11)
 ├── docker/Dockerfile.plugin + docker-compose.yml
 ├── deploy.sh
 └── CLAUDE.md

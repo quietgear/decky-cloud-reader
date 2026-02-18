@@ -206,6 +206,37 @@ DEFAULT_SETTINGS = {
     # /dev/input/eventN to detect taps. Currently just logs coordinates —
     # future phases will add region selection and tap-to-read.
     "touchscreen_enabled": False,
+
+    # Phase 10 — Capture mode for Phase 12. Determines how the screen region
+    # is selected for OCR. "full_screen" captures the entire display.
+    "capture_mode": "full_screen",
+
+    # Phase 10 — When True, skip playing UI feedback sounds (Phase 11).
+    "mute_interface_sounds": False,
+
+    # Phase 10 — Fixed region coordinates for Phase 12 Fixed Region mode.
+    # Defines a persistent bounding box the user can configure manually.
+    # Defaults to full screen (0,0)-(1280,800).
+    "fixed_region_x1": 0,
+    "fixed_region_y1": 0,
+    "fixed_region_x2": 1280,
+    "fixed_region_y2": 800,
+
+    # Phase 10 — Last selection coordinates, auto-saved by swipe/two-tap
+    # modes in Phase 12. Can be applied to fixed_region via a UI button.
+    # Defaults to full screen (0,0)-(1280,800).
+    "last_selection_x1": 0,
+    "last_selection_y1": 0,
+    "last_selection_x2": 1280,
+    "last_selection_y2": 800,
+
+    # Phase 10 — Text filtering for Phase 13. Comma-separated word lists
+    # that are stripped from OCR output before TTS.
+    "ignored_words_always": "",
+    "ignored_words_always_enabled": False,
+    "ignored_words_beginning": "",
+    "ignored_words_beginning_enabled": False,
+    "ignored_words_count": 3,
 }
 
 # Fields that must be present in a valid GCP service account JSON file.
@@ -542,7 +573,7 @@ class Plugin:
         # Start touchscreen monitor (Phase 9)
         # -----------------------------------------------------------------
         # The touchscreen monitor reads input events from /dev/input/eventN
-        # to detect taps. Currently just logs coordinates — Phase 10 will
+        # to detect taps. Currently just logs coordinates — Phase 12 will
         # add region selection and tap-to-read functionality.
         # Experimental feature: disabled by default, users opt in via settings.
         self._touchscreen_monitor = None
@@ -634,7 +665,7 @@ class Plugin:
     # Touch callback: _on_touch_tap()
     # =========================================================================
     # Called from the touchscreen monitor thread when a tap is detected.
-    # Phase 9: just log the coordinates. Phase 10 will use these for region
+    # Phase 9: just log the coordinates. Phase 12 will use these for region
     # selection and tap-to-read.
 
     def _on_touch_tap(self, x, y):

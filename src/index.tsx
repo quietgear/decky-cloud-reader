@@ -178,6 +178,25 @@ interface PluginSettings {
   trigger_button: string;       // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
   hold_time_ms: number;         // Hold threshold in ms (Phase 7)
   touchscreen_enabled: boolean; // Touchscreen tap input (Phase 9)
+  // Capture mode (Phase 10/12)
+  capture_mode: string;           // full_screen | swipe_selection | two_tap_selection | fixed_region | hybrid
+  mute_interface_sounds: boolean; // Skip playing UI feedback sounds (Phase 10/11)
+  // Fixed region coordinates (Phase 10/12)
+  fixed_region_x1: number;
+  fixed_region_y1: number;
+  fixed_region_x2: number;
+  fixed_region_y2: number;
+  // Last selection coordinates (Phase 10/12)
+  last_selection_x1: number;
+  last_selection_y1: number;
+  last_selection_x2: number;
+  last_selection_y2: number;
+  // Text filtering (Phase 10/13)
+  ignored_words_always: string;
+  ignored_words_always_enabled: boolean;
+  ignored_words_beginning: string;
+  ignored_words_beginning_enabled: boolean;
+  ignored_words_count: number;
   // Computed fields
   is_configured: boolean;       // Whether current providers are ready
   is_gcp_configured: boolean;   // Whether GCP credentials are loaded
