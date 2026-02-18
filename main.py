@@ -60,6 +60,18 @@ from touchscreen_monitor import TouchscreenMonitor
 # Filter with: journalctl -u plugin_loader -f | grep DCR
 LOG = "[DCR]"
 
+# =============================================================================
+# Interface sound effects — short WAV files for UI feedback (Phase 11)
+# =============================================================================
+# These sounds play independently of TTS playback (fire-and-forget) to provide
+# audible feedback during capture mode interactions (e.g., selection start/end).
+# Sound names are used as keys in _play_interface_sound() and the RPC method.
+INTERFACE_SOUNDS = {
+    "selection_start": "mixkit-modern-technology-select-3124.wav",
+    "selection_end": "mixkit-old-camera-shutter-click-1137.wav",
+    "stop": "mixkit-click-error-1110.wav",
+}
+
 # Timeout for the GStreamer capture subprocess. 2 seconds is sufficient —
 # the pipeline typically completes well under this on Steam Deck.
 CAPTURE_TIMEOUT = 2  # seconds
@@ -1621,6 +1633,119 @@ class Plugin:
                 self._tts_temp_path = None
 
     # =========================================================================
+    # Interface sounds: _play_interface_sound() (Phase 11)
+    # =========================================================================
+    # Plays short UI feedback WAV files independently of TTS playback.
+    # Unlike _start_playback() which kills existing audio first and tracks the
+    # process in self._playback_process, this method spawns a fire-and-forget
+    # subprocess with a daemon reaper thread. Multiple interface sounds can
+    # overlap with each other AND with TTS playback without interruption.
+
+    def _play_interface_sound(self, sound_name):
+        """
+        Play a short UI feedback sound (WAV file) without interfering with TTS.
+
+        The sound is played via the same audio player (mpv/ffplay/pw-play)
+        discovered at startup. A daemon reaper thread prevents zombie processes.
+
+        Args:
+            sound_name: One of the keys in INTERFACE_SOUNDS
+                        ("selection_start", "selection_end", "stop").
+
+        Returns:
+            True if the sound started playing, False on any error.
+        """
+        # Respect the mute setting — return early without error
+        if self.settings.get("mute_interface_sounds", DEFAULT_SETTINGS["mute_interface_sounds"]):
+            decky.logger.debug(f"{LOG} interface sound muted, skipping: {sound_name}")
+            return True
+
+        # Map sound name to filename
+        filename = INTERFACE_SOUNDS.get(sound_name)
+        if not filename:
+            decky.logger.error(f"{LOG} unknown interface sound: {sound_name}")
+            return False
+
+        # Build the full path to the WAV file in the audio/ directory
+        audio_path = os.path.join(decky.DECKY_PLUGIN_DIR, "audio", filename)
+        if not os.path.exists(audio_path):
+            decky.logger.error(f"{LOG} interface sound file not found: {audio_path}")
+            return False
+
+        if not self._audio_player_path:
+            decky.logger.error(f"{LOG} no audio player found — cannot play interface sound")
+            return False
+
+        # Get volume from settings (0-100)
+        volume = self.settings.get("volume", DEFAULT_SETTINGS["volume"])
+
+        # Build the command based on the discovered player (same logic as
+        # _start_playback() but without tracking in self._playback_process).
+        player = self._audio_player_name
+        if player == "mpv":
+            cmd = [
+                self._audio_player_path,
+                "--no-video",
+                "--really-quiet",
+                f"--volume={volume}",
+                audio_path,
+            ]
+        elif player == "ffplay":
+            cmd = [
+                self._audio_player_path,
+                "-nodisp",
+                "-autoexit",
+                "-loglevel", "quiet",
+                "-volume", str(volume),
+                audio_path,
+            ]
+        elif player == "pw-play":
+            pw_volume = round(volume / 100.0, 2)
+            cmd = [
+                self._audio_player_path,
+                f"--volume={pw_volume}",
+                audio_path,
+            ]
+        else:
+            decky.logger.error(f"{LOG} unknown audio player: {player}")
+            return False
+
+        try:
+            decky.logger.info(f"{LOG} playing interface sound: {sound_name} via {player}")
+
+            # Set XDG_RUNTIME_DIR for PipeWire/PulseAudio session access
+            # (Decky Loader runs as root, needs this for audio output)
+            env = os.environ.copy()
+            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+
+            # Fire-and-forget: NOT tracked in self._playback_process so it
+            # doesn't interfere with TTS playback start/stop logic.
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # Daemon reaper thread prevents zombie processes after the short
+            # sound finishes playing. proc.wait() blocks until exit, then the
+            # thread dies automatically (daemon=True).
+            reaper = threading.Thread(
+                target=proc.wait,
+                daemon=True,
+                name=f"dcr-sound-reaper-{proc.pid}",
+            )
+            reaper.start()
+
+            decky.logger.debug(f"{LOG} interface sound started (pid={proc.pid})")
+            return True
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} failed to play interface sound {sound_name}: {e}")
+            decky.logger.error(traceback.format_exc())
+            return False
+
+    # =========================================================================
     # OCR pipeline: _perform_ocr_sync() (internal helper)
     # =========================================================================
     # Synchronous method that captures a screenshot and runs OCR on it.
@@ -2307,6 +2432,44 @@ class Plugin:
             and self._playback_process.poll() is None
         )
         return {"is_playing": is_playing}
+
+    # =========================================================================
+    # RPC: play_interface_sound() (Phase 11)
+    # =========================================================================
+    # Plays a short UI feedback sound. Used by the frontend test buttons and
+    # will be called by capture mode logic in Phase 12. Respects the
+    # mute_interface_sounds setting.
+    #
+    # Called from the frontend via:
+    #   const playInterfaceSound = callable<[string], {success: boolean; error?: string}>("play_interface_sound");
+    async def play_interface_sound(self, sound_name):
+        """
+        RPC: Play a UI feedback sound (for test buttons and capture modes).
+        Respects the mute_interface_sounds setting.
+
+        Args:
+            sound_name: One of "selection_start", "selection_end", "stop".
+
+        Returns:
+            Dict with "success" (bool) and optional "error" (str).
+        """
+        decky.logger.debug(f"{LOG} play_interface_sound({sound_name}) called")
+
+        # Run in executor because _play_interface_sound() does subprocess I/O
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                _capture_executor,
+                self._play_interface_sound,
+                sound_name,
+            )
+            if result:
+                return {"success": True}
+            else:
+                return {"success": False, "error": f"Failed to play sound: {sound_name}"}
+        except Exception as e:
+            decky.logger.error(f"{LOG} play_interface_sound error: {e}")
+            return {"success": False, "error": str(e)}
 
     # =========================================================================
     # RPC: get_settings()

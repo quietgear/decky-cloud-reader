@@ -262,6 +262,9 @@ const deleteVoice = callable<[string], VoiceActionResult>("delete_voice");
 const getTouchscreenStatus = callable<[], TouchscreenStatus>("get_touchscreen_status");
 const getLastTouch = callable<[], { x: number; y: number } | null>("get_last_touch");
 
+// Phase 11: Interface sound effects — fire-and-forget UI feedback sounds
+const playInterfaceSound = callable<[string], {success: boolean; error?: string}>("play_interface_sound");
+
 
 // =============================================================================
 // Helper: format file size in human-readable form
@@ -604,6 +607,10 @@ function Content() {
   const [touchscreenStatus, setTouchscreenStatus] = useState<TouchscreenStatus | null>(null);
   // Ref for the touchscreen polling interval
   const touchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // --- Interface sound state (Phase 11: Sound Effects) ---
+  // Tracks which sound test button is currently playing (null = none)
+  const [playingSoundTest, setPlayingSoundTest] = useState<string | null>(null);
 
   // --- Pipeline state (Phase 6: Read Screen) ---
   // Whether the end-to-end pipeline is currently running
@@ -1413,6 +1420,76 @@ function Content() {
             checked={settings.debug}
             onChange={(value) => handleToggle("debug", value)}
           />
+        </PanelSectionRow>
+      </PanelSection>
+
+      {/* ---- Sound Effects Section (Phase 11) ---- */}
+      {/* UI feedback sounds for capture mode interactions. Sounds play
+          independently of TTS (fire-and-forget). Mute toggle respects
+          the mute_interface_sounds setting. Test buttons verify audio
+          output before Phase 12 integrates sounds into capture modes. */}
+      <PanelSection title="Sound Effects">
+        {/* Mute interface sounds toggle */}
+        <PanelSectionRow>
+          <ToggleField
+            label="Mute Interface Sounds"
+            description="Disable UI feedback sounds"
+            checked={settings.mute_interface_sounds}
+            onChange={(value) => handleToggle("mute_interface_sounds", value)}
+          />
+        </PanelSectionRow>
+
+        {/* Test sound buttons — one per sound type */}
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={playingSoundTest !== null}
+            onClick={async () => {
+              setPlayingSoundTest("selection_start");
+              await playInterfaceSound("selection_start");
+              // Short delay so the button shows loading state visibly
+              setTimeout(() => setPlayingSoundTest(null), 500);
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+              <FaVolumeUp size={14} />
+              <span>{playingSoundTest === "selection_start" ? "Playing..." : "Test Start Sound"}</span>
+            </div>
+          </ButtonItem>
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={playingSoundTest !== null}
+            onClick={async () => {
+              setPlayingSoundTest("selection_end");
+              await playInterfaceSound("selection_end");
+              setTimeout(() => setPlayingSoundTest(null), 500);
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+              <FaVolumeUp size={14} />
+              <span>{playingSoundTest === "selection_end" ? "Playing..." : "Test End Sound"}</span>
+            </div>
+          </ButtonItem>
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={playingSoundTest !== null}
+            onClick={async () => {
+              setPlayingSoundTest("stop");
+              await playInterfaceSound("stop");
+              setTimeout(() => setPlayingSoundTest(null), 500);
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+              <FaVolumeUp size={14} />
+              <span>{playingSoundTest === "stop" ? "Playing..." : "Test Stop Sound"}</span>
+            </div>
+          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 

@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–9)
+### Completed Phases (1–11)
 
 | Phase | Summary |
 |-------|---------|
@@ -72,6 +72,8 @@ Frontend (TypeScript/React)           Backend (Python)
 | **8.5: Multiple Voices** | Lazy-load voice caching, 4 bundled English voices |
 | **8.6: On-Demand Voices** | No bundled voices; 16 curated voices (13 languages) downloaded from HuggingFace on demand to `DECKY_PLUGIN_SETTINGS_DIR/voices/` |
 | **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform. Infrastructure only (no pipeline integration) |
+| **10: Settings Defaults** | Added config fields for capture modes, regions, text filtering, and mute toggle |
+| **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, 3 test buttons, Dockerfile audio/ copy |
 
 ### Phase 10 Cleanup in Settings file, prepare new variables for future functions `[DONE]`
 - [ ] add following variables to already existing in settings file:
@@ -95,10 +97,10 @@ Frontend (TypeScript/React)           Backend (Python)
 | `ignored_words_beginning_enabled` | bool | true/false | Enable/disable the "ignore at beginning" list |
 | `ignored_words_count` | int | 1-20 | How many leading words to check for "beginning" list |
 
-### Phase 11 Add sound effects for UI feedback (start, selection, stop) `[NOT STARTED]`
-- [ ] Add test button/buttons to make sure we can play sounds
-- [ ] Add toggle to mute interface sounds, that is using `mute_interface_sounds` config field in config file
-- [ ] Sounds in folder ./audio
+### Phase 11 Add sound effects for UI feedback (start, selection, stop) `[DONE]`
+- [x] Add test button/buttons to make sure we can play sounds
+- [x] Add toggle to mute interface sounds, that is using `mute_interface_sounds` config field in config file
+- [x] Sounds in folder ./audio
 
 ├── audio/                                          # Sound effect WAV files
 │   ├── mixkit-modern-technology-select-3124.wav    # SELECTION_START (start)

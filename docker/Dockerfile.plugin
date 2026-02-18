@@ -159,6 +159,7 @@ RUN pnpm build
 #   ├── touchscreen_monitor.py  ← Touchscreen tap monitor (evdev input events)
 #   ├── gcp_worker.py           ← GCP subprocess (OCR + TTS via Google Cloud)
 #   ├── local_worker.py         ← Local subprocess (OCR + TTS via RapidOCR + Piper)
+#   ├── audio/                  ← UI feedback WAV sound effects (Phase 11)
 #   ├── py_modules/             ← GCP Python dependencies (system Python 3.13)
 #   ├── py_modules_local/       ← Local inference deps (bundled Python 3.12)
 #   ├── python312/              ← Bundled Python 3.12 interpreter
@@ -174,6 +175,7 @@ RUN mkdir -p /app/output/decky-cloud-reader/dist && \
     cp /app/touchscreen_monitor.py /app/output/decky-cloud-reader/ && \
     cp /app/gcp_worker.py /app/output/decky-cloud-reader/ && \
     cp /app/local_worker.py /app/output/decky-cloud-reader/ && \
+    cp -r /app/audio /app/output/decky-cloud-reader/ && \
     cp -r /app/py_modules /app/output/decky-cloud-reader/ && \
     cp -r /app/py_modules_local /app/output/decky-cloud-reader/ && \
     cp -r /app/python312 /app/output/decky-cloud-reader/ && \
