@@ -73,13 +73,90 @@ Frontend (TypeScript/React)           Backend (Python)
 | **8.6: On-Demand Voices** | No bundled voices; 16 curated voices (13 languages) downloaded from HuggingFace on demand to `DECKY_PLUGIN_SETTINGS_DIR/voices/` |
 | **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform. Infrastructure only (no pipeline integration) |
 
-### Phase 10: UI Polish & Advanced Features `[NOT STARTED]`
-- [ ] Analyze `decky-ocr-tts-claude-service-plugin` to determine which modes to implement (walk me through questionnaire)
-- [ ] Global overlay for displaying selected zones on screen
-- [ ] Region selection (crop to area instead of full screen)
-- [ ] Text filtering (ignore specific words/patterns)
-- [ ] Visual progress indicator during hold-to-activate
-- [ ] Debug panel showing real-time state and diagnostics
+### Phase 10 Clenup in Setting file, prepare new variables for future functions `[NOT STARTED]`
+- [ ] add following variables to already existing in settings file:
+
+#### Config Fields
+| Field | Type | Values | Description |
+|-------|------|--------|-------------|
+| `capture_mode` | string | full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid | Capture method |
+| `mute_interface_sounds` | bool | true/false | disable/enable playback of UI feedback sounds |
+| `fixed_region_x1` | int | 0-1280 | Fixed region left X coordinate |
+| `fixed_region_y1` | int | 0-800 | Fixed region top Y coordinate |
+| `fixed_region_x2` | int | 0-1280 | Fixed region right X coordinate |
+| `fixed_region_y2` | int | 0-800 | Fixed region bottom Y coordinate |
+| `last_selection_x1` | int | 0-1280 | Last selection left X (auto-saved) |
+| `last_selection_y1` | int | 0-800 | Last selection top Y (auto-saved) |
+| `last_selection_x2` | int | 0-1280 | Last selection right X (auto-saved) |
+| `last_selection_y2` | int | 0-800 | Last selection bottom Y (auto-saved) |
+| `ignored_words_always` | string | comma-separated | Words to remove anywhere in text |
+| `ignored_words_always_enabled` | bool | true/false | Enable/disable the "always ignore" list |
+| `ignored_words_beginning` | string | comma-separated | Words to remove from start of text |
+| `ignored_words_beginning_enabled` | bool | true/false | Enable/disable the "ignore at beginning" list |
+| `ignored_words_count` | int | 1-20 | How many leading words to check for "beginning" list |
+
+### Phase 11 Add sound effects for UI feedback (start, selection, stop) `[NOT STARTED]`
+- [ ] Add test button/buttons to make sure we can play sounds
+- [ ] Add toggle to mute interface sounds, that is using `mute_interface_sounds` config field in config file
+- [ ] Sounds in folder ./audio
+
+├── audio/                                          # Sound effect WAV files
+│   ├── mixkit-modern-technology-select-3124.wav    # SELECTION_START (start)
+│   ├── mixkit-old-camera-shutter-click-1137.wav    # SELECTION_END (end)
+│   └── mixkit-click-error-1110.wav                 # STOP_PLAYBACK (stop)
+
+### Phase 12 Implement capture modes `[NOT STARTED]`
+- [ ] Make a dropdown menu to select current capture mode
+- [ ] Add mode "Full Screen" triggered by selected `trigger_button` (L4, L5, R4, R5)
+- [ ] Add mode "Swipe Selection"
+- [ ] Add mode "Two-Tap Selection"
+- [ ] Add mode "Fixed Region"
+- [ ] Add mode "Hybrid" (Fixed Region + Two-Tap Selection)
+
+#### Full Screen Mode (default)
+- Press selected `trigger_button` (L4, L5, R4, R5) to trigger
+- Captures entire screen for OCR
+- UI Sound plays after button press was registered right before processing (selection end)
+- Pressing same selected `trigger_button` (L4, L5, R4, R5) during speech playback will stop and finish pipeline
+
+#### Swipe Selection Mode
+- Draw a line across the region for OCR (direction doesn't metter)
+- UI Sound plays on finger down (selection start)
+- UI Sound plays on finger up (selection end)
+- Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
+- Minimum selection size: 50x50 pixels, ignore smaller regions to avoid accident touches
+- Remember `last_selection` coordinates of a region in settings for `Fixed Region` and `Hybrid` modes
+
+#### Two-Tap Selection Mode
+- Tap two points on screen to define rectangle corners for OCR
+- UI Sound plays on first tap (selection start)
+- UI Sound plays on second tap (selection end)
+- 5-second timeout between taps, pipeline is canceled if exceeded - plays stop sound if exceeded
+- Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
+- Works regardless of tap order (coordinates are normalized)
+- Remember `last_selection` coordinates of a region in settings for `Fixed Region` and `Hybrid` modes
+
+#### Fixed Region Mode
+- Press selected `trigger_button` (L4, L5, R4, R5) to to capture pre-defined region
+- Region coordinates configured via text fields in plugin to enter coordinates manually. coordinates are stored in `fixed_region` variables in settings file.
+- There is plugin button to apply `last_selection` coordinates from swipe/two-tap mode last selection. It has some default values in settings file, if not set by user before.
+- Coordinates are validated and clamped to screen bounds (1280x800)
+- Useful for repeatedly reading same area (e.g., subtitles, dialog boxes)
+- Press `trigger_button` (L4, L5, R4, R5) during playback to stop
+- UI Sound plays after button press was registered right before processing (selection end)
+
+#### Hybrid Mode (Fixed Region + Two-Tap Selection)
+- Combines fixed region quick-access with flexible two-tap selection
+- Press selected `trigger_button` (L4, L5, R4, R5) to to capture pre-defined region
+- Tap anywhere starts two-tap selection (5-second timeout)
+- Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
+- Custom selections are saved to `last_selection_*` for later use
+- Best of both worlds: quick access to common area + ad-hoc selections
+- UI Sound play in same logic as in Fixed Region and Two-Tap Selection
+
+### Phase 13: UI Polish & Advanced Features `[NOT STARTED]`
+- [ ] Global overlay for displaying selected zones on screen as in `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin`
+- [ ] Text filtering (ignore specific words/patterns). `ignored_words` in settings file
 
 ---
 
