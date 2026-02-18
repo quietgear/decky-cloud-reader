@@ -35,20 +35,20 @@ Everything runs inside the standard Decky plugin process. Python backend (`main.
 
 ```
 Frontend (TypeScript/React)           Backend (Python)
-┌──────────────────────────┐         ┌───────────────────────────────┐
-│ Decky Panel UI           │   RPC   │ main.py (Plugin class)        │
-│  - Read Screen (primary) │◄───────►│  - Pipeline orchestration     │
-│  - Provider selection    │         │  - Provider routing (GCP/local)│
-│  - Settings / credentials│         │  - Screen capture (GStreamer)  │
-│  - Button trigger config │         │  - Dual worker lifecycle mgmt  │
-│  - Touchscreen config    │         │  - Audio playback (Popen)      │
-│  - Enabled toggle gates  │         │                               │
-│                          │         │  hidraw_monitor.py (thread)   │
+┌──────────────────────────┐         ┌─────────────────────────────────┐
+│ Decky Panel UI           │   RPC   │ main.py (Plugin class)          │
+│  - Read Screen (primary) │◄───────►│  - Pipeline orchestration       │
+│  - Provider selection    │         │  - Provider routing (GCP/local) │
+│  - Settings / credentials│         │  - Screen capture (GStreamer)   │
+│  - Button trigger config │         │  - Dual worker lifecycle mgmt   │
+│  - Touchscreen config    │         │  - Audio playback (Popen)       │
+│  - Enabled toggle gates  │         │                                 │
+│                          │         │  hidraw_monitor.py (thread)     │
 │ Global Overlay           │         │  touchscreen_monitor.py (thread)│
-│  - OCR text display      │         │                               │
-└──────────────────────────┘         │  gcp_worker.py (persistent)   │
-                                     │  local_worker.py (persistent)  │
-                                     └───────────────────────────────┘
+│  - OCR text display      │         │                                 │
+└──────────────────────────┘         │  gcp_worker.py (persistent)     │
+                                     │  local_worker.py (persistent)   │
+                                     └─────────────────────────────────┘
 ```
 
 ---
