@@ -984,78 +984,108 @@ class Plugin:
         decky.logger.info(f"{LOG} backend uninstalled")
 
     # =========================================================================
-    # Screen capture: _capture_screenshot_sync() (internal helper)
+    # Screen capture: _get_game_window_xid() + _capture_screenshot_sync()
     # =========================================================================
-    # This is a SYNCHRONOUS method that runs the GStreamer pipeline to capture
-    # a single screenshot from PipeWire. It must be run in a thread pool (not
-    # on the async event loop) because subprocess.run() blocks.
+    # Captures the game window directly via GStreamer's ximagesrc, targeting
+    # the game's Xwayland display (:1) by window XID. This captures ONLY the
+    # game content — no Steam overlay, no MangoHud, no cursor.
     #
-    # The GStreamer pipeline:
-    #   pipewiresrc  — reads frames from PipeWire (the Steam Deck's display server)
-    #   videoconvert — converts pixel formats (PipeWire may output various formats)
-    #   pngenc       — encodes the frame as PNG (snapshot=true = only last frame)
-    #   filesink     — writes the PNG to a temp file
+    # Gamescope (Steam Deck's compositor) runs two Xwayland instances:
+    #   :0 — Steam UI, overlay, steamwebhelper
+    #   :1 — Game windows
+    # The focused game window XID is published as the X atom
+    # GAMESCOPE_FOCUSED_WINDOW on the :0 root window.
     #
-    # We use num-buffers=5 instead of 1 because the first few frames from
-    # PipeWire can be blank or invalid. By capturing 5 frames and using
-    # snapshot=true on pngenc, we reliably get a valid screenshot.
-    # This pattern comes from the Decky-Translator reference plugin.
-    def _capture_screenshot_sync(self):
+    # Primary pipeline (ximagesrc — game only, no overlay):
+    #   ximagesrc    — captures from X11 display :1, specific window by XID
+    #   videoconvert — pixel format conversion
+    #   pngenc       — PNG encoding (snapshot=true = single frame)
+    #   filesink     — writes PNG to temp file
+    #
+    # Fallback pipeline (pipewiresrc — composited, includes overlay):
+    #   Used when xprop/ximagesrc fails (no game focused, tools missing, etc.)
+    #   Captures from PipeWire which gives the full composited Gamescope output.
+    def _get_game_window_xid(self):
         """
-        Capture a screenshot via GStreamer + PipeWire. Returns a dict:
+        Query Gamescope for the currently focused game window XID.
+
+        Reads the GAMESCOPE_FOCUSED_WINDOW X atom from the :0 root window
+        using xprop. Returns the XID as an int, or None if unavailable.
+
+        Example xprop output:
+          GAMESCOPE_FOCUSED_WINDOW(CARDINAL) = 6291466
+        """
+        xprop_path = shutil.which("xprop")
+        if not xprop_path:
+            decky.logger.warning(f"{LOG} xprop not found on PATH")
+            return None
+
+        try:
+            # Strip LD_LIBRARY_PATH/LD_PRELOAD to avoid PyInstaller contamination
+            # (Decky Loader bundles older libssl that can break system binaries).
+            clean_env = os.environ.copy()
+            clean_env.pop("LD_LIBRARY_PATH", None)
+            clean_env.pop("LD_PRELOAD", None)
+
+            result = subprocess.run(
+                [xprop_path, "-display", ":0", "-root", "GAMESCOPE_FOCUSED_WINDOW"],
+                env=clean_env,
+                timeout=2,
+                capture_output=True,
+            )
+
+            if result.returncode != 0:
+                decky.logger.warning(f"{LOG} xprop failed (code {result.returncode})")
+                return None
+
+            # Parse output like: "GAMESCOPE_FOCUSED_WINDOW(CARDINAL) = 6291466"
+            output = result.stdout.decode("utf-8", errors="replace").strip()
+            if "=" not in output:
+                decky.logger.warning(f"{LOG} unexpected xprop output: {output}")
+                return None
+
+            xid_str = output.split("=")[-1].strip()
+            xid = int(xid_str)
+            decky.logger.debug(f"{LOG} game window XID: {xid} (0x{xid:x})")
+            return xid
+
+        except (subprocess.TimeoutExpired, ValueError, OSError) as e:
+            decky.logger.warning(f"{LOG} failed to get game window XID: {e}")
+            return None
+
+    def _run_gst_capture(self, gst_path, cmd, env, capture_method):
+        """
+        Run a GStreamer capture pipeline and return the result.
+
+        Creates a temp file, appends it as filesink location, runs the
+        pipeline, reads the output, and cleans up. Returns:
           {success: bool, image_bytes: bytes|None, file_size: int, error: str|None}
         """
-        # Step 1: Find gst-launch-1.0 on the system PATH.
-        # On Steam Deck it's at /usr/bin/gst-launch-1.0 (pre-installed).
-        gst_path = shutil.which("gst-launch-1.0")
-        if not gst_path:
-            return {
-                "success": False,
-                "image_bytes": None,
-                "file_size": 0,
-                "error": "gst-launch-1.0 not found on PATH",
-            }
-
-        # Step 2: Create a secure temp file for the screenshot output.
-        # mkstemp returns (file_descriptor, path). We close the fd immediately
-        # since GStreamer will write to the path directly.
         fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="dcr_capture_")
         os.close(fd)
 
+        # Append the output location to the command.
+        full_cmd = cmd + [f"location={tmp_path}"]
+
         try:
-            # Step 3: Build the GStreamer pipeline command.
-            # -e  = send EOS (end-of-stream) on interrupt for clean shutdown
-            cmd = [
-                gst_path, "-e",
-                "pipewiresrc", "do-timestamp=true", "num-buffers=5",
-                "!", "videoconvert",
-                "!", "pngenc", "snapshot=true",
-                "!", "filesink", f"location={tmp_path}",
-            ]
+            decky.logger.info(
+                f"{LOG} capturing screenshot via {capture_method} to {tmp_path}"
+            )
+            decky.logger.debug(f"{LOG} capture command: {' '.join(full_cmd)}")
 
-            # Step 4: Set environment variables required for PipeWire access.
-            # XDG_RUNTIME_DIR tells PipeWire where its socket is.
-            # XDG_SESSION_TYPE tells it we're running under Wayland.
-            env = os.environ.copy()
-            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
-            env["XDG_SESSION_TYPE"] = "wayland"
-
-            decky.logger.info(f"{LOG} capturing screenshot to {tmp_path}")
-            decky.logger.debug(f"{LOG} capture command: {' '.join(cmd)}")
-
-            # Step 5: Run the GStreamer pipeline as a subprocess.
-            # capture_output=True captures stdout/stderr for error reporting.
             result = subprocess.run(
-                cmd,
+                full_cmd,
                 env=env,
                 timeout=CAPTURE_TIMEOUT,
                 capture_output=True,
             )
 
-            # Step 6: Check if the command succeeded (exit code 0).
             if result.returncode != 0:
                 stderr = result.stderr.decode("utf-8", errors="replace").strip()
-                decky.logger.error(f"{LOG} gst-launch failed (code {result.returncode}): {stderr}")
+                decky.logger.error(
+                    f"{LOG} gst-launch ({capture_method}) failed "
+                    f"(code {result.returncode}): {stderr}"
+                )
                 return {
                     "success": False,
                     "image_bytes": None,
@@ -1063,7 +1093,6 @@ class Plugin:
                     "error": f"GStreamer failed (code {result.returncode}): {stderr[:200]}",
                 }
 
-            # Step 7: Read and validate the output file.
             if not os.path.exists(tmp_path):
                 return {
                     "success": False,
@@ -1081,11 +1110,12 @@ class Plugin:
                     "error": "Screenshot file is empty (0 bytes)",
                 }
 
-            # Step 8: Read the PNG bytes into memory.
             with open(tmp_path, "rb") as f:
                 image_bytes = f.read()
 
-            decky.logger.info(f"{LOG} screenshot captured: {file_size} bytes")
+            decky.logger.info(
+                f"{LOG} screenshot captured via {capture_method}: {file_size} bytes"
+            )
             return {
                 "success": True,
                 "image_bytes": image_bytes,
@@ -1111,13 +1141,92 @@ class Plugin:
                 "error": str(e),
             }
         finally:
-            # Always clean up the temp file, even on error.
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
                     decky.logger.debug(f"{LOG} cleaned up temp file: {tmp_path}")
             except OSError as e:
                 decky.logger.warning(f"{LOG} failed to clean up {tmp_path}: {e}")
+
+    def _capture_screenshot_sync(self):
+        """
+        Capture a screenshot of the game window. Returns a dict:
+          {success: bool, image_bytes: bytes|None, file_size: int, error: str|None}
+
+        Primary method: ximagesrc targeting the game's Xwayland window on :1.
+        Fallback: pipewiresrc (composited output, may include Steam overlay).
+        Falls back automatically if ximagesrc fails (e.g. no game focused,
+        window XID belongs to Steam UI on :0 instead of a game on :1).
+        """
+        # Step 1: Find gst-launch-1.0 on the system PATH.
+        # On Steam Deck it's at /usr/bin/gst-launch-1.0 (pre-installed).
+        gst_path = shutil.which("gst-launch-1.0")
+        if not gst_path:
+            return {
+                "success": False,
+                "image_bytes": None,
+                "file_size": 0,
+                "error": "gst-launch-1.0 not found on PATH",
+            }
+
+        # Step 2: Try ximagesrc (game-only, no overlay) if we can get
+        # the game window XID from Gamescope.
+        game_xid = self._get_game_window_xid()
+
+        if game_xid is not None:
+            # PRIMARY: ximagesrc — captures game window directly from :1.
+            # display-name=:1   — game's Xwayland display (not :0 = Steam UI)
+            # xid=<id>          — specific game window (from GAMESCOPE_FOCUSED_WINDOW)
+            # show-pointer=false — exclude mouse cursor from capture
+            # use-damage=false  — capture full frame, not just changed regions
+            # num-buffers=1     — single frame, instant capture
+            cmd = [
+                gst_path, "-e",
+                "ximagesrc",
+                f"display-name=:1",
+                f"xid={game_xid}",
+                "show-pointer=false",
+                "use-damage=false",
+                "num-buffers=1",
+                "!", "videoconvert",
+                "!", "pngenc", "snapshot=true",
+                "!", "filesink",
+            ]
+            env = os.environ.copy()
+            env["DISPLAY"] = ":1"
+
+            capture_result = self._run_gst_capture(
+                gst_path, cmd, env, "ximagesrc"
+            )
+            if capture_result["success"]:
+                return capture_result
+
+            # ximagesrc failed — the XID may belong to Steam UI on :0
+            # (e.g. when on the Game Mode home screen, not inside a game).
+            decky.logger.warning(
+                f"{LOG} ximagesrc failed, falling back to pipewiresrc"
+            )
+
+        # FALLBACK: pipewiresrc — composited output (may include overlay).
+        # Used when: no game XID found, or ximagesrc failed (BadWindow, etc.).
+        if game_xid is None:
+            decky.logger.warning(
+                f"{LOG} no game window XID found, using pipewiresrc"
+            )
+        cmd = [
+            gst_path, "-e",
+            "pipewiresrc", "do-timestamp=true", "num-buffers=5",
+            "!", "videoconvert",
+            "!", "pngenc", "snapshot=true",
+            "!", "filesink",
+        ]
+        # PipeWire needs XDG_RUNTIME_DIR for its socket and
+        # XDG_SESSION_TYPE=wayland for Gamescope's composited output.
+        env = os.environ.copy()
+        env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+        env["XDG_SESSION_TYPE"] = "wayland"
+
+        return self._run_gst_capture(gst_path, cmd, env, "pipewiresrc")
 
     # =========================================================================
     # RPC: capture_screenshot()
