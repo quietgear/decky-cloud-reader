@@ -44,8 +44,8 @@ Frontend (TypeScript/React)           Backend (Python)
 │  - Capture mode config   │         │  - Audio playback (Popen)       │
 │  - Enabled toggle gates  │         │                                 │
 │                          │         │  hidraw_monitor.py (thread)     │
-│ Global Overlay           │         │  touchscreen_monitor.py (thread)│
-│  - OCR text display      │         │                                 │
+│ Global Overlay            │         │  touchscreen_monitor.py (thread)│
+│  [Phase 13 — planned]    │         │                                 │
 └──────────────────────────┘         │  gcp_worker.py (persistent)     │
                                      │  local_worker.py (persistent)   │
                                      └─────────────────────────────────┘
@@ -70,7 +70,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **7.5: Enabled Toggle** | Master switch stops workers + playback + pipeline; hidraw monitor stays running (cheap) |
 | **8: Local OCR/TTS** | `local_worker.py` with RapidOCR + Piper TTS, bundled Python 3.12, dual worker routing |
 | **8.5: Multiple Voices** | Lazy-load voice caching, 4 bundled English voices |
-| **8.6: On-Demand Voices** | No bundled voices; 16 curated voices (13 languages) downloaded from HuggingFace on demand to `DECKY_PLUGIN_SETTINGS_DIR/voices/` |
+| **8.6: On-Demand Voices** | No bundled voices; 16 curated voices (14 language variants) downloaded from HuggingFace on demand to `DECKY_PLUGIN_SETTINGS_DIR/voices/` |
 | **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform |
 | **10: Settings Defaults** | Added config fields for capture modes, regions, text filtering, and mute toggle |
 | **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, 3 test buttons, Dockerfile audio/ copy |
@@ -176,7 +176,7 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Capture modes | State machine in main.py | 5 modes; touchscreen auto-started/stopped per mode; PIL crop before OCR; during playback all touches = stop only |
 | Pipeline optimization | Combined `ocr_tts` action for same-provider | Saves one round-trip; mixed providers run sequentially |
 | Pipeline cancellation | `threading.Event` between steps | Simple; worker timeout bounded at 60s |
-| Voice distribution | On-demand HuggingFace download | 16 voices / 13 languages; persists in settings dir across updates; no zip bloat |
+| Voice distribution | On-demand HuggingFace download | 16 voices / 14 language variants; persists in settings dir across updates; no zip bloat |
 | Default provider | Local (offline) | Works out of the box; GCP requires service account |
 | Docker build | Layer caching enabled | Use `--no-cache` when requirements or model URLs change |
 
