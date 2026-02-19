@@ -616,10 +616,8 @@ function Content() {
   const [voiceIsSuccess, setVoiceIsSuccess] = useState(false);
 
   // --- Touchscreen state (Phase 9) ---
-  // Status of the touchscreen monitor (fetched on mount and after changes)
+  // Status of the touchscreen monitor (fetched on mount and after mode changes)
   const [touchscreenStatus, setTouchscreenStatus] = useState<TouchscreenStatus | null>(null);
-  // Ref for the touchscreen polling interval
-  const touchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // --- Interface sound state (Phase 11: Sound Effects) ---
   // Tracks which sound test button is currently playing (null = none)
@@ -915,40 +913,10 @@ function Content() {
     setTimeout(() => setVoiceMessage(null), 5000);
   };
 
-  // --- Touchscreen polling helpers (Phase 9) ---
-
-  // Start polling the touchscreen status (every 500ms when enabled)
-  const startTouchPoll = () => {
-    stopTouchPoll();
-    touchPollRef.current = setInterval(async () => {
-      const status = await getTouchscreenStatus();
-      setTouchscreenStatus(status);
-    }, 500);
-  };
-
-  // Stop the touchscreen polling interval
-  const stopTouchPoll = () => {
-    if (touchPollRef.current) {
-      clearInterval(touchPollRef.current);
-      touchPollRef.current = null;
-    }
-  };
-
-  // Phase 12: Start/stop touchscreen polling based on capture_mode (not
-  // the old touchscreen_enabled toggle). Only poll when the mode needs
-  // touch input AND the monitor is actually connected.
+  // Phase 12: Whether the current capture mode needs touchscreen input.
   const needsTouch = settings?.capture_mode === "swipe_selection"
     || settings?.capture_mode === "two_tap_selection"
     || settings?.capture_mode === "hybrid";
-
-  useEffect(() => {
-    if (needsTouch && touchscreenStatus?.initialized) {
-      startTouchPoll();
-    } else {
-      stopTouchPoll();
-    }
-    return () => stopTouchPoll();
-  }, [needsTouch, touchscreenStatus?.initialized]);
 
   // Cleanup: clear intervals and timeouts when the component unmounts
   // to prevent memory leaks and stale state updates.
@@ -956,7 +924,6 @@ function Content() {
     return () => {
       stopPlaybackPoll();
       stopPipelinePoll();
-      stopTouchPoll();
       if (volumeSaveTimeoutRef.current) {
         clearTimeout(volumeSaveTimeoutRef.current);
       }
