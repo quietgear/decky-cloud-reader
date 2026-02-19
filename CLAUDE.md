@@ -41,7 +41,7 @@ Frontend (TypeScript/React)           Backend (Python)
 │  - Provider selection    │         │  - Provider routing (GCP/local) │
 │  - Settings / credentials│         │  - Screen capture (GStreamer)   │
 │  - Button trigger config │         │  - Dual worker lifecycle mgmt   │
-│  - Touchscreen config    │         │  - Audio playback (Popen)       │
+│  - Capture mode config   │         │  - Audio playback (Popen)       │
 │  - Enabled toggle gates  │         │                                 │
 │                          │         │  hidraw_monitor.py (thread)     │
 │ Global Overlay           │         │  touchscreen_monitor.py (thread)│
@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–11)
+### Completed Phases (1–12)
 
 | Phase | Summary |
 |-------|---------|
@@ -71,91 +71,10 @@ Frontend (TypeScript/React)           Backend (Python)
 | **8: Local OCR/TTS** | `local_worker.py` with RapidOCR + Piper TTS, bundled Python 3.12, dual worker routing |
 | **8.5: Multiple Voices** | Lazy-load voice caching, 4 bundled English voices |
 | **8.6: On-Demand Voices** | No bundled voices; 16 curated voices (13 languages) downloaded from HuggingFace on demand to `DECKY_PLUGIN_SETTINGS_DIR/voices/` |
-| **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform. Infrastructure only (no pipeline integration) |
+| **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform |
 | **10: Settings Defaults** | Added config fields for capture modes, regions, text filtering, and mute toggle |
 | **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, 3 test buttons, Dockerfile audio/ copy |
-
-### Phase 10 Cleanup in Settings file, prepare new variables for future functions `[DONE]`
-- [ ] add following variables to already existing in settings file:
-
-#### Config Fields
-| Field | Type | Values | Description |
-|-------|------|--------|-------------|
-| `capture_mode` | string | full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid | Capture method |
-| `mute_interface_sounds` | bool | true/false | disable/enable playback of UI feedback sounds |
-| `fixed_region_x1` | int | 0-1280 | Fixed region left X coordinate |
-| `fixed_region_y1` | int | 0-800 | Fixed region top Y coordinate |
-| `fixed_region_x2` | int | 0-1280 | Fixed region right X coordinate |
-| `fixed_region_y2` | int | 0-800 | Fixed region bottom Y coordinate |
-| `last_selection_x1` | int | 0-1280 | Last selection left X (auto-saved) |
-| `last_selection_y1` | int | 0-800 | Last selection top Y (auto-saved) |
-| `last_selection_x2` | int | 0-1280 | Last selection right X (auto-saved) |
-| `last_selection_y2` | int | 0-800 | Last selection bottom Y (auto-saved) |
-| `ignored_words_always` | string | comma-separated | Words to remove anywhere in text |
-| `ignored_words_always_enabled` | bool | true/false | Enable/disable the "always ignore" list |
-| `ignored_words_beginning` | string | comma-separated | Words to remove from start of text |
-| `ignored_words_beginning_enabled` | bool | true/false | Enable/disable the "ignore at beginning" list |
-| `ignored_words_count` | int | 1-20 | How many leading words to check for "beginning" list |
-
-### Phase 11 Add sound effects for UI feedback (start, selection, stop) `[DONE]`
-- [x] Add test button/buttons to make sure we can play sounds
-- [x] Add toggle to mute interface sounds, that is using `mute_interface_sounds` config field in config file
-- [x] Sounds in folder ./audio
-
-├── audio/                                          # Sound effect WAV files
-│   ├── mixkit-modern-technology-select-3124.wav    # SELECTION_START (start)
-│   ├── mixkit-old-camera-shutter-click-1137.wav    # SELECTION_END (end)
-│   └── mixkit-click-error-1110.wav                 # STOP_PLAYBACK (stop)
-
-### Phase 12 Implement capture modes `[NOT STARTED]`
-- [ ] Make a dropdown menu to select current capture mode
-- [ ] Add mode "Full Screen" triggered by selected `trigger_button` (L4, L5, R4, R5)
-- [ ] Add mode "Swipe Selection"
-- [ ] Add mode "Two-Tap Selection"
-- [ ] Add mode "Fixed Region"
-- [ ] Add mode "Hybrid" (Fixed Region + Two-Tap Selection)
-
-#### Full Screen Mode (default)
-- Press selected `trigger_button` (L4, L5, R4, R5) to trigger
-- Captures entire screen for OCR
-- Touchscreen input is ignored in this mode — button only
-- UI Sound plays after button press was registered right before processing (selection end)
-- Pressing same selected `trigger_button` (L4, L5, R4, R5) during speech playback will stop and finish pipeline
-
-#### Swipe Selection Mode
-- Finger-down = corner 1, finger-up = corner 2; defines a bounding box for OCR (direction doesn't matter)
-- UI Sound plays on finger down (selection start)
-- UI Sound plays on finger up (selection end)
-- Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
-- Minimum selection size: 50x50 pixels, ignore smaller regions to avoid accidental touches
-- Remember `last_selection` coordinates of a region in settings for `Fixed Region` and `Hybrid` modes
-
-#### Two-Tap Selection Mode
-- Tap two points on screen to define rectangle corners for OCR
-- UI Sound plays on first tap (selection start)
-- UI Sound plays on second tap (selection end)
-- 5-second timeout between taps, pipeline is canceled if exceeded - plays stop sound if exceeded
-- Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
-- Works regardless of tap order (coordinates are normalized)
-- Remember `last_selection` coordinates of a region in settings for `Fixed Region` and `Hybrid` modes
-
-#### Fixed Region Mode
-- Press selected `trigger_button` (L4, L5, R4, R5) to capture pre-defined region
-- Region coordinates configured via text fields in plugin to enter coordinates manually. coordinates are stored in `fixed_region` variables in settings file.
-- There is plugin button to apply `last_selection` coordinates from swipe/two-tap mode last selection. It has some default values in settings file, if not set by user before.
-- Coordinates are validated and clamped to screen bounds (1280x800)
-- Useful for repeatedly reading same area (e.g., subtitles, dialog boxes)
-- Press `trigger_button` (L4, L5, R4, R5) during playback to stop
-- UI Sound plays after button press was registered right before processing (selection end)
-
-#### Hybrid Mode (Fixed Region + Two-Tap Selection)
-- Combines fixed region quick-access with flexible two-tap selection
-- Press selected `trigger_button` (L4, L5, R4, R5) to capture pre-defined region
-- Tap anywhere starts two-tap selection (5-second timeout)
-- Tap anywhere during playback to stop, also accept `trigger_button` (L4, L5, R4, R5) press during playback to stop
-- Custom selections are saved to `last_selection_*` for later use
-- Best of both worlds: quick access to common area + ad-hoc selections
-- UI Sound play in same logic as in Fixed Region and Two-Tap Selection
+| **12: Capture Modes** | 5 capture modes (full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid), touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, mode-aware UI |
 
 ### Phase 13: UI Polish & Advanced Features `[NOT STARTED]`
 - [ ] Global overlay for displaying selected zones on screen as in `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin`
@@ -216,7 +135,6 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | `volume` | `100` | TTS volume 0-100 |
 | `trigger_button` | `"L4"` | Hidraw button: disabled/L4/R4/L5/R5 |
 | `hold_time_ms` | `500` | Button hold threshold |
-| `touchscreen_enabled` | `false` | Evdev touchscreen tap detection (experimental) |
 | `capture_mode` | `"full_screen"` | Capture method: full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid |
 | `mute_interface_sounds` | `false` | Disable/enable playback of UI feedback sounds |
 | `fixed_region_x1` | `0` | Fixed region left X coordinate |
@@ -254,7 +172,8 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Screen capture | GStreamer + PipeWire | Native to Steam Deck |
 | Audio playback | ffplay (primary) / mpv / pw-play | Auto-discovered; needs `XDG_RUNTIME_DIR=/run/user/1000` (Decky runs as root); reaper thread prevents zombies |
 | Button input | Hidraw direct reading | Background operation, no UI needed |
-| Touchscreen | Raw evdev + `struct.unpack` | Stdlib only; ioctl axis calibration; 90° CW coordinate transform |
+| Touchscreen | Raw evdev + `struct.unpack` | Stdlib only; ioctl axis calibration; 90° CW coordinate transform; auto-managed by capture mode |
+| Capture modes | State machine in main.py | 5 modes; touchscreen auto-started/stopped per mode; PIL crop before OCR; during playback all touches = stop only |
 | Pipeline optimization | Combined `ocr_tts` action for same-provider | Saves one round-trip; mixed providers run sequentially |
 | Pipeline cancellation | `threading.Event` between steps | Simple; worker timeout bounded at 60s |
 | Voice distribution | On-demand HuggingFace download | 16 voices / 13 languages; persists in settings dir across updates; no zip bloat |
@@ -270,7 +189,7 @@ decky-cloud-reader/
 ├── src/index.tsx              # All UI (sections, file browser, provider selection)
 ├── main.py                    # Backend (lifecycle, RPC, pipeline, dual worker mgmt)
 ├── hidraw_monitor.py          # Button hold detection (hidraw, background thread)
-├── touchscreen_monitor.py     # Tap detection (evdev, background thread)
+├── touchscreen_monitor.py     # Touch detection (evdev, background thread, down/up/tap callbacks)
 ├── gcp_worker.py              # GCP worker (persistent/one-shot, system Python 3.13)
 ├── local_worker.py            # Local worker (persistent/one-shot, bundled Python 3.12)
 ├── requirements.txt           # GCP deps (Python 3.13)

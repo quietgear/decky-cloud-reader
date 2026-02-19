@@ -126,20 +126,31 @@ class TouchscreenMonitor:
     to run async code, use asyncio.run_coroutine_threadsafe() in the callback.
     """
 
-    def __init__(self, on_touch=None, logger=None, log_prefix="[DCR]"):
+    def __init__(self, on_touch=None, on_touch_down=None, on_touch_up=None,
+                 logger=None, log_prefix="[DCR]"):
         """
         Initialize the touchscreen monitor.
 
         Args:
             on_touch: Callable(x, y) invoked from the monitor thread when a
-                      tap is detected. x/y are in logical screen coordinates
-                      (0-1280 horizontal, 0-800 vertical).
+                      short tap is detected (duration < 0.5s). x/y are in
+                      logical screen coordinates (0-1280 horizontal, 0-800 vertical).
+                      Legacy callback — kept for backward compatibility.
+            on_touch_down: Callable(x, y) invoked when a finger first contacts
+                          the screen. Fired at SYN_REPORT boundary to ensure
+                          coordinates are fresh. x/y are logical coordinates.
+            on_touch_up: Callable(end_x, end_y, start_x, start_y, duration)
+                        invoked every time a finger lifts — regardless of
+                        duration. Provides both start and end coordinates plus
+                        the touch duration in seconds.
             logger: Logger object with .info(), .debug(), .warning(), .error()
                     methods. If None, logging is silently skipped.
             log_prefix: String prefix for log messages (e.g., "[DCR]").
         """
-        # Callback
-        self._on_touch = on_touch
+        # Callbacks
+        self._on_touch = on_touch              # Legacy: short taps only
+        self._on_touch_down = on_touch_down    # Phase 12: finger contact
+        self._on_touch_up = on_touch_up        # Phase 12: finger lift (always)
 
         # Logging
         self._logger = logger
@@ -166,6 +177,13 @@ class TouchscreenMonitor:
         self._touch_x = 0             # Current physical X of slot 0
         self._touch_y = 0             # Current physical Y of slot 0
         self._touch_start_time = 0.0  # monotonic timestamp when touch started
+
+        # Phase 12: Deferred touch-down state. ABS_MT_TRACKING_ID may arrive
+        # before position events in the same SYN_REPORT frame, so we defer
+        # firing on_touch_down until SYN_REPORT ensures coordinates are fresh.
+        self._touch_down_pending = False  # True = fire on_touch_down at next SYN_REPORT
+        self._touch_start_x = 0          # Physical X at finger contact
+        self._touch_start_y = 0          # Physical Y at finger contact
 
         # Last detected tap in logical coordinates (protected by _lock)
         self._last_touch_logical = None  # dict {x, y} or None
@@ -531,11 +549,21 @@ class TouchscreenMonitor:
 
         We only track slot 0 (first finger) for Phase 9 simplicity.
 
+        Phase 12 enhancement: on_touch_down is deferred until the SYN_REPORT
+        event so that position coordinates are guaranteed to be fresh.
+
         Args:
             ev_type: Event type (EV_ABS, EV_SYN, etc.)
             ev_code: Event code (ABS_MT_POSITION_X, etc.)
             ev_value: Event value (coordinate value, tracking ID, etc.)
         """
+        # Phase 12: Handle SYN_REPORT — end of an event frame. This is where
+        # we fire the deferred on_touch_down callback, after all position
+        # events in the same frame have been processed.
+        if ev_type == EV_SYN and ev_code == 0:
+            self._handle_syn_report()
+            return
+
         if ev_type != EV_ABS:
             return  # We only care about absolute axis events
 
@@ -550,15 +578,19 @@ class TouchscreenMonitor:
 
         if ev_code == ABS_MT_TRACKING_ID:
             if ev_value >= 0:
-                # Touch down — new finger contact on slot 0
+                # Touch down — new finger contact on slot 0.
+                # Don't fire on_touch_down yet — wait for SYN_REPORT so
+                # position coordinates in the same frame are captured first.
                 self._touch_active = True
                 self._touch_start_time = time.monotonic()
+                self._touch_down_pending = True
                 self._log_debug(f"touch: finger down (tracking_id={ev_value})")
             else:
                 # Touch up — finger lifted from slot 0 (value == -1)
                 if self._touch_active:
                     self._handle_touch_up()
                 self._touch_active = False
+                self._touch_down_pending = False
 
         elif ev_code == ABS_MT_POSITION_X:
             # Update current X coordinate (only meaningful if touch is active)
@@ -568,42 +600,89 @@ class TouchscreenMonitor:
             # Update current Y coordinate
             self._touch_y = ev_value
 
+    def _handle_syn_report(self):
+        """
+        Called at the SYN_REPORT boundary (end of an event frame).
+
+        If a touch-down was pending (ABS_MT_TRACKING_ID >= 0 arrived in this
+        frame), we now have fresh position coordinates, so it's safe to fire
+        the on_touch_down callback and record the start position.
+        """
+        if self._touch_down_pending and self._touch_active:
+            self._touch_down_pending = False
+            # Record starting position in physical coordinates
+            self._touch_start_x = self._touch_x
+            self._touch_start_y = self._touch_y
+
+            # Fire on_touch_down callback with logical coordinates
+            if self._on_touch_down:
+                logical_x, logical_y = self._physical_to_logical(
+                    self._touch_start_x, self._touch_start_y
+                )
+                self._log_debug(f"touch: on_touch_down ({logical_x}, {logical_y})")
+                try:
+                    self._on_touch_down(logical_x, logical_y)
+                except Exception as e:
+                    self._log_error(f"touch: on_touch_down callback error: {e}")
+
     def _handle_touch_up(self):
         """
-        Called when a finger lifts from slot 0. Evaluates whether this was
-        a quick tap (duration < tap_timeout) and fires the callback if so.
+        Called when a finger lifts from slot 0.
+
+        Phase 12 enhancement: ALWAYS fires on_touch_up with start/end
+        coordinates and duration — no duration filter. Then fires the legacy
+        on_touch callback only for short taps (duration < tap_timeout, with
+        cooldown), preserving backward compatibility.
         """
         now = time.monotonic()
+        duration = now - self._touch_start_time
 
-        # Check cooldown — prevents rapid re-triggering
+        # Compute start position in logical coordinates (recorded at touch-down)
+        start_x, start_y = self._physical_to_logical(
+            self._touch_start_x, self._touch_start_y
+        )
+        # Compute end position in logical coordinates (current finger position)
+        end_x, end_y = self._physical_to_logical(self._touch_x, self._touch_y)
+
+        self._log_info(
+            f"touch: finger up — start=({start_x},{start_y}) end=({end_x},{end_y}) "
+            f"held={duration:.2f}s"
+        )
+
+        # Phase 12: ALWAYS fire on_touch_up — no duration or cooldown filter.
+        # This provides raw touch-up data for swipe detection, two-tap mode, etc.
+        if self._on_touch_up:
+            try:
+                self._on_touch_up(end_x, end_y, start_x, start_y, duration)
+            except Exception as e:
+                self._log_error(f"touch: on_touch_up callback error: {e}")
+
+        # Legacy on_touch callback: only fires for short taps with cooldown.
+        # This preserves the Phase 9 behavior for backward compatibility and
+        # is used by two-tap and hybrid capture modes.
         if now < self._cooldown_until:
             self._log_debug("touch: tap ignored (cooldown)")
             return
 
-        # Check tap duration — long touches are not taps
-        duration = now - self._touch_start_time
         if duration > self._tap_timeout:
-            self._log_debug(f"touch: touch ignored (held {duration:.2f}s > {self._tap_timeout}s)")
+            self._log_debug(f"touch: not a tap (held {duration:.2f}s > {self._tap_timeout}s)")
             return
 
-        # Transform physical coordinates to logical screen coordinates
-        logical_x, logical_y = self._physical_to_logical(self._touch_x, self._touch_y)
-
-        # Store the last touch coordinates (thread-safe)
+        # Store the last tap coordinates (thread-safe)
         with self._lock:
-            self._last_touch_logical = {"x": logical_x, "y": logical_y}
+            self._last_touch_logical = {"x": end_x, "y": end_y}
 
-        # Set cooldown
+        # Set cooldown to prevent rapid re-triggering
         self._cooldown_until = now + self._cooldown_duration
 
         self._log_info(
-            f"touch: tap detected at ({logical_x}, {logical_y}) "
+            f"touch: tap detected at ({end_x}, {end_y}) "
             f"[physical ({self._touch_x}, {self._touch_y}), held {duration:.2f}s]"
         )
 
-        # Fire callback
+        # Fire legacy tap callback
         if self._on_touch:
             try:
-                self._on_touch(logical_x, logical_y)
+                self._on_touch(end_x, end_y)
             except Exception as e:
-                self._log_error(f"touch: callback error: {e}")
+                self._log_error(f"touch: on_touch callback error: {e}")

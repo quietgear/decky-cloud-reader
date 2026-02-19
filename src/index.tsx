@@ -258,12 +258,16 @@ const getAvailableVoices = callable<[], VoiceRegistry>("get_available_voices");
 const downloadVoice = callable<[string], VoiceActionResult>("download_voice");
 const deleteVoice = callable<[string], VoiceActionResult>("delete_voice");
 
-// Phase 9: Touchscreen monitor status and last touch coordinates
+// Phase 9: Touchscreen monitor status
 const getTouchscreenStatus = callable<[], TouchscreenStatus>("get_touchscreen_status");
-const getLastTouch = callable<[], { x: number; y: number } | null>("get_last_touch");
 
 // Phase 11: Interface sound effects — fire-and-forget UI feedback sounds
 const playInterfaceSound = callable<[string], {success: boolean; error?: string}>("play_interface_sound");
+
+// Phase 12: Copy last_selection coordinates to fixed_region coordinates
+const applyLastSelectionToFixedRegion = callable<[], {success: boolean; message: string}>(
+  "apply_last_selection_to_fixed_region"
+);
 
 
 // =============================================================================
@@ -342,6 +346,15 @@ const TRIGGER_BUTTON_OPTIONS = [
   { data: "R4",       label: "R4 (Back Right Upper)" },
   { data: "L5",       label: "L5 (Back Left Lower)" },
   { data: "R5",       label: "R5 (Back Right Lower)" },
+];
+
+// Phase 12: Capture mode options for the dropdown selector
+const CAPTURE_MODE_OPTIONS = [
+  { data: "full_screen",        label: "Full Screen" },
+  { data: "swipe_selection",    label: "Swipe Selection" },
+  { data: "two_tap_selection",  label: "Two-Tap Selection" },
+  { data: "fixed_region",       label: "Fixed Region" },
+  { data: "hybrid",             label: "Hybrid (Fixed + Two-Tap)" },
 ];
 
 const HOLD_TIME_OPTIONS = [
@@ -921,18 +934,21 @@ function Content() {
     }
   };
 
-  // Start/stop touchscreen polling based on the touchscreen_enabled setting
-  // AND whether the monitor is actually connected. Only poll when both are
-  // true to avoid spamming the backend with status calls when the device
-  // isn't available.
+  // Phase 12: Start/stop touchscreen polling based on capture_mode (not
+  // the old touchscreen_enabled toggle). Only poll when the mode needs
+  // touch input AND the monitor is actually connected.
+  const needsTouch = settings?.capture_mode === "swipe_selection"
+    || settings?.capture_mode === "two_tap_selection"
+    || settings?.capture_mode === "hybrid";
+
   useEffect(() => {
-    if (settings?.touchscreen_enabled && touchscreenStatus?.initialized) {
+    if (needsTouch && touchscreenStatus?.initialized) {
       startTouchPoll();
     } else {
       stopTouchPoll();
     }
     return () => stopTouchPoll();
-  }, [settings?.touchscreen_enabled, touchscreenStatus?.initialized]);
+  }, [needsTouch, touchscreenStatus?.initialized]);
 
   // Cleanup: clear intervals and timeouts when the component unmounts
   // to prevent memory leaks and stale state updates.
@@ -1155,104 +1171,171 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      {/* ---- Touchscreen Section (Phase 9) ---- */}
-      {/* Experimental touchscreen input — reads tap coordinates from the Steam
-          Deck's capacitive touchscreen. Currently just displays coordinates for
-          testing; future phases will add region selection and tap-to-read. */}
-      <PanelSection title="Touchscreen">
-        {/* Enable/disable toggle */}
+      {/* ---- Capture Mode Section (Phase 12) ---- */}
+      {/* Configures how the screen region is selected for OCR. Modes range from
+          full-screen (button only) to interactive touchscreen selection. The
+          touchscreen monitor is auto-managed based on the selected mode. */}
+      <PanelSection title="Capture Mode">
+        {/* Mode selection dropdown */}
         <PanelSectionRow>
-          <ToggleField
-            label="Touch Input"
-            description="Read tap coordinates from touchscreen"
-            checked={settings.touchscreen_enabled}
-            onChange={async (value) => {
-              await saveSetting("touchscreen_enabled", value);
+          <DropdownItem
+            label="Capture Mode"
+            description="How the OCR region is selected"
+            menuLabel="Select Capture Mode"
+            rgOptions={CAPTURE_MODE_OPTIONS.map((o) => ({
+              data: o.data,
+              label: o.label,
+            }))}
+            selectedOption={
+              CAPTURE_MODE_OPTIONS.find((o) => o.data === settings.capture_mode)?.data
+              ?? CAPTURE_MODE_OPTIONS[0].data
+            }
+            onChange={async (option) => {
+              await saveSetting("capture_mode", option.data);
               if (settings) {
-                setSettings({ ...settings, touchscreen_enabled: value });
+                setSettings({ ...settings, capture_mode: option.data as string });
               }
-              // Fetch updated status after toggling
-              if (value) {
-                // Small delay for the monitor to initialize
-                setTimeout(async () => {
-                  const status = await getTouchscreenStatus();
-                  setTouchscreenStatus(status);
-                }, 500);
-              } else {
-                setTouchscreenStatus(null);
-              }
+              // Fetch touchscreen status after mode change (auto-managed)
+              setTimeout(async () => {
+                const status = await getTouchscreenStatus();
+                setTouchscreenStatus(status);
+              }, 500);
             }}
           />
         </PanelSectionRow>
 
-        {/* Status indicator — shown when touchscreen is enabled */}
-        {settings.touchscreen_enabled && touchscreenStatus && (
+        {/* Mode description — explains how the selected mode works */}
+        <PanelSectionRow>
+          <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
+            {settings.capture_mode === "full_screen"
+              ? `Press ${settings.trigger_button !== "disabled" ? settings.trigger_button : "trigger button"} to capture entire screen`
+              : settings.capture_mode === "swipe_selection"
+              ? "Swipe on screen to select a region for OCR"
+              : settings.capture_mode === "two_tap_selection"
+              ? "Tap two corners to define a rectangle for OCR"
+              : settings.capture_mode === "fixed_region"
+              ? `Press ${settings.trigger_button !== "disabled" ? settings.trigger_button : "trigger button"} to capture the configured region`
+              : settings.capture_mode === "hybrid"
+              ? `Press ${settings.trigger_button !== "disabled" ? settings.trigger_button : "trigger button"} for fixed region, or tap for two-tap selection`
+              : ""
+            }
+          </div>
+        </PanelSectionRow>
+
+        {/* Fixed region configuration — shown for fixed_region and hybrid modes */}
+        {(settings.capture_mode === "fixed_region" || settings.capture_mode === "hybrid") && (
           <>
+            {/* Current fixed region coordinates display */}
             <PanelSectionRow>
-              <Field label="Status">
-                <div style={{
-                  color: touchscreenStatus.initialized ? "#2ecc71" : "#e74c3c",
-                  fontWeight: "bold",
-                  fontSize: "13px",
-                }}>
-                  {touchscreenStatus.initialized ? "Connected" : "Not connected"}
+              <Field label="Fixed Region">
+                <div style={{ color: "#67b7dc", fontSize: "13px" }}>
+                  ({settings.fixed_region_x1}, {settings.fixed_region_y1}) - ({settings.fixed_region_x2}, {settings.fixed_region_y2})
                 </div>
               </Field>
             </PanelSectionRow>
 
-            {/* Device path — shown when connected */}
-            {touchscreenStatus.initialized && touchscreenStatus.device_path && (
-              <PanelSectionRow>
-                <Field label="Device">
-                  <div style={{ color: "#b8bcbf", fontSize: "12px" }}>
-                    {touchscreenStatus.device_path}
-                  </div>
-                </Field>
-              </PanelSectionRow>
-            )}
+            {/* X1 slider */}
+            <PanelSectionRow>
+              <SliderField
+                label="Left X"
+                value={settings.fixed_region_x1}
+                min={0}
+                max={1280}
+                step={10}
+                onChange={(value: number) => {
+                  if (settings) setSettings({ ...settings, fixed_region_x1: value });
+                  saveSetting("fixed_region_x1", value);
+                }}
+              />
+            </PanelSectionRow>
 
-            {/* Last touch coordinates — shown when connected */}
-            {touchscreenStatus.initialized && (
-              <PanelSectionRow>
-                <Field label="Last Touch">
-                  <div style={{ color: "#67b7dc", fontSize: "13px" }}>
-                    {touchscreenStatus.last_touch
-                      ? `(${touchscreenStatus.last_touch.x}, ${touchscreenStatus.last_touch.y})`
-                      : "Tap the screen to test"
-                    }
-                  </div>
-                </Field>
-              </PanelSectionRow>
-            )}
+            {/* Y1 slider */}
+            <PanelSectionRow>
+              <SliderField
+                label="Top Y"
+                value={settings.fixed_region_y1}
+                min={0}
+                max={800}
+                step={10}
+                onChange={(value: number) => {
+                  if (settings) setSettings({ ...settings, fixed_region_y1: value });
+                  saveSetting("fixed_region_y1", value);
+                }}
+              />
+            </PanelSectionRow>
 
-            {/* Physical dimensions info — shown when connected */}
-            {touchscreenStatus.initialized && touchscreenStatus.physical_max_x > 0 && (
-              <PanelSectionRow>
-                <div style={{
-                  color: "#b8bcbf",
-                  fontSize: "11px",
-                  padding: "4px 0",
-                }}>
-                  Physical: {touchscreenStatus.physical_max_x} x {touchscreenStatus.physical_max_y} → Logical: 1280 x 800
+            {/* X2 slider */}
+            <PanelSectionRow>
+              <SliderField
+                label="Right X"
+                value={settings.fixed_region_x2}
+                min={0}
+                max={1280}
+                step={10}
+                onChange={(value: number) => {
+                  if (settings) setSettings({ ...settings, fixed_region_x2: value });
+                  saveSetting("fixed_region_x2", value);
+                }}
+              />
+            </PanelSectionRow>
+
+            {/* Y2 slider */}
+            <PanelSectionRow>
+              <SliderField
+                label="Bottom Y"
+                value={settings.fixed_region_y2}
+                min={0}
+                max={800}
+                step={10}
+                onChange={(value: number) => {
+                  if (settings) setSettings({ ...settings, fixed_region_y2: value });
+                  saveSetting("fixed_region_y2", value);
+                }}
+              />
+            </PanelSectionRow>
+
+            {/* Apply Last Selection button */}
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                onClick={async () => {
+                  const result = await applyLastSelectionToFixedRegion();
+                  if (result.success) {
+                    // Refresh settings to show updated fixed region
+                    const updated = await getSettings();
+                    setSettings(updated);
+                  }
+                }}
+              >
+                Apply Last Selection
+              </ButtonItem>
+            </PanelSectionRow>
+
+            {/* Last selection coordinates reference */}
+            <PanelSectionRow>
+              <Field label="Last Selection">
+                <div style={{ color: "#b8bcbf", fontSize: "12px" }}>
+                  ({settings.last_selection_x1}, {settings.last_selection_y1}) - ({settings.last_selection_x2}, {settings.last_selection_y2})
                 </div>
-              </PanelSectionRow>
-            )}
+              </Field>
+            </PanelSectionRow>
           </>
         )}
 
-        {/* Hint text */}
-        <PanelSectionRow>
-          <div style={{
-            color: "#b8bcbf",
-            fontSize: "12px",
-            padding: "4px 0",
-          }}>
-            {settings.touchscreen_enabled
-              ? "Tap coordinates will appear above. Used for future region selection."
-              : "Enable to read touchscreen tap positions (experimental)"
-            }
-          </div>
-        </PanelSectionRow>
+        {/* Touchscreen status — shown for modes that need touch input */}
+        {needsTouch && touchscreenStatus && (
+          <PanelSectionRow>
+            <Field label="Touchscreen">
+              <div style={{
+                color: touchscreenStatus.initialized ? "#2ecc71" : "#e74c3c",
+                fontWeight: "bold",
+                fontSize: "13px",
+              }}>
+                {touchscreenStatus.initialized ? "Connected" : "Not connected"}
+              </div>
+            </Field>
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       {/* ---- Provider Section (Phase 8) ---- */}

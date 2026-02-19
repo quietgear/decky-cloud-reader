@@ -122,24 +122,69 @@ def output_error(message):
 
 
 # ---------------------------------------------------------------------------
+# Image cropping helper (Phase 12 capture modes)
+# ---------------------------------------------------------------------------
+
+def _crop_image(img, crop_region):
+    """
+    Crop a PIL Image to the specified bounding box.
+
+    Coordinates are clamped to image bounds and normalized (min/max swap).
+    Returns the original image if the crop region is too small (< 10px in
+    either dimension) to avoid accidental touches producing garbage OCR.
+
+    Args:
+        img: PIL Image object.
+        crop_region: Dict with keys "x1", "y1", "x2", "y2" (pixel coordinates).
+
+    Returns:
+        Cropped PIL Image, or the original if the region is too small.
+    """
+    w, h = img.size
+    x1 = max(0, min(int(crop_region.get("x1", 0)), w))
+    y1 = max(0, min(int(crop_region.get("y1", 0)), h))
+    x2 = max(0, min(int(crop_region.get("x2", w)), w))
+    y2 = max(0, min(int(crop_region.get("y2", h)), h))
+
+    # Normalize: ensure x1 < x2 and y1 < y2
+    if x1 > x2:
+        x1, x2 = x2, x1
+    if y1 > y2:
+        y1, y2 = y2, y1
+
+    # Reject tiny regions (< 10px) — likely accidental
+    if (x2 - x1) < 10 or (y2 - y1) < 10:
+        log_info(f"Crop region too small ({x2 - x1}x{y2 - y1}), using full image")
+        return img
+
+    log_info(f"Cropping image to ({x1},{y1})-({x2},{y2}) = {x2 - x1}x{y2 - y1}")
+    return img.crop((x1, y1, x2, y2))
+
+
+# ---------------------------------------------------------------------------
 # OCR action — text detection using RapidOCR (offline)
 # ---------------------------------------------------------------------------
 
-def do_ocr(image_path, ocr_engine=None):
+def do_ocr(image_path, ocr_engine=None, crop_region=None):
     """
     Perform OCR on an image file using RapidOCR (offline, local inference).
 
     Steps:
       1. Read the image file from disk
-      2. Initialize the RapidOCR engine (skip if pre-initialized in serve mode)
-      3. Run OCR on the image
-      4. Sort text regions top-to-bottom, left-to-right
-      5. Concatenate into a single text string
+      2. Crop to region if specified (Phase 12)
+      3. Initialize the RapidOCR engine (skip if pre-initialized in serve mode)
+      4. Run OCR on the image
+      5. Sort text regions top-to-bottom, left-to-right
+      6. Concatenate into a single text string
 
     Args:
         image_path: Absolute path to the screenshot PNG file.
         ocr_engine: Optional pre-initialized RapidOCR engine. When provided
                     (in serve mode), skips engine creation for speed.
+        crop_region: Optional dict {"x1", "y1", "x2", "y2"} defining the
+                    bounding box to crop before OCR. Coordinates are clamped
+                    to image bounds and normalized (min/max swap). If None
+                    or absent, the full image is used.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -159,6 +204,10 @@ def do_ocr(image_path, ocr_engine=None):
     except Exception as e:
         log_error(f"Failed to load image: {e}")
         output_error(f"Failed to load image: {e}")
+
+    # Step 1b: Crop to region if specified (Phase 12 capture modes)
+    if crop_region:
+        img = _crop_image(img, crop_region)
 
     # Step 2: Initialize OCR engine if not pre-initialized
     if ocr_engine is None:
@@ -307,12 +356,13 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, spea
 # ---------------------------------------------------------------------------
 
 def do_ocr_tts(image_path, output_audio_path, speech_rate,
-               ocr_engine=None, voice_id=None, voice_cache=None, speaker_id=None):
+               ocr_engine=None, voice_id=None, voice_cache=None, speaker_id=None,
+               crop_region=None):
     """
     Perform OCR and TTS in a single invocation (same as GCP's combined action).
 
     Steps:
-      1. Read image and run OCR
+      1. Read image, crop if region specified (Phase 12), and run OCR
       2. If text found, synthesize speech
       3. Return combined result
 
@@ -327,6 +377,8 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
                      (CLI mode), voice is loaded fresh and not cached.
         speaker_id: Integer speaker index for multi-speaker voices (e.g., 1).
                     When None, Piper defaults to speaker 0 for multi-speaker voices.
+        crop_region: Optional dict {"x1", "y1", "x2", "y2"} defining the
+                    bounding box to crop before OCR. If None, full image is used.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -346,6 +398,10 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
     except Exception as e:
         log_error(f"Failed to load image: {e}")
         output_error(f"Failed to load image: {e}")
+
+    # Crop to region if specified (Phase 12 capture modes)
+    if crop_region:
+        img = _crop_image(img, crop_region)
 
     # ---- Step 2: Initialize OCR engine if needed ----
     if ocr_engine is None:
@@ -651,7 +707,8 @@ def serve():
         # Dispatch to the appropriate action handler
         try:
             if action == "ocr":
-                do_ocr(cmd.get("image_path", ""), ocr_engine=ocr_engine)
+                do_ocr(cmd.get("image_path", ""), ocr_engine=ocr_engine,
+                       crop_region=cmd.get("crop_region"))
 
             elif action == "tts":
                 do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
@@ -666,7 +723,8 @@ def serve():
                            ocr_engine=ocr_engine,
                            voice_id=cmd.get("voice_id"),
                            voice_cache=voice_cache,
-                           speaker_id=cmd.get("speaker_id"))
+                           speaker_id=cmd.get("speaker_id"),
+                           crop_region=cmd.get("crop_region"))
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)

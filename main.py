@@ -384,6 +384,15 @@ class Plugin:
         self._pipeline_cancel = threading.Event()  # Thread-safe cancellation flag
         self._pipeline_running = False             # Prevents concurrent pipelines
 
+        # Phase 12: Capture mode state machine. All capture state is accessed
+        # only from the event loop thread (via run_coroutine_threadsafe and
+        # call_later) — no lock needed.
+        self._capture_state = "idle"              # "idle" | "waiting_second_tap"
+        self._first_tap_x = 0                     # First tap X for two-tap mode
+        self._first_tap_y = 0                     # First tap Y for two-tap mode
+        self._two_tap_timer = None                # asyncio TimerHandle for 5s timeout
+        self._touch_started_during_playback = False  # Prevents post-stop capture
+
         # Persistent GCP worker subprocess state.
         # Instead of spawning a new subprocess for every OCR/TTS call (paying
         # ~1.7s of Python startup + imports + client init each time), we keep
@@ -582,28 +591,15 @@ class Plugin:
             decky.logger.info(f"{LOG} button trigger disabled by settings")
 
         # -----------------------------------------------------------------
-        # Start touchscreen monitor (Phase 9)
+        # Start touchscreen monitor (Phase 12: auto-managed by capture mode)
         # -----------------------------------------------------------------
-        # The touchscreen monitor reads input events from /dev/input/eventN
-        # to detect taps. Currently just logs coordinates — Phase 12 will
-        # add region selection and tap-to-read functionality.
-        # Experimental feature: disabled by default, users opt in via settings.
+        # The touchscreen monitor is automatically started/stopped based on
+        # the capture_mode setting. Modes that need touch input (swipe,
+        # two_tap, hybrid) auto-start it; others (full_screen, fixed_region)
+        # leave it stopped. No manual toggle needed.
         self._touchscreen_monitor = None
-        touchscreen_enabled = self.settings.get("touchscreen_enabled", DEFAULT_SETTINGS["touchscreen_enabled"])
-
-        if touchscreen_enabled:
-            self._touchscreen_monitor = TouchscreenMonitor(
-                on_touch=self._on_touch_tap,
-                logger=decky.logger,
-                log_prefix=LOG,
-            )
-            started = self._touchscreen_monitor.start()
-            if started:
-                decky.logger.info(f"{LOG} touchscreen monitor started")
-            else:
-                decky.logger.warning(f"{LOG} touchscreen monitor failed to start — touch input disabled")
-        else:
-            decky.logger.info(f"{LOG} touchscreen monitor disabled by settings")
+        self._sync_touchscreen_for_mode()
+        decky.logger.info(f"{LOG} touchscreen monitor synced for capture_mode={self.settings.get('capture_mode', 'full_screen')}")
 
     # =========================================================================
     # Button trigger: _on_button_trigger() / _handle_button_trigger()
@@ -630,21 +626,41 @@ class Plugin:
         """Check if the plugin's master switch is on."""
         return self.settings.get("enabled", True)
 
+    @property
+    def _is_playing(self):
+        """Check if audio is currently playing."""
+        return self._playback_process is not None and self._playback_process.poll() is None
+
     async def _handle_button_trigger(self):
         """
         Runs on the event loop — guards and triggers the Read Screen pipeline.
 
+        Phase 12: Mode-aware button handling.
+          - If playing/running → stop and return (all modes)
+          - swipe_selection / two_tap_selection → button only stops, never starts
+          - full_screen → no crop
+          - fixed_region / hybrid → use fixed region crop
+
         Guards:
           - Plugin must be enabled (settings.enabled)
-          - Pipeline must not already be running
           - Providers must be available (GCP needs creds, local needs bundled Python)
-
-        If all guards pass, calls read_screen() which runs the full pipeline
-        (capture → OCR → TTS → playback).
         """
         # Guard: plugin must be enabled
         if not self._is_enabled:
             decky.logger.debug(f"{LOG} button trigger: plugin disabled, ignoring")
+            return
+
+        # Guard: if playing or pipeline running, stop and return (all modes)
+        if self._is_playing or self._pipeline_running:
+            decky.logger.info(f"{LOG} button trigger: stopping playback/pipeline")
+            await self._stop_and_sound()
+            return
+
+        mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
+
+        # In swipe/two-tap only modes, button only stops — never starts pipeline
+        if mode in ("swipe_selection", "two_tap_selection"):
+            decky.logger.debug(f"{LOG} button trigger: button only stops in {mode} mode")
             return
 
         # Guard: don't start a second pipeline
@@ -656,39 +672,253 @@ class Plugin:
         ocr_provider = self.settings.get("ocr_provider", DEFAULT_SETTINGS["ocr_provider"])
         tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
 
-        # If any provider is GCP, need credentials
         if ocr_provider == "gcp" or tts_provider == "gcp":
             creds_b64 = self.settings.get("gcp_credentials_base64", "")
             if not creds_b64:
                 decky.logger.debug(f"{LOG} button trigger: GCP provider selected but no credentials, ignoring")
                 return
 
-        # If any provider is local, need bundled Python
         if ocr_provider == "local" or tts_provider == "local":
             if not self._local_python_path:
                 decky.logger.debug(f"{LOG} button trigger: local provider selected but bundled Python unavailable, ignoring")
                 return
 
-        decky.logger.info(f"{LOG} button trigger: starting read_screen pipeline")
-        result = await self.read_screen()
+        # Mode-specific pipeline start
+        if mode == "full_screen":
+            decky.logger.info(f"{LOG} button trigger: full_screen mode — starting pipeline")
+            self._play_interface_sound("selection_end")
+            result = await self._read_screen_with_crop()
+        elif mode in ("fixed_region", "hybrid"):
+            crop = self._get_fixed_region_crop()
+            decky.logger.info(f"{LOG} button trigger: {mode} mode — crop={crop}")
+            self._play_interface_sound("selection_end")
+            result = await self._read_screen_with_crop(crop_region=crop)
+        else:
+            # Fallback (shouldn't reach here, but be safe)
+            self._play_interface_sound("selection_end")
+            result = await self._read_screen_with_crop()
+
         decky.logger.info(f"{LOG} button trigger result: {result.get('message', '')}")
 
     # =========================================================================
-    # Touch callback: _on_touch_tap()
+    # Phase 12: Touch callbacks — bridge monitor thread to event loop
     # =========================================================================
-    # Called from the touchscreen monitor thread when a tap is detected.
-    # Phase 9: just log the coordinates. Phase 12 will use these for region
-    # selection and tap-to-read.
+    # Three callbacks from the TouchscreenMonitor thread. Each dispatches an
+    # async handler onto the event loop via run_coroutine_threadsafe().
+
+    def _on_touch_down(self, x, y):
+        """From monitor thread: finger made contact at (x, y)."""
+        if not self._is_enabled:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._handle_touch_down(x, y), self._event_loop
+        )
+
+    def _on_touch_up(self, end_x, end_y, start_x, start_y, duration):
+        """From monitor thread: finger lifted. Provides start/end coords + duration."""
+        if not self._is_enabled:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._handle_touch_up(end_x, end_y, start_x, start_y, duration),
+            self._event_loop,
+        )
 
     def _on_touch_tap(self, x, y):
-        """
-        Called from the touchscreen monitor thread when a tap is detected.
+        """From monitor thread: short tap detected (legacy, < 0.5s)."""
+        if not self._is_enabled:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._handle_touch_tap(x, y), self._event_loop
+        )
 
-        Args:
-            x: Logical X coordinate (0-1280, horizontal).
-            y: Logical Y coordinate (0-800, vertical).
+    # =========================================================================
+    # Phase 12: Async touch handlers (run on event loop)
+    # =========================================================================
+
+    async def _handle_touch_down(self, x, y):
         """
-        decky.logger.info(f"{LOG} touchscreen tap: ({x}, {y})")
+        Handle finger-down event. Used by swipe mode to play start sound.
+        In all modes: if playing or pipeline running, mark as stop gesture.
+        """
+        mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
+        decky.logger.debug(f"{LOG} touch_down: ({x},{y}) mode={mode}")
+
+        # During playback or pipeline: mark this touch as a stop gesture
+        if self._is_playing or self._pipeline_running:
+            self._touch_started_during_playback = True
+            await self._stop_and_sound()
+            return
+
+        # Swipe mode: play start sound on finger contact
+        if mode == "swipe_selection":
+            self._touch_started_during_playback = False
+            self._play_interface_sound("selection_start")
+
+    async def _handle_touch_up(self, end_x, end_y, start_x, start_y, duration):
+        """
+        Handle finger-up event. Used by swipe mode to define selection region.
+        """
+        mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
+        decky.logger.debug(
+            f"{LOG} touch_up: start=({start_x},{start_y}) end=({end_x},{end_y}) "
+            f"dur={duration:.2f}s mode={mode}"
+        )
+
+        # If this touch started during playback, it was a stop gesture — don't start pipeline
+        if self._touch_started_during_playback:
+            self._touch_started_during_playback = False
+            return
+
+        # Safety: if playing or running, stop (shouldn't normally reach here)
+        if self._is_playing or self._pipeline_running:
+            await self._stop_and_sound()
+            return
+
+        # Swipe selection mode: use start/end coordinates as bounding box
+        if mode == "swipe_selection":
+            # Normalize coordinates (min/max)
+            x1 = min(start_x, end_x)
+            y1 = min(start_y, end_y)
+            x2 = max(start_x, end_x)
+            y2 = max(start_y, end_y)
+
+            # Check minimum selection size (50x50 pixels)
+            if (x2 - x1) < 50 or (y2 - y1) < 50:
+                decky.logger.debug(
+                    f"{LOG} swipe too small: {x2 - x1}x{y2 - y1}, ignoring"
+                )
+                return
+
+            # Save selection coordinates for Fixed Region / Hybrid modes
+            self.settings.set("last_selection_x1", x1)
+            self.settings.set("last_selection_y1", y1)
+            self.settings.set("last_selection_x2", x2)
+            self.settings.set("last_selection_y2", y2)
+
+            self._play_interface_sound("selection_end")
+            crop = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+            decky.logger.info(f"{LOG} swipe selection: crop={crop}")
+            await self._read_screen_with_crop(crop_region=crop)
+
+    async def _handle_touch_tap(self, x, y):
+        """
+        Handle short tap event (< 0.5s). Used by two-tap and hybrid modes
+        to define rectangle corners.
+        """
+        mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
+        decky.logger.debug(f"{LOG} touch_tap: ({x},{y}) mode={mode}")
+
+        # During playback or pipeline: stop
+        if self._is_playing or self._pipeline_running:
+            await self._stop_and_sound()
+            return
+
+        # Two-tap and hybrid modes: two taps define a rectangle
+        if mode in ("two_tap_selection", "hybrid"):
+            if self._capture_state == "idle":
+                # First tap: record position, start 5s timeout
+                self._play_interface_sound("selection_start")
+                self._first_tap_x = x
+                self._first_tap_y = y
+                self._capture_state = "waiting_second_tap"
+                # Start 5-second timeout via event loop
+                self._two_tap_timer = self._event_loop.call_later(
+                    5.0, self._two_tap_timeout
+                )
+                decky.logger.info(f"{LOG} two-tap: first tap at ({x},{y}), waiting for second...")
+
+            elif self._capture_state == "waiting_second_tap":
+                # Second tap: cancel timer, compute region, start pipeline
+                if self._two_tap_timer:
+                    self._two_tap_timer.cancel()
+                    self._two_tap_timer = None
+                self._capture_state = "idle"
+
+                # Normalize coordinates (min/max)
+                x1 = min(self._first_tap_x, x)
+                y1 = min(self._first_tap_y, y)
+                x2 = max(self._first_tap_x, x)
+                y2 = max(self._first_tap_y, y)
+
+                # Save selection coordinates
+                self.settings.set("last_selection_x1", x1)
+                self.settings.set("last_selection_y1", y1)
+                self.settings.set("last_selection_x2", x2)
+                self.settings.set("last_selection_y2", y2)
+
+                self._play_interface_sound("selection_end")
+                crop = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                decky.logger.info(f"{LOG} two-tap: second tap at ({x},{y}), crop={crop}")
+                await self._read_screen_with_crop(crop_region=crop)
+
+    def _two_tap_timeout(self):
+        """
+        Called by event loop's call_later when 5s expires without a second tap.
+        Resets capture state and plays stop sound.
+        """
+        if self._capture_state == "waiting_second_tap":
+            self._capture_state = "idle"
+            self._two_tap_timer = None
+            self._play_interface_sound("stop")
+            decky.logger.info(f"{LOG} two-tap: timeout, cancelled")
+
+    # =========================================================================
+    # Phase 12: Helper methods
+    # =========================================================================
+
+    async def _stop_and_sound(self):
+        """Stop playback/pipeline and play the stop sound."""
+        self._play_interface_sound("stop")
+        self._pipeline_cancel.set()
+        self._stop_playback()
+
+    def _get_fixed_region_crop(self):
+        """
+        Read fixed_region coordinates from settings, clamp to screen bounds,
+        normalize min/max, and return as a crop dict.
+        """
+        x1 = max(0, min(int(self.settings.get("fixed_region_x1", 0)), 1280))
+        y1 = max(0, min(int(self.settings.get("fixed_region_y1", 0)), 800))
+        x2 = max(0, min(int(self.settings.get("fixed_region_x2", 1280)), 1280))
+        y2 = max(0, min(int(self.settings.get("fixed_region_y2", 800)), 800))
+        # Normalize
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+    def _sync_touchscreen_for_mode(self, mode=None):
+        """
+        Auto-start or stop the touchscreen monitor based on capture mode.
+
+        Modes that need touch: swipe_selection, two_tap_selection, hybrid
+        Modes that don't: full_screen, fixed_region
+        """
+        if mode is None:
+            mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
+
+        needs_touch = mode in ("swipe_selection", "two_tap_selection", "hybrid")
+
+        if needs_touch and self._touchscreen_monitor is None:
+            # Start touchscreen monitor with all 3 callbacks
+            self._touchscreen_monitor = TouchscreenMonitor(
+                on_touch=self._on_touch_tap,
+                on_touch_down=self._on_touch_down,
+                on_touch_up=self._on_touch_up,
+                logger=decky.logger,
+                log_prefix=LOG,
+            )
+            started = self._touchscreen_monitor.start()
+            if started:
+                decky.logger.info(f"{LOG} touchscreen auto-started for {mode} mode")
+            else:
+                decky.logger.warning(f"{LOG} touchscreen failed to start for {mode} mode")
+        elif not needs_touch and self._touchscreen_monitor is not None:
+            # Stop touchscreen monitor — not needed for this mode
+            self._touchscreen_monitor.stop()
+            self._touchscreen_monitor = None
+            decky.logger.info(f"{LOG} touchscreen auto-stopped for {mode} mode")
 
     # =========================================================================
     # Lifecycle: _unload()
@@ -707,6 +937,11 @@ class Plugin:
             self._touchscreen_monitor.stop()
             self._touchscreen_monitor = None
             decky.logger.info(f"{LOG} touchscreen monitor stopped")
+
+        # Step 0a3: Cancel any pending two-tap timer (Phase 12)
+        if self._two_tap_timer:
+            self._two_tap_timer.cancel()
+            self._two_tap_timer = None
 
         # Step 0b: Cancel any running pipeline so it stops between steps
         self._pipeline_cancel.set()
@@ -2027,9 +2262,13 @@ class Plugin:
     # settings. If both providers are the same, uses the combined ocr_tts
     # action for efficiency. If mixed, runs OCR and TTS sequentially on
     # different workers.
-    def _read_screen_sync(self):
+    def _read_screen_sync(self, crop_region=None):
         """
         End-to-end Read Screen pipeline: capture → OCR+TTS → playback.
+
+        Args:
+            crop_region: Optional dict {"x1", "y1", "x2", "y2"} to crop the
+                        screenshot before OCR. None = full screen (Phase 12).
 
         Returns:
             Dict with keys: success, message, step, text, audio_size.
@@ -2139,6 +2378,9 @@ class Plugin:
                     "speech_rate": speech_rate,
                     "voice_id": voice_id,
                 }
+                # Phase 12: pass crop_region to worker if specified
+                if crop_region:
+                    command["crop_region"] = crop_region
                 voice_meta = PIPER_VOICES.get(voice_id, {})
                 if "speaker_id" in voice_meta:
                     command["speaker_id"] = voice_meta["speaker_id"]
@@ -2161,9 +2403,12 @@ class Plugin:
                 # Mixed providers — run OCR first, then TTS separately
                 decky.logger.info(f"{LOG} pipeline: running OCR ({ocr_provider}) then TTS ({tts_provider})...")
 
-                # OCR step
+                # OCR step — include crop_region if specified (Phase 12)
+                ocr_cmd = {"action": "ocr", "image_path": ocr_tmp_path}
+                if crop_region:
+                    ocr_cmd["crop_region"] = crop_region
                 ocr_result = self._send_command(
-                    {"action": "ocr", "image_path": ocr_tmp_path},
+                    ocr_cmd,
                     provider=ocr_provider, timeout=OCR_TIMEOUT,
                 )
 
@@ -2297,16 +2542,23 @@ class Plugin:
             self._pipeline_running = False
 
     # =========================================================================
-    # RPC: read_screen()
+    # Phase 12: _read_screen_with_crop() — async pipeline wrapper with crop
     # =========================================================================
-    # Async entry point for the end-to-end pipeline. Rejects concurrent runs,
-    # clears the cancellation flag, and dispatches to _read_screen_sync() in
-    # the thread pool executor.
-    #
-    # Called from the frontend via:
-    #   const readScreen = callable<[], ReadScreenResult>("read_screen");
-    async def read_screen(self):
-        decky.logger.info(f"{LOG} read_screen() called")
+    # Same guards as read_screen(), but accepts an optional crop_region dict.
+    # Used by capture mode handlers (button trigger, swipe, two-tap).
+
+    async def _read_screen_with_crop(self, crop_region=None):
+        """
+        Async entry point for the pipeline with optional image cropping.
+
+        Args:
+            crop_region: Optional dict {"x1", "y1", "x2", "y2"} to crop the
+                        screenshot before OCR. None = full screen.
+
+        Returns:
+            Pipeline result dict (same as read_screen).
+        """
+        decky.logger.info(f"{LOG} _read_screen_with_crop(crop={crop_region})")
 
         # Reject if a pipeline is already running
         if self._pipeline_running:
@@ -2326,7 +2578,10 @@ class Plugin:
 
         # Run the blocking pipeline in the thread pool executor
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(_capture_executor, self._read_screen_sync)
+        result = await loop.run_in_executor(
+            _capture_executor,
+            lambda: self._read_screen_sync(crop_region=crop_region),
+        )
 
         if result["success"]:
             decky.logger.info(f"{LOG} pipeline complete: {result['message']}")
@@ -2334,6 +2589,20 @@ class Plugin:
             decky.logger.warning(f"{LOG} pipeline ended: {result['message']}")
 
         return result
+
+    # =========================================================================
+    # RPC: read_screen()
+    # =========================================================================
+    # Async entry point for the end-to-end pipeline. Rejects concurrent runs,
+    # clears the cancellation flag, and dispatches to _read_screen_sync() in
+    # the thread pool executor.
+    #
+    # Called from the frontend via:
+    #   const readScreen = callable<[], ReadScreenResult>("read_screen");
+    async def read_screen(self):
+        """RPC: End-to-end pipeline (full screen, no crop). Delegates to _read_screen_with_crop."""
+        decky.logger.info(f"{LOG} read_screen() called")
+        return await self._read_screen_with_crop(crop_region=None)
 
     # =========================================================================
     # RPC: stop_pipeline()
@@ -2585,27 +2854,15 @@ class Plugin:
                 decky.logger.info(f"{LOG} debug logging disabled")
                 decky.logger.setLevel(logging.INFO)
 
-        elif key == "touchscreen_enabled":
-            # Start or stop the touchscreen monitor based on the toggle.
-            if value:
-                if not self._touchscreen_monitor:
-                    self._touchscreen_monitor = TouchscreenMonitor(
-                        on_touch=self._on_touch_tap,
-                        logger=decky.logger,
-                        log_prefix=LOG,
-                    )
-                    started = self._touchscreen_monitor.start()
-                    if started:
-                        decky.logger.info(f"{LOG} touchscreen monitor started")
-                    else:
-                        decky.logger.warning(f"{LOG} touchscreen monitor failed to start")
-                else:
-                    decky.logger.debug(f"{LOG} touchscreen monitor already running")
-            else:
-                if self._touchscreen_monitor:
-                    self._touchscreen_monitor.stop()
-                    self._touchscreen_monitor = None
-                    decky.logger.info(f"{LOG} touchscreen monitor stopped")
+        elif key == "capture_mode":
+            # Phase 12: sync touchscreen monitor for the new capture mode
+            # and reset any in-progress two-tap selection state.
+            self._sync_touchscreen_for_mode(value)
+            if self._two_tap_timer:
+                self._two_tap_timer.cancel()
+                self._two_tap_timer = None
+            self._capture_state = "idle"
+            decky.logger.info(f"{LOG} capture mode changed to {value}")
 
         elif key == "enabled":
             # When the master switch is toggled, actively manage background
@@ -2625,8 +2882,15 @@ class Plugin:
                     self._touchscreen_monitor.stop()
                     self._touchscreen_monitor = None
                     decky.logger.info(f"{LOG} touchscreen monitor stopped (plugin disabled)")
+                # Reset capture state
+                if self._two_tap_timer:
+                    self._two_tap_timer.cancel()
+                    self._two_tap_timer = None
+                self._capture_state = "idle"
             else:
                 decky.logger.info(f"{LOG} plugin enabled")
+                # Re-sync touchscreen monitor on re-enable
+                self._sync_touchscreen_for_mode()
 
         elif key == "ocr_provider":
             # Provider changed — stop the old provider's worker so it doesn't
@@ -2915,6 +3179,34 @@ class Plugin:
         if self._touchscreen_monitor:
             return self._touchscreen_monitor.get_last_touch()
         return None
+
+    # =========================================================================
+    # RPC: apply_last_selection_to_fixed_region() (Phase 12)
+    # =========================================================================
+    # Copies the last_selection_* coordinates (set by swipe/two-tap modes)
+    # into the fixed_region_* coordinates. Gives the user a quick way to
+    # lock in a region they selected interactively.
+    #
+    # Called from the frontend via:
+    #   const applyLastSelectionToFixedRegion = callable<[], {success: boolean; message: string}>(
+    #     "apply_last_selection_to_fixed_region");
+    async def apply_last_selection_to_fixed_region(self):
+        decky.logger.info(f"{LOG} apply_last_selection_to_fixed_region() called")
+        x1 = self.settings.get("last_selection_x1", DEFAULT_SETTINGS["last_selection_x1"])
+        y1 = self.settings.get("last_selection_y1", DEFAULT_SETTINGS["last_selection_y1"])
+        x2 = self.settings.get("last_selection_x2", DEFAULT_SETTINGS["last_selection_x2"])
+        y2 = self.settings.get("last_selection_y2", DEFAULT_SETTINGS["last_selection_y2"])
+
+        self.settings.set("fixed_region_x1", x1)
+        self.settings.set("fixed_region_y1", y1)
+        self.settings.set("fixed_region_x2", x2)
+        self.settings.set("fixed_region_y2", y2)
+
+        decky.logger.info(f"{LOG} fixed region set to ({x1},{y1})-({x2},{y2})")
+        return {
+            "success": True,
+            "message": f"Fixed region set to ({x1},{y1})-({x2},{y2})",
+        }
 
     # =========================================================================
     # RPC: get_available_voices()

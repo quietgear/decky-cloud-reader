@@ -263,6 +263,55 @@ def init_tts_client(creds_b64, creds_json=None):
 
 
 # ---------------------------------------------------------------------------
+# Image cropping helper (Phase 12 capture modes)
+# ---------------------------------------------------------------------------
+
+def _crop_image_bytes(image_bytes, crop_region):
+    """
+    Crop raw image bytes to the specified bounding box.
+
+    Opens image bytes via PIL, crops, and re-encodes to PNG bytes.
+    Coordinates are clamped to image bounds and normalized (min/max swap).
+    Returns original bytes if the crop region is too small (< 10px).
+
+    Args:
+        image_bytes: Raw PNG/JPEG bytes of the image.
+        crop_region: Dict with keys "x1", "y1", "x2", "y2" (pixel coordinates).
+
+    Returns:
+        Cropped image as PNG bytes, or original bytes if region is too small.
+    """
+    from PIL import Image
+
+    img = Image.open(BytesIO(image_bytes))
+    w, h = img.size
+
+    x1 = max(0, min(int(crop_region.get("x1", 0)), w))
+    y1 = max(0, min(int(crop_region.get("y1", 0)), h))
+    x2 = max(0, min(int(crop_region.get("x2", w)), w))
+    y2 = max(0, min(int(crop_region.get("y2", h)), h))
+
+    # Normalize: ensure x1 < x2 and y1 < y2
+    if x1 > x2:
+        x1, x2 = x2, x1
+    if y1 > y2:
+        y1, y2 = y2, y1
+
+    # Reject tiny regions (< 10px) — likely accidental
+    if (x2 - x1) < 10 or (y2 - y1) < 10:
+        log_info(f"Crop region too small ({x2 - x1}x{y2 - y1}), using full image")
+        return image_bytes
+
+    log_info(f"Cropping image to ({x1},{y1})-({x2},{y2}) = {x2 - x1}x{y2 - y1}")
+    cropped = img.crop((x1, y1, x2, y2))
+
+    # Convert back to PNG bytes
+    output = BytesIO()
+    cropped.save(output, format="PNG")
+    return output.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # Image resizing (two-stage: quality reduction, then dimension scaling)
 # ---------------------------------------------------------------------------
 
@@ -344,22 +393,25 @@ def resize_image_if_needed(image_bytes):
 # OCR action — the main text detection pipeline
 # ---------------------------------------------------------------------------
 
-def do_ocr(image_path, creds_b64, vision_client=None):
+def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None):
     """
     Perform OCR on an image file using Google Cloud Vision API.
 
     Steps:
       1. Read the image file from disk
-      2. Resize if over 10 MB
-      3. Initialize the Vision client with credentials (skip if pre-initialized)
-      4. Call text_detection() with retry on transient errors
-      5. Parse the response and extract detected text
+      2. Crop to region if specified (Phase 12)
+      3. Resize if over 10 MB
+      4. Initialize the Vision client with credentials (skip if pre-initialized)
+      5. Call text_detection() with retry on transient errors
+      6. Parse the response and extract detected text
 
     Args:
         image_path: Absolute path to the screenshot PNG file.
         creds_b64: Base64-encoded GCP service account JSON.
         vision_client: Optional pre-initialized Vision client. When provided
                        (in serve mode), skips client creation for speed.
+        crop_region: Optional dict {"x1", "y1", "x2", "y2"} defining the
+                    bounding box to crop before OCR. If None, full image is used.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError via output_result/output_error.
@@ -376,6 +428,10 @@ def do_ocr(image_path, creds_b64, vision_client=None):
 
     if file_size == 0:
         output_error("Image file is empty (0 bytes)")
+
+    # Step 1b: Crop to region if specified (Phase 12 capture modes)
+    if crop_region:
+        image_bytes = _crop_image_bytes(image_bytes, crop_region)
 
     # Step 2: Resize if needed (Vision API has a size limit)
     image_bytes = resize_image_if_needed(image_bytes)
@@ -622,7 +678,7 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None)
 # ---------------------------------------------------------------------------
 
 def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
-               vision_client=None, tts_client=None):
+               vision_client=None, tts_client=None, crop_region=None):
     """
     Perform OCR and TTS in a single invocation.
 
@@ -634,7 +690,7 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
 
     Steps:
       1. Decode credentials once (skipped if both clients provided)
-      2. Read and resize image
+      2. Read, crop if specified (Phase 12), and resize image
       3. Init Vision client → call text_detection() with retry
       4. If no text → return early (success with empty text, no audio)
       5. Init TTS client (reuses decoded credentials) → synthesize_speech()
@@ -648,6 +704,8 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
         creds_b64: Base64-encoded GCP service account JSON.
         vision_client: Optional pre-initialized Vision client (serve mode).
         tts_client: Optional pre-initialized TTS client (serve mode).
+        crop_region: Optional dict {"x1", "y1", "x2", "y2"} defining the
+                    bounding box to crop before OCR. If None, full image is used.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError via output_result/output_error.
@@ -675,6 +733,10 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
 
     if file_size == 0:
         output_error("Image file is empty (0 bytes)")
+
+    # Crop to region if specified (Phase 12 capture modes)
+    if crop_region:
+        image_bytes = _crop_image_bytes(image_bytes, crop_region)
 
     image_bytes = resize_image_if_needed(image_bytes)
 
@@ -943,7 +1005,8 @@ def serve():
         try:
             if action == "ocr":
                 do_ocr(cmd.get("image_path", ""), creds_b64,
-                       vision_client=vision_client)
+                       vision_client=vision_client,
+                       crop_region=cmd.get("crop_region"))
 
             elif action == "tts":
                 do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
@@ -955,7 +1018,8 @@ def serve():
                 do_ocr_tts(cmd.get("image_path", ""), cmd.get("output_path", ""),
                            cmd.get("voice_id", "en-US-Neural2-C"),
                            cmd.get("speech_rate", "medium"), creds_b64,
-                           vision_client=vision_client, tts_client=tts_client)
+                           vision_client=vision_client, tts_client=tts_client,
+                           crop_region=cmd.get("crop_region"))
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)
