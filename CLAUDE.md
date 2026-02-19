@@ -39,7 +39,7 @@ Frontend (TypeScript/React)           Backend (Python)
 │ Decky Panel UI           │   RPC   │ main.py (Plugin class)          │
 │  - Read Screen (primary) │◄───────►│  - Pipeline orchestration       │
 │  - Provider selection    │         │  - Provider routing (GCP/local) │
-│  - Settings / credentials│         │  - Screen capture (GStreamer)   │
+│  - Settings / credentials│         │  - Screen capture (ximagesrc)   │
 │  - Button trigger config │         │  - Dual worker lifecycle mgmt   │
 │  - Capture mode config   │         │  - Audio playback (Popen)       │
 │  - Enabled toggle gates  │         │                                 │
@@ -61,7 +61,7 @@ Frontend (TypeScript/React)           Backend (Python)
 |-------|---------|
 | **1: Foundation** | Plugin scaffolding, Docker build, SSH deploy, RPC communication |
 | **2: Settings** | Settings manager, GCP credential storage (base64), file browser UI, validation |
-| **3: Screen Capture** | GStreamer + PipeWire screenshot capture |
+| **3: Screen Capture** | GStreamer ximagesrc (game window via Xwayland :1, overlay-free) with pipewiresrc fallback |
 | **4: GCP OCR** | `gcp_worker.py` with Cloud Vision, image resize, retry logic |
 | **5: GCP TTS** | Cloud TTS in `gcp_worker.py`, audio playback (ffplay/mpv/pw-play auto-discovery), daemon reaper thread |
 | **6: Pipeline** | End-to-end `read_screen()` → OCR → TTS → playback, cancellation via `threading.Event` |
@@ -103,6 +103,14 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ### Subprocess Environment
 - **Strip `LD_LIBRARY_PATH` and `LD_PRELOAD`** when spawning system commands (curl, etc.) — Decky Loader (PyInstaller) bundles older libssl.so.3 that breaks system binaries
+
+### Gamescope Screen Capture
+- Gamescope runs two Xwayland displays: `:0` (Steam UI/overlay) and `:1` (game windows)
+- **ximagesrc** on `:1` with a specific window XID captures game-only content (no Steam overlay)
+- Game window XID is read from `GAMESCOPE_FOCUSED_WINDOW` X atom on `:0` root via `xprop`
+- **pipewiresrc** with `XDG_SESSION_TYPE=wayland` captures the composited output (game + overlay)
+- When no game is focused (home screen), `GAMESCOPE_FOCUSED_WINDOW` returns a Steam UI window on `:0` which causes `BadWindow` on `:1` — must fall back to pipewiresrc
+- Avoid `XDG_SESSION_TYPE=x11` hack with pipewiresrc — it works today but is fragile as SteamOS moves to Wayland
 
 ### Decky Plugin Sandbox
 - `sys.path` doesn't include plugin dir — must add manually before importing split-out `.py` files
@@ -172,7 +180,7 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Architecture | Single plugin + persistent subprocess workers | No separate service; workers stay warm for fast repeat calls |
 | Dual workers | GCP (system Python 3.13) + local (bundled Python 3.12) | `rapidocr-onnxruntime` requires Python <3.13 |
 | Worker protocol | stdin/stdout JSON lines | Simple, no network deps, supports serve + one-shot modes |
-| Screen capture | GStreamer + PipeWire | Native to Steam Deck |
+| Screen capture | GStreamer ximagesrc (primary) + pipewiresrc (fallback) | ximagesrc captures game window from Xwayland :1 (no Steam overlay); falls back to pipewiresrc composited output when no game is focused |
 | Audio playback | ffplay (primary) / mpv / pw-play | Auto-discovered; needs `XDG_RUNTIME_DIR=/run/user/1000` (Decky runs as root); reaper thread prevents zombies |
 | Button input | Hidraw direct reading | Background operation, no UI needed |
 | Touchscreen | Raw evdev + `struct.unpack` | Stdlib only; ioctl axis calibration; 90° CW coordinate transform; auto-managed by capture mode |
