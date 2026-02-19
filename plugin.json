@@ -1,7 +1,7 @@
 {
   "name": "Decky Cloud Reader",
   "author": "mshabalov",
-  "flags": ["_root"],
+  "flags": ["root"],
   "api_version": 1,
   "publish": {
     "tags": ["ocr", "tts", "accessibility", "cloud"],

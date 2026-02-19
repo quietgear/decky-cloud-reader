@@ -113,6 +113,7 @@ Frontend (TypeScript/React)           Backend (Python)
 - Avoid `XDG_SESSION_TYPE=x11` hack with pipewiresrc — it works today but is fragile as SteamOS moves to Wayland
 
 ### Decky Plugin Sandbox
+- **`plugin.json` must use `"flags": ["root"]`** (exact string `"root"`, NOT `"_root"`). Decky's `sandboxed_plugin.py` checks `"root" in self.flags` — list exact-match, not substring. With `"_root"`, the plugin silently drops to the `deck` user via `setuid`/`setgid` (without `initgroups`, so no supplementary groups). The `deck` user can open `/dev/hidraw*` (Valve udev `uaccess` rules) but NOT `/dev/input/event*` (`root:input 660`). Root is required for touchscreen evdev access.
 - `sys.path` doesn't include plugin dir — must add manually before importing split-out `.py` files
 - Dockerfile Stage 4 copies specific files — new `.py` files must be added explicitly
 
