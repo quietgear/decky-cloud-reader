@@ -76,9 +76,12 @@ Frontend (TypeScript/React)           Backend (Python)
 | **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, 3 test buttons, Dockerfile audio/ copy |
 | **12: Capture Modes** | 5 capture modes (full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid), touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, mode-aware UI |
 
-### Phase 13: UI Polish & Advanced Features `[NOT STARTED]`
-- [ ] Global overlay for displaying selected zones on screen as in `/Users/mshabalov/Documents/claude-projects/decky-ocr-tts-claude-service-plugin`
-- [ ] Text filtering (ignore specific words/patterns). Uses `ignored_words_always`, `ignored_words_always_enabled`, `ignored_words_beginning`, `ignored_words_beginning_enabled`, `ignored_words_count` in settings file
+### Phase 13: Global Overlay `[NOT STARTED]`
+- [ ] Visual overlay for displaying selected capture zones on screen, reference: `/Users/mshabalov/Documents/claude-projects/Decky-Translator`
+
+### Phase 14: Text Filtering `[NOT STARTED]`
+- [ ] Backend word filtering in `main.py` (after OCR, before TTS) — parse comma-separated ignore lists, respect enabled toggles
+- [ ] Frontend settings section for `ignored_words_always`, `ignored_words_always_enabled`, `ignored_words_beginning`, `ignored_words_beginning_enabled`, `ignored_words_count`
 
 ---
 
