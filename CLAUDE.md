@@ -37,12 +37,12 @@ Everything runs inside the standard Decky plugin process. Python backend (`main.
 Frontend (TypeScript/React)           Backend (Python)
 ┌──────────────────────────┐         ┌─────────────────────────────────┐
 │ Decky Panel UI           │   RPC   │ main.py (Plugin class)          │
-│  - Read Screen (primary) │◄───────►│  - Pipeline orchestration       │
+│  - Enabled toggle        │◄───────►│  - Pipeline orchestration       │
 │  - Provider selection    │         │  - Provider routing (GCP/local) │
 │  - Settings / credentials│         │  - Screen capture (ximagesrc)   │
 │  - Button trigger config │         │  - Dual worker lifecycle mgmt   │
 │  - Capture mode config   │         │  - Audio playback (Popen)       │
-│  - Enabled toggle gates  │         │                                 │
+│  - Version footer        │         │                                 │
 │                          │         │  hidraw_monitor.py (thread)     │
 │ Global Overlay (Phase 13) │         │  touchscreen_monitor.py (thread)│
 │  - Region preview overlay│         │                                 │
@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–14.5)
+### Completed Phases (1–19)
 
 | Phase | Summary |
 |-------|---------|
@@ -73,12 +73,25 @@ Frontend (TypeScript/React)           Backend (Python)
 | **8.6: On-Demand Voices** | No bundled voices; 16 curated voices (14 language variants) downloaded from HuggingFace on demand to `DECKY_PLUGIN_SETTINGS_DIR/voices/` |
 | **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform; frontend fetches status on mount only (no polling) |
 | **10: Settings Defaults** | Added config fields for capture modes, regions, text filtering, and mute toggle |
-| **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, 3 test buttons, Dockerfile audio/ copy |
+| **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, Dockerfile audio/ copy |
 | **12: Capture Modes** | 5 capture modes (full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid), touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, mode-aware UI, debounced region slider saves (800ms) |
 | **13: Global Overlay** | Region preview overlay: `capture_overlay_screenshot()` RPC, `OverlayState` class, `RegionPreviewOverlay` global component mounted/unmounted on demand via `routerHook`, `useUIComposition` for Gamescope layer, auto-close on QAM dismiss/tab switch + 10s auto-dismiss timeout, spotlight cutout for fixed region |
 | **13.5: Keyboard Suppression** | Event-driven on-screen keyboard detection via Steam's `VirtualKeyboardManager` (`m_bIsInlineVirtualKeyboardOpen` observable). Frontend registers callback in `definePlugin()`, calls `set_keyboard_visible()` RPC on open/close. Backend `_keyboard_visible` flag guards all touch callbacks — suppresses two-tap/swipe gestures while typing |
 | **14: Text Filtering** | `_apply_text_filters()` in `main.py` — two modes: "always" (whole-word case-insensitive removal anywhere) and "beginning" (remove from first N tokens, punctuation-tolerant). Pipeline forces separate OCR→filter→TTS when filtering active (skips combined `ocr_tts`). Frontend section with toggles, `WordFilterModal` (full-screen modal via `showModal()` for proper keyboard focus), and word-count slider with live value label |
 | **14.5: Touch Suppression** | Three-flag touch suppression: `_keyboard_visible` (Phase 13.5), `_modal_visible` (modal dialogs), `_qam_visible` (QAM "..." menu via `useQuickAccessVisible()` hook from `@decky/ui`). Each has a frontend→backend RPC (`set_keyboard_visible`, `set_modal_visible`, `set_qam_visible`). All three touch callbacks (`_on_touch_down/up/tap`) check all flags. QAM flag reset on Content unmount to prevent stuck suppression |
+| **15: Remove Read Text Button** | Removed "Read Text" / "Stop Playback" test button from TTS section, playback polling, and all related state/handlers. Pipeline trigger via button/touchscreen is the only flow |
+| **16: Remove Sound Effect Test Buttons** | Removed 3 sound test buttons (Test Start/End/Stop Sound) from Sound Effects section. Kept Mute Interface Sounds toggle only |
+| **17: Remove Test Capture & Test OCR** | Removed standalone "Test Capture" button (Screen Capture section) and "Test OCR" button (OCR section) with status messages and OCR text display. Removed the entire Screen Capture and OCR sections from UI |
+| **18: Remove Read Screen Section** | Removed "Read Screen" / "Stop" button, pipeline progress indicator, pipeline polling, `getPipelineStepLabel()` helper, and all pipeline/playback RPC callables. Replaced top section with "Cloud Reader" containing just the Enabled toggle. Moved Debug Mode toggle to its own "Debug" section |
+| **19: Versioning** | Version `1.0.0` in `package.json` as single source of truth. `@rollup/plugin-replace` injects `__PLUGIN_VERSION__` at build time via `rollup.config.js`. Version footer at bottom of plugin panel ("Plugin v1.0.0") |
+
+### Upcoming Phases (20–22)
+
+| Phase | Summary |
+|-------|---------|
+| **20: GCP Voice Expansion** | Expand GCP voice dropdown from 8 English-only voices to 28 multi-language voices matching `decky-ocr-tts-claude-service-plugin` (EN-US, EN-GB, UK, DE, FR, ES, JA, PT-BR, RU) |
+| **21: Debug-Only Monitor Status** | Move touchscreen and button monitor status indicators under the Debug Mode toggle. Only show them when Debug Mode is ON |
+| **22: Zero Hold Time Option** | Add "no hold" / 0ms option to the trigger button hold time dropdown — instant trigger on button press without requiring a sustained hold |
 
 ---
 
@@ -205,6 +218,8 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Keyboard suppression | Frontend event-driven via `VirtualKeyboardManager` | No polling; callback fires on open/close; RPC notifies backend to guard touch handlers |
 | Touch suppression | Three-flag guard: keyboard + modal + QAM | `useQuickAccessVisible()` for QAM; `useEffect` + RPC for modal; explicit reset on unmount |
 | Text input in QAM | Full-screen modal via `showModal()` | `TextField` in QAM panel doesn't receive keyboard focus; modal gives proper focus + no keyboard overlap |
+| Pipeline trigger | Hardware only (button/touchscreen) | No UI trigger button — pipeline runs exclusively via L4/R4/L5/R5 hold or touchscreen tap/swipe |
+| Versioning | `package.json` version + `@rollup/plugin-replace` | Build-time injection of `__PLUGIN_VERSION__`; single source of truth; version footer in panel |
 | Docker build | Layer caching enabled | Use `--no-cache` when requirements or model URLs change |
 
 ---

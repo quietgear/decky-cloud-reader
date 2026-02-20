@@ -42,7 +42,11 @@ import { useState, useEffect, useRef } from "react";
 
 // FaBook icon — fits the "reader" theme of this plugin.
 // FaFolder/FaFile icons — used in the file browser for visual clarity.
-import { FaBook, FaFolder, FaFileAlt, FaArrowLeft, FaVolumeUp, FaStop } from "react-icons/fa";
+import { FaBook, FaFolder, FaFileAlt, FaArrowLeft } from "react-icons/fa";
+
+// Build-time version injected by @rollup/plugin-replace from package.json
+declare const __PLUGIN_VERSION__: string;
+const PLUGIN_VERSION = __PLUGIN_VERSION__;
 
 
 // =============================================================================
@@ -123,62 +127,6 @@ interface CredentialResult {
   valid: boolean;      // true if the file was a valid GCP service account JSON
   message: string;     // Human-readable success or error message
   project_id: string;  // GCP project ID (empty on error)
-}
-
-// Response from the capture_screenshot() backend RPC
-interface CaptureResult {
-  success: boolean;    // true if screenshot was captured successfully
-  file_size: number;   // Size of the captured PNG in bytes
-  message: string;     // Human-readable success or error message
-}
-
-// Response from the perform_ocr() backend RPC
-interface OcrResult {
-  success: boolean;    // true if OCR completed successfully
-  text: string;        // Detected text (empty string if none found)
-  char_count: number;  // Number of characters detected
-  line_count: number;  // Number of lines detected
-  message: string;     // Human-readable success or error message
-}
-
-// Response from the perform_tts() backend RPC
-interface TtsResult {
-  success: boolean;    // true if TTS synthesis + playback started
-  message: string;     // Human-readable success or error message
-  audio_size: number;  // Size of the synthesized MP3 in bytes
-}
-
-// Response from the stop_playback() backend RPC
-interface StopResult {
-  success: boolean;    // Always true (stop is best-effort)
-  message: string;     // Human-readable message
-}
-
-// Response from the get_playback_status() backend RPC
-interface PlaybackStatus {
-  is_playing: boolean;  // true if mpv is currently playing audio
-}
-
-// Response from the read_screen() backend RPC (Phase 6 pipeline)
-interface ReadScreenResult {
-  success: boolean;    // true if the full pipeline completed successfully
-  message: string;     // Human-readable success or error message
-  step: string;        // Pipeline step where it finished (or failed)
-  text: string;        // OCR text (populated even if TTS fails)
-  audio_size: number;  // Size of the synthesized MP3 in bytes
-}
-
-// Response from the get_pipeline_status() backend RPC (Phase 6 polling)
-interface PipelineStatus {
-  running: boolean;    // true if the pipeline is currently running
-  step: string;        // Current step: idle/capturing/ocr/tts/playing
-  is_playing: boolean; // true if audio is currently playing
-}
-
-// Response from the stop_pipeline() backend RPC
-interface StopPipelineResult {
-  success: boolean;    // Always true (stop is best-effort)
-  message: string;     // Human-readable message
 }
 
 // Response from the get_button_monitor_status() backend RPC
@@ -295,30 +243,6 @@ const loadCredentialsFile = callable<[string], CredentialResult>("load_credentia
 
 // Clear stored GCP credentials
 const clearCredentials = callable<[], boolean>("clear_credentials");
-
-// Capture a screenshot via GStreamer + PipeWire
-const captureScreenshot = callable<[], CaptureResult>("capture_screenshot");
-
-// Perform OCR on a fresh screenshot (capture + Cloud Vision API)
-const performOcr = callable<[], OcrResult>("perform_ocr");
-
-// Synthesize speech from text and start playback
-const performTts = callable<[string], TtsResult>("perform_tts");
-
-// Stop current audio playback
-const stopPlayback = callable<[], StopResult>("stop_playback");
-
-// Check if audio is currently playing (lightweight poll)
-const getPlaybackStatus = callable<[], PlaybackStatus>("get_playback_status");
-
-// Phase 6: End-to-end pipeline (capture → OCR → TTS → playback)
-const readScreen = callable<[], ReadScreenResult>("read_screen");
-
-// Cancel the running pipeline and stop playback
-const stopPipeline = callable<[], StopPipelineResult>("stop_pipeline");
-
-// Lightweight poll for pipeline progress (step, running, is_playing)
-const getPipelineStatus = callable<[], PipelineStatus>("get_pipeline_status");
 
 // Phase 7: Get button monitor status (running, device_path, error_count, etc.)
 const getButtonMonitorStatus = callable<[], ButtonMonitorStatus>("get_button_monitor_status");
@@ -674,25 +598,6 @@ const HOLD_TIME_OPTIONS = [
 
 
 // =============================================================================
-// Helper: map pipeline step strings to user-friendly labels
-// =============================================================================
-// Shown in the UI while the Read Screen pipeline is running, so the user
-// knows what's happening. Each label uses present progressive tense.
-function getPipelineStepLabel(step: string): string {
-  switch (step) {
-    case "starting":     return "Starting...";
-    case "capturing":    return "Capturing screen...";
-    case "downloading":  return "Downloading voice...";
-    case "ocr":          return "Detecting text...";
-    case "tts":          return "Generating speech...";
-    case "playing":      return "Playing audio...";
-    case "cancelled":    return "Cancelled";
-    default:             return "";
-  }
-}
-
-
-// =============================================================================
 // FileBrowser component — lets the user navigate directories and pick a file
 // =============================================================================
 // This component renders a list of directories and .json files. The user can
@@ -935,35 +840,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   // Whether a credential file is currently being loaded
   const [loadingCreds, setLoadingCreds] = useState(false);
 
-  // --- Screen capture state ---
-  // Status message shown after a capture attempt (success or error)
-  const [captureMessage, setCaptureMessage] = useState<string | null>(null);
-  // Whether the capture message is a success (green) or error (red)
-  const [captureIsSuccess, setCaptureIsSuccess] = useState(false);
-  // Whether a capture is currently in progress (disables the button)
-  const [isCapturing, setIsCapturing] = useState(false);
-
-  // --- OCR state ---
-  // Status message shown after an OCR attempt (success or error)
-  const [ocrMessage, setOcrMessage] = useState<string | null>(null);
-  // Whether the OCR message is a success (green) or error (red)
-  const [ocrIsSuccess, setOcrIsSuccess] = useState(false);
-  // Whether OCR is currently running (disables the button)
-  const [isOcrRunning, setIsOcrRunning] = useState(false);
-  // The detected text from the last OCR run (shown in scrollable area)
-  const [ocrText, setOcrText] = useState<string | null>(null);
-
-  // --- TTS state ---
-  // Status message shown after a TTS attempt (success or error)
-  const [ttsMessage, setTtsMessage] = useState<string | null>(null);
-  // Whether the TTS message is a success (green) or error (red)
-  const [ttsIsSuccess, setTtsIsSuccess] = useState(false);
-  // Whether TTS synthesis is currently running (disables the button)
-  const [isTtsRunning, setIsTtsRunning] = useState(false);
-  // Whether audio is currently playing (toggles Read Text / Stop button)
-  const [isPlaying, setIsPlaying] = useState(false);
-  // Ref for the playback polling interval (so we can clear it on unmount)
-  const playbackPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Ref for the volume save debounce timeout
   const volumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Ref for region slider save debounce timeouts (one per setting key)
@@ -986,22 +862,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   // --- Touchscreen state (Phase 9) ---
   // Status of the touchscreen monitor (fetched on mount and after mode changes)
   const [touchscreenStatus, setTouchscreenStatus] = useState<TouchscreenStatus | null>(null);
-
-  // --- Interface sound state (Phase 11: Sound Effects) ---
-  // Tracks which sound test button is currently playing (null = none)
-  const [playingSoundTest, setPlayingSoundTest] = useState<string | null>(null);
-
-  // --- Pipeline state (Phase 6: Read Screen) ---
-  // Whether the end-to-end pipeline is currently running
-  const [isPipelineRunning, setIsPipelineRunning] = useState(false);
-  // Current pipeline step (for progress display)
-  const [pipelineStep, setPipelineStep] = useState("idle");
-  // Status message shown after pipeline completes (success or error)
-  const [pipelineMessage, setPipelineMessage] = useState<string | null>(null);
-  // Whether the pipeline message is a success (green) or error (red)
-  const [pipelineIsSuccess, setPipelineIsSuccess] = useState(false);
-  // Ref for the pipeline polling interval
-  const pipelinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // --- Region preview overlay state (Phase 13) ---
   // Whether the overlay is currently visible (synced from OverlayState)
@@ -1068,98 +928,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     }
   };
 
-  // Handle the "Test Capture" button press.
-  // Calls the backend to capture a screenshot and shows the result.
-  const handleTestCapture = async () => {
-    setIsCapturing(true);
-    setCaptureMessage(null);
-    const result = await captureScreenshot();
-    setIsCapturing(false);
-    setCaptureMessage(result.message);
-    setCaptureIsSuccess(result.success);
-    // Auto-clear the status message after 5 seconds
-    setTimeout(() => setCaptureMessage(null), 5000);
-  };
-
-  // Handle the "Test OCR" button press.
-  // Captures a screenshot, runs it through Cloud Vision OCR, and displays the result.
-  const handleTestOcr = async () => {
-    setIsOcrRunning(true);
-    setOcrMessage(null);
-    setOcrText(null);  // Clear previous text
-
-    const result = await performOcr();
-    setIsOcrRunning(false);
-    setOcrMessage(result.message);
-    setOcrIsSuccess(result.success);
-
-    // Show detected text if any was found
-    if (result.text) {
-      setOcrText(result.text);
-    }
-
-    // Auto-clear the status message after 8 seconds (longer than capture
-    // because OCR results are more important to read)
-    setTimeout(() => setOcrMessage(null), 8000);
-  };
-
-  // --- TTS handlers ---
-
-  // Start polling the backend for playback status (every 1 second).
-  // This detects when mpv finishes playing naturally so we can update the UI.
-  const startPlaybackPoll = () => {
-    // Clear any existing poll first
-    stopPlaybackPoll();
-
-    playbackPollRef.current = setInterval(async () => {
-      const status = await getPlaybackStatus();
-      if (!status.is_playing) {
-        // Playback finished naturally — update UI
-        setIsPlaying(false);
-        stopPlaybackPoll();
-      }
-    }, 1000);
-  };
-
-  // Stop the playback polling interval
-  const stopPlaybackPoll = () => {
-    if (playbackPollRef.current) {
-      clearInterval(playbackPollRef.current);
-      playbackPollRef.current = null;
-    }
-  };
-
-  // Handle the "Read Text" button — synthesize speech and start playback
-  const handleReadText = async () => {
-    if (!ocrText) return;
-
-    setIsTtsRunning(true);
-    setTtsMessage(null);
-
-    const result = await performTts(ocrText);
-    setIsTtsRunning(false);
-    setTtsMessage(result.message);
-    setTtsIsSuccess(result.success);
-
-    if (result.success) {
-      setIsPlaying(true);
-      startPlaybackPoll();  // Poll to detect when playback finishes
-    }
-
-    // Auto-clear the status message after 5 seconds
-    setTimeout(() => setTtsMessage(null), 5000);
-  };
-
-  // Handle the "Stop Playback" button — stop audio and update UI
-  const handleStopPlayback = async () => {
-    await stopPlayback();
-    setIsPlaying(false);
-    stopPlaybackPoll();
-    setTtsMessage("Playback stopped");
-    setTtsIsSuccess(true);
-    setTimeout(() => setTtsMessage(null), 5000);
-  };
-
   // Handle volume slider changes — update UI immediately, debounce save
   // to prevent rapid writes to disk during slider drag.
   const handleVolumeChange = (value: number) => {
@@ -1188,89 +956,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     regionSaveTimeoutsRef.current[key] = setTimeout(() => {
       saveSetting(key, value);
     }, 800);
-  };
-
-  // --- Pipeline handlers (Phase 6: Read Screen) ---
-
-  // Start polling the backend for pipeline status (every 1 second).
-  // Updates the progress step label in real time while the pipeline runs.
-  const startPipelinePoll = () => {
-    stopPipelinePoll();
-
-    pipelinePollRef.current = setInterval(async () => {
-      const status = await getPipelineStatus();
-      setPipelineStep(status.step);
-
-      // If the pipeline finished and audio is playing, switch to playback poll
-      if (!status.running && status.is_playing) {
-        setIsPipelineRunning(false);
-        setIsPlaying(true);
-        stopPipelinePoll();
-        startPlaybackPoll();
-      }
-      // If the pipeline finished and nothing is playing, clean up
-      if (!status.running && !status.is_playing) {
-        setIsPipelineRunning(false);
-        stopPipelinePoll();
-      }
-    }, 1000);
-  };
-
-  // Stop the pipeline polling interval
-  const stopPipelinePoll = () => {
-    if (pipelinePollRef.current) {
-      clearInterval(pipelinePollRef.current);
-      pipelinePollRef.current = null;
-    }
-  };
-
-  // Handle the "Read Screen" button — run the full pipeline
-  const handleReadScreen = async () => {
-    setIsPipelineRunning(true);
-    setPipelineStep("starting");
-    setPipelineMessage(null);
-    setOcrText(null);  // Clear previous OCR text
-    startPipelinePoll();
-
-    // This blocks until the pipeline finishes (capture → OCR → TTS → playback start)
-    const result = await readScreen();
-
-    // Populate OCR text if the pipeline got far enough to extract it
-    if (result.text) {
-      setOcrText(result.text);
-    }
-
-    if (result.success) {
-      // Pipeline succeeded — audio is now playing
-      setPipelineMessage(result.message);
-      setPipelineIsSuccess(true);
-      setIsPlaying(true);
-      setIsPipelineRunning(false);
-      stopPipelinePoll();
-      startPlaybackPoll();
-    } else {
-      // Pipeline failed or was cancelled
-      setPipelineMessage(result.message);
-      setPipelineIsSuccess(false);
-      setIsPipelineRunning(false);
-      stopPipelinePoll();
-    }
-
-    // Auto-clear the status message after 8 seconds
-    setTimeout(() => setPipelineMessage(null), 8000);
-  };
-
-  // Handle the "Stop" button during pipeline — cancel and clean up
-  const handleStopPipeline = async () => {
-    await stopPipeline();
-    setIsPipelineRunning(false);
-    setIsPlaying(false);
-    setPipelineStep("idle");
-    stopPipelinePoll();
-    stopPlaybackPoll();
-    setPipelineMessage("Pipeline stopped");
-    setPipelineIsSuccess(true);
-    setTimeout(() => setPipelineMessage(null), 5000);
   };
 
   // --- Voice management handlers (Phase 8.6) ---
@@ -1333,12 +1018,10 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     setIsOverlayVisible(false);
   };
 
-  // Cleanup: clear intervals, timeouts, and remove overlay when the component
+  // Cleanup: clear timeouts and remove overlay when the component
   // unmounts. This handles both QAM close and switching to another plugin tab.
   useEffect(() => {
     return () => {
-      stopPlaybackPoll();
-      stopPipelinePoll();
       if (volumeSaveTimeoutRef.current) {
         clearTimeout(volumeSaveTimeoutRef.current);
       }
@@ -1384,100 +1067,23 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     );
   }
 
-  // --- Computed readiness flags (Phase 8: provider-aware) ---
-  // Determines whether each provider has what it needs to function.
-  // Local provider needs bundled Python; GCP needs credentials.
-  const ocrReady = settings.ocr_provider === "local"
-    ? settings.is_local_available
-    : settings.is_gcp_configured;
-  const ttsReady = settings.tts_provider === "local"
-    ? settings.is_local_available
-    : settings.is_gcp_configured;
-  // Both providers must be ready for the full pipeline
-  const pipelineReady = ocrReady && ttsReady;
-
   // Check if either provider uses GCP (controls GCP Credentials section visibility)
   const needsGcp = settings.ocr_provider === "gcp" || settings.tts_provider === "gcp";
 
   // --- Normal mode (settings view) ---
   return (
     <>
-      {/* ---- Read Screen Section (Phase 6) ---- */}
-      {/* This is the primary user-facing feature: one button to capture the
-          screen, detect text, synthesize speech, and play it back. Placed first
-          because it's the main action the user will use. */}
-      <PanelSection title="Read Screen">
-        {/* Progress indicator — shows the current pipeline step while running */}
-        {isPipelineRunning && (
-          <PanelSectionRow>
-            <div style={{
-              color: "#67b7dc",
-              padding: "4px 0",
-              fontSize: "13px"
-            }}>
-              {getPipelineStepLabel(pipelineStep)}
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Status message after pipeline completes (success/error) */}
-        {pipelineMessage && !isPipelineRunning && (
-          <PanelSectionRow>
-            <div style={{
-              color: pipelineIsSuccess ? "#2ecc71" : "#e74c3c",
-              padding: "4px 0",
-              fontSize: "13px"
-            }}>
-              {pipelineMessage}
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Read Screen / Stop button — toggles based on pipeline/playback state */}
+      {/* ---- Enabled Section ---- */}
+      {/* Master on/off toggle at the very top for quick access */}
+      <PanelSection title="Cloud Reader">
         <PanelSectionRow>
-          {isPipelineRunning || isPlaying ? (
-            <ButtonItem
-              layout="below"
-              onClick={isPipelineRunning ? handleStopPipeline : handleStopPlayback}
-            >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-                <FaStop size={14} />
-                <span>Stop</span>
-              </div>
-            </ButtonItem>
-          ) : (
-            <ButtonItem
-              layout="below"
-              onClick={handleReadScreen}
-              disabled={!pipelineReady || !settings.enabled}
-            >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-                <FaBook size={14} />
-                <span>Read Screen</span>
-              </div>
-            </ButtonItem>
-          )}
+          <ToggleField
+            label="Enabled"
+            description="Master switch — disables triggers and OCR/TTS"
+            checked={settings.enabled}
+            onChange={(value) => handleToggle("enabled", value)}
+          />
         </PanelSectionRow>
-
-        {/* Hint when providers aren't ready */}
-        {!pipelineReady && (
-          <PanelSectionRow>
-            <div style={{
-              color: "#b8bcbf",
-              fontSize: "12px",
-              padding: "4px 0"
-            }}>
-              {!ocrReady && settings.ocr_provider === "gcp"
-                ? "Load GCP credentials to enable OCR"
-                : !ocrReady
-                ? "Local OCR unavailable (bundled Python missing)"
-                : !ttsReady && settings.tts_provider === "gcp"
-                ? "Load GCP credentials to enable TTS"
-                : "Local TTS unavailable (bundled Python missing)"
-              }
-            </div>
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       {/* ---- Button Trigger Section (Phase 7) ---- */}
@@ -1703,7 +1309,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             <PanelSectionRow>
               <ButtonItem
                 layout="below"
-                disabled={isOverlayLoading || isPipelineRunning}
+                disabled={isOverlayLoading}
                 onClick={async () => {
                   if (isOverlayVisible) {
                     // Toggle off — unmount the overlay component entirely
@@ -1908,34 +1514,10 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
         )}
       </PanelSection>}
 
-      {/* ---- Settings Section ---- */}
-      <PanelSection title="Settings">
-        {/* Master on/off toggle */}
-        <PanelSectionRow>
-          <ToggleField
-            label="Enabled"
-            description="Master switch — disables triggers and OCR/TTS"
-            checked={settings.enabled}
-            onChange={(value) => handleToggle("enabled", value)}
-          />
-        </PanelSectionRow>
-
-        {/* Debug mode toggle */}
-        <PanelSectionRow>
-          <ToggleField
-            label="Debug Mode"
-            description="Show extra diagnostic logging"
-            checked={settings.debug}
-            onChange={(value) => handleToggle("debug", value)}
-          />
-        </PanelSectionRow>
-      </PanelSection>
-
       {/* ---- Sound Effects Section (Phase 11) ---- */}
       {/* UI feedback sounds for capture mode interactions. Sounds play
           independently of TTS (fire-and-forget). Mute toggle respects
-          the mute_interface_sounds setting. Test buttons verify audio
-          output before Phase 12 integrates sounds into capture modes. */}
+          the mute_interface_sounds setting. */}
       <PanelSection title="Sound Effects">
         {/* Mute interface sounds toggle */}
         <PanelSectionRow>
@@ -1946,150 +1528,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             onChange={(value) => handleToggle("mute_interface_sounds", value)}
           />
         </PanelSectionRow>
-
-        {/* Test sound buttons — one per sound type */}
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={playingSoundTest !== null}
-            onClick={async () => {
-              setPlayingSoundTest("selection_start");
-              await playInterfaceSound("selection_start");
-              // Short delay so the button shows loading state visibly
-              setTimeout(() => setPlayingSoundTest(null), 500);
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-              <FaVolumeUp size={14} />
-              <span>{playingSoundTest === "selection_start" ? "Playing..." : "Test Start Sound"}</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={playingSoundTest !== null}
-            onClick={async () => {
-              setPlayingSoundTest("selection_end");
-              await playInterfaceSound("selection_end");
-              setTimeout(() => setPlayingSoundTest(null), 500);
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-              <FaVolumeUp size={14} />
-              <span>{playingSoundTest === "selection_end" ? "Playing..." : "Test End Sound"}</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={playingSoundTest !== null}
-            onClick={async () => {
-              setPlayingSoundTest("stop");
-              await playInterfaceSound("stop");
-              setTimeout(() => setPlayingSoundTest(null), 500);
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-              <FaVolumeUp size={14} />
-              <span>{playingSoundTest === "stop" ? "Playing..." : "Test Stop Sound"}</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* ---- Screen Capture Section ---- */}
-      <PanelSection title="Screen Capture">
-        {/* Status message from the last capture attempt */}
-        {captureMessage && (
-          <PanelSectionRow>
-            <div style={{
-              color: captureIsSuccess ? "#2ecc71" : "#e74c3c",
-              padding: "4px 0",
-              fontSize: "13px"
-            }}>
-              {captureMessage}
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Test Capture button — triggers a screenshot and shows the result */}
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={handleTestCapture}
-            disabled={isCapturing || isPipelineRunning}
-          >
-            {isCapturing ? "Capturing..." : "Test Capture"}
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* ---- OCR Section ---- */}
-      <PanelSection title="OCR (Text Detection)">
-        {/* Status message from the last OCR attempt */}
-        {ocrMessage && (
-          <PanelSectionRow>
-            <div style={{
-              color: ocrIsSuccess ? "#2ecc71" : "#e74c3c",
-              padding: "4px 0",
-              fontSize: "13px"
-            }}>
-              {ocrMessage}
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Test OCR button — captures screenshot + runs OCR via selected provider */}
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={handleTestOcr}
-            disabled={isOcrRunning || !ocrReady || isPipelineRunning || !settings.enabled}
-          >
-            {isOcrRunning ? "Running OCR..." : "Test OCR"}
-          </ButtonItem>
-        </PanelSectionRow>
-
-        {/* Hint when OCR provider isn't ready */}
-        {!ocrReady && (
-          <PanelSectionRow>
-            <div style={{
-              color: "#b8bcbf",
-              fontSize: "12px",
-              padding: "4px 0"
-            }}>
-              {settings.ocr_provider === "gcp"
-                ? "Load GCP credentials to enable OCR"
-                : "Local OCR unavailable (bundled Python missing)"
-              }
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Scrollable text display — shows detected text from the last OCR run */}
-        {ocrText && (
-          <PanelSectionRow>
-            <div style={{
-              maxHeight: "200px",
-              overflow: "auto",
-              backgroundColor: "#1a1a2e",
-              borderRadius: "4px",
-              padding: "8px",
-              fontSize: "12px",
-              lineHeight: "1.4",
-              whiteSpace: "pre-wrap",    // Preserve line breaks from OCR
-              wordBreak: "break-word",   // Break long words to prevent overflow
-              color: "#e0e0e0",
-              width: "100%",
-            }}>
-              {ocrText}
-            </div>
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       {/* ---- Text Filtering Section (Phase 14) ---- */}
@@ -2376,74 +1814,24 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           />
         </PanelSectionRow>
 
-        {/* TTS status message (success/error) */}
-        {ttsMessage && (
-          <PanelSectionRow>
-            <div style={{
-              color: ttsIsSuccess ? "#2ecc71" : "#e74c3c",
-              padding: "4px 0",
-              fontSize: "13px"
-            }}>
-              {ttsMessage}
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Read Text / Stop Playback button — toggles based on playback state */}
-        <PanelSectionRow>
-          {isPlaying ? (
-            <ButtonItem
-              layout="below"
-              onClick={handleStopPlayback}
-            >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-                <FaStop size={14} />
-                <span>Stop Playback</span>
-              </div>
-            </ButtonItem>
-          ) : (
-            <ButtonItem
-              layout="below"
-              onClick={handleReadText}
-              disabled={isTtsRunning || !ocrText || !ttsReady || isPipelineRunning || !settings.enabled}
-            >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-                <FaVolumeUp size={14} />
-                <span>{isTtsRunning ? "Synthesizing..." : "Read Text"}</span>
-              </div>
-            </ButtonItem>
-          )}
-        </PanelSectionRow>
-
-        {/* Hint when no OCR text is available */}
-        {!ocrText && ttsReady && (
-          <PanelSectionRow>
-            <div style={{
-              color: "#b8bcbf",
-              fontSize: "12px",
-              padding: "4px 0"
-            }}>
-              Run OCR above first to get text for reading
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Hint when TTS provider isn't ready */}
-        {!ttsReady && (
-          <PanelSectionRow>
-            <div style={{
-              color: "#b8bcbf",
-              fontSize: "12px",
-              padding: "4px 0"
-            }}>
-              {settings.tts_provider === "gcp"
-                ? "Load GCP credentials to enable TTS"
-                : "Local TTS unavailable (bundled Python missing)"
-              }
-            </div>
-          </PanelSectionRow>
-        )}
       </PanelSection>
+
+      {/* ---- Debug Section ---- */}
+      <PanelSection title="Debug">
+        <PanelSectionRow>
+          <ToggleField
+            label="Debug Mode"
+            description="Show extra diagnostic logging"
+            checked={settings.debug}
+            onChange={(value) => handleToggle("debug", value)}
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      {/* ---- Version Footer (Phase 19) ---- */}
+      <div style={{ textAlign: "center", fontSize: "11px", color: "#666", padding: "8px 0" }}>
+        Plugin v{PLUGIN_VERSION}
+      </div>
     </>
   );
 }
