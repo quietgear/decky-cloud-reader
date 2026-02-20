@@ -117,6 +117,9 @@ Frontend (TypeScript/React)           Backend (Python)
 - Register callback: `vkm.m_bIsInlineVirtualKeyboardOpen.m_callbacks.Register(cb)` — returns `{Unregister()}` handle
 - Callback receives a boolean: `true` when keyboard opens, `false` when it closes
 
+### Touch handler callback ordering race
+A single physical touch fires three callbacks sequentially on the event loop: `_handle_touch_down` → `_handle_touch_up` → `_handle_touch_tap`. The `_touch_started_during_playback` flag must survive all three — **only clear it at the start of the next `_handle_touch_down`**, never in `_handle_touch_up`. In `_handle_touch_tap`, check the flag **before** checking `_is_playing`/`_pipeline_running`, because `_handle_touch_down` may have already stopped playback (clearing `_is_playing`) but `_pipeline_running` may still be True, causing a duplicate `_stop_and_sound()` call (double stop sound).
+
 ### Decky Plugin Sandbox
 - **`plugin.json` must use `"flags": ["root"]`** (exact string `"root"`, NOT `"_root"`). Decky's `sandboxed_plugin.py` checks `"root" in self.flags` — list exact-match, not substring. With `"_root"`, the plugin silently drops to the `deck` user via `setuid`/`setgid` (without `initgroups`, so no supplementary groups). The `deck` user can open `/dev/hidraw*` (Valve udev `uaccess` rules) but NOT `/dev/input/event*` (`root:input 660`). Root is required for touchscreen evdev access.
 - `sys.path` doesn't include plugin dir — must add manually before importing split-out `.py` files

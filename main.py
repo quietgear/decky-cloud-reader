@@ -755,6 +755,11 @@ class Plugin:
         Handle finger-down event. Used by swipe mode to play start sound.
         In all modes: if playing or pipeline running, mark as stop gesture.
         """
+        # Clear stale flag from previous touch cycle. This is the only place
+        # the flag gets cleared — it must survive through touch_up and touch_tap
+        # handlers that fire later in the same touch cycle.
+        self._touch_started_during_playback = False
+
         mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
         decky.logger.debug(f"{LOG} touch_down: ({x},{y}) mode={mode}")
 
@@ -779,9 +784,9 @@ class Plugin:
             f"dur={duration:.2f}s mode={mode}"
         )
 
-        # If this touch started during playback, it was a stop gesture — don't start pipeline
+        # If this touch started during playback, it was a stop gesture — don't start pipeline.
+        # Do NOT clear the flag here: touch_tap fires after touch_up and also needs it.
         if self._touch_started_during_playback:
-            self._touch_started_during_playback = False
             return
 
         # Safety: if playing or running, stop (shouldn't normally reach here)
@@ -823,7 +828,13 @@ class Plugin:
         mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
         decky.logger.debug(f"{LOG} touch_tap: ({x},{y}) mode={mode}")
 
-        # During playback or pipeline: stop
+        # touch_down already stopped playback and played the stop sound —
+        # don't call _stop_and_sound() again or start a new selection cycle.
+        if self._touch_started_during_playback:
+            return
+
+        # During playback or pipeline: stop (fallback for edge cases where
+        # touch_down didn't catch it, e.g. pipeline started between down and tap)
         if self._is_playing or self._pipeline_running:
             await self._stop_and_sound()
             return
