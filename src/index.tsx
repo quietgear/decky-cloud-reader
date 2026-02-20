@@ -79,6 +79,22 @@ const useUIComposition: (composition: UIComposition) => void = findModuleChild(
 );
 
 // =============================================================================
+// VirtualKeyboardManager — detect on-screen keyboard open/close (Phase 14)
+// =============================================================================
+// Steam's internal module system exposes a VirtualKeyboardManager with an
+// observable m_bIsVirtualKeyboardOpen property. We register a callback so
+// touch gestures (two-tap, swipe) can be suppressed while the keyboard is up.
+// Pattern from: https://github.com/CarJem/Decky-OSKPlus/blob/main/src/keyboard.tsx
+
+const VIRTUAL_KEYBOARD_MANAGER = findModuleChild((m: any) => {
+  if (typeof m !== "object") return undefined;
+  for (let prop in m) {
+    if (m[prop]?.m_WindowStore)
+      return m[prop].ActiveWindowInstance?.VirtualKeyboardManager;
+  }
+});
+
+// =============================================================================
 // TypeScript interfaces — describe the shape of data from the Python backend
 // =============================================================================
 
@@ -319,6 +335,10 @@ const applyLastSelectionToFixedRegion = callable<[], {success: boolean; message:
 
 // Phase 13: Capture screenshot for the region preview overlay
 const captureOverlayScreenshot = callable<[], OverlayScreenshotResult>("capture_overlay_screenshot");
+
+// Phase 14: Notify backend when the on-screen keyboard opens/closes
+// so touch gestures are suppressed while typing
+const setKeyboardVisible = callable<[boolean], void>("set_keyboard_visible");
 
 
 // =============================================================================
@@ -2284,6 +2304,27 @@ export default definePlugin(() => {
   // a useUIComposition hook alive which would interfere with Gamescope input.
   const overlayState = new OverlayState();
 
+  // Phase 14: Register for on-screen keyboard open/close events.
+  // When the virtual keyboard is visible, the backend suppresses touch gestures
+  // (two-tap, swipe) to avoid accidental OCR triggers while typing.
+  let keyboardUnregister: { Unregister: () => void } | null = null;
+  if (VIRTUAL_KEYBOARD_MANAGER) {
+    try {
+      keyboardUnregister = VIRTUAL_KEYBOARD_MANAGER
+        .m_bIsInlineVirtualKeyboardOpen
+        .m_callbacks
+        .Register((isOpen: boolean) => {
+          console.log(`Decky Cloud Reader: keyboard visible = ${isOpen}`);
+          setKeyboardVisible(isOpen);
+        });
+      console.log("Decky Cloud Reader: VirtualKeyboardManager callback registered");
+    } catch (e) {
+      console.error("Decky Cloud Reader: failed to register keyboard callback", e);
+    }
+  } else {
+    console.warn("Decky Cloud Reader: VirtualKeyboardManager not found — keyboard suppression disabled");
+  }
+
   return {
     // The name shown in the Decky plugin list
     name: "Cloud Reader",
@@ -2305,6 +2346,9 @@ export default definePlugin(() => {
       // Phase 13: Clean up overlay on plugin unload
       overlayState.hide();
       routerHook.removeGlobalComponent("DCRRegionPreview");
+      // Phase 14: Unregister keyboard visibility callback
+      keyboardUnregister?.Unregister();
+      keyboardUnregister = null;
     },
   };
 });

@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–12)
+### Completed Phases (1–13)
 
 | Phase | Summary |
 |-------|---------|
@@ -76,6 +76,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, 3 test buttons, Dockerfile audio/ copy |
 | **12: Capture Modes** | 5 capture modes (full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid), touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, mode-aware UI, debounced region slider saves (800ms) |
 | **13: Global Overlay** | Region preview overlay: `capture_overlay_screenshot()` RPC, `OverlayState` class, `RegionPreviewOverlay` global component mounted/unmounted on demand via `routerHook`, `useUIComposition` for Gamescope layer, auto-close on QAM dismiss/tab switch + 10s auto-dismiss timeout, spotlight cutout for fixed region |
+| **13.5: Keyboard Suppression** | Event-driven on-screen keyboard detection via Steam's `VirtualKeyboardManager` (`m_bIsInlineVirtualKeyboardOpen` observable). Frontend registers callback in `definePlugin()`, calls `set_keyboard_visible()` RPC on open/close. Backend `_keyboard_visible` flag guards all touch callbacks — suppresses two-tap/swipe gestures while typing |
 
 ### Phase 14: Text Filtering `[NOT STARTED]`
 - [ ] Backend word filtering in `main.py` (after OCR, before TTS) — parse comma-separated ignore lists, respect enabled toggles
@@ -109,6 +110,12 @@ Frontend (TypeScript/React)           Backend (Python)
 - **pipewiresrc** with `XDG_SESSION_TYPE=wayland` captures the composited output (game + overlay)
 - When no game is focused (home screen), `GAMESCOPE_FOCUSED_WINDOW` returns a Steam UI window on `:0` which causes `BadWindow` on `:1` — must fall back to pipewiresrc
 - Avoid `XDG_SESSION_TYPE=x11` hack with pipewiresrc — it works today but is fragile as SteamOS moves to Wayland
+
+### Steam VirtualKeyboardManager
+- Accessed via `findModuleChild` → module with `m_WindowStore` → `ActiveWindowInstance.VirtualKeyboardManager` (getter on prototype)
+- The observable property is **`m_bIsInlineVirtualKeyboardOpen`** (NOT `m_bIsVirtualKeyboardOpen` as in Decky-OSKPlus — that property no longer exists on current SteamOS)
+- Register callback: `vkm.m_bIsInlineVirtualKeyboardOpen.m_callbacks.Register(cb)` — returns `{Unregister()}` handle
+- Callback receives a boolean: `true` when keyboard opens, `false` when it closes
 
 ### Decky Plugin Sandbox
 - **`plugin.json` must use `"flags": ["root"]`** (exact string `"root"`, NOT `"_root"`). Decky's `sandboxed_plugin.py` checks `"root" in self.flags` — list exact-match, not substring. With `"_root"`, the plugin silently drops to the `deck` user via `setuid`/`setgid` (without `initgroups`, so no supplementary groups). The `deck` user can open `/dev/hidraw*` (Valve udev `uaccess` rules) but NOT `/dev/input/event*` (`root:input 660`). Root is required for touchscreen evdev access.
@@ -188,6 +195,7 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Pipeline cancellation | `threading.Event` between steps | Simple; worker timeout bounded at 60s |
 | Voice distribution | On-demand HuggingFace download | 16 voices / 14 language variants; persists in settings dir across updates; no zip bloat |
 | Default provider | Local (offline) | Works out of the box; GCP requires service account |
+| Keyboard suppression | Frontend event-driven via `VirtualKeyboardManager` | No polling; callback fires on open/close; RPC notifies backend to guard touch handlers |
 | Docker build | Layer caching enabled | Use `--no-cache` when requirements or model URLs change |
 
 ---

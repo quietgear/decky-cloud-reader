@@ -393,6 +393,12 @@ class Plugin:
         self._two_tap_timer = None                # asyncio TimerHandle for 5s timeout
         self._touch_started_during_playback = False  # Prevents post-stop capture
 
+        # Phase 14: Virtual keyboard visibility state. Set by the frontend via
+        # set_keyboard_visible() RPC when Steam's on-screen keyboard opens/closes.
+        # When True, all touch gestures (two-tap, swipe) are suppressed to avoid
+        # interfering with keyboard input.
+        self._keyboard_visible = False
+
         # Persistent GCP worker subprocess state.
         # Instead of spawning a new subprocess for every OCR/TTS call (paying
         # ~1.7s of Python startup + imports + client init each time), we keep
@@ -710,6 +716,9 @@ class Plugin:
         """From monitor thread: finger made contact at (x, y)."""
         if not self._is_enabled:
             return
+        # Suppress touch gestures while the on-screen keyboard is open
+        if self._keyboard_visible:
+            return
         asyncio.run_coroutine_threadsafe(
             self._handle_touch_down(x, y), self._event_loop
         )
@@ -717,6 +726,9 @@ class Plugin:
     def _on_touch_up(self, end_x, end_y, start_x, start_y, duration):
         """From monitor thread: finger lifted. Provides start/end coords + duration."""
         if not self._is_enabled:
+            return
+        # Suppress touch gestures while the on-screen keyboard is open
+        if self._keyboard_visible:
             return
         asyncio.run_coroutine_threadsafe(
             self._handle_touch_up(end_x, end_y, start_x, start_y, duration),
@@ -726,6 +738,9 @@ class Plugin:
     def _on_touch_tap(self, x, y):
         """From monitor thread: short tap detected (legacy, < 0.5s)."""
         if not self._is_enabled:
+            return
+        # Suppress touch gestures while the on-screen keyboard is open
+        if self._keyboard_visible:
             return
         asyncio.run_coroutine_threadsafe(
             self._handle_touch_tap(x, y), self._event_loop
@@ -3338,6 +3353,26 @@ class Plugin:
             "success": True,
             "message": f"Fixed region set to ({x1},{y1})-({x2},{y2})",
         }
+
+    # =========================================================================
+    # RPC: set_keyboard_visible() — on-screen keyboard state from frontend
+    # =========================================================================
+    # Called by the frontend when Steam's virtual keyboard opens or closes.
+    # Touch gesture callbacks check this flag and return early when True,
+    # preventing two-tap/swipe gestures from interfering with keyboard input.
+
+    async def set_keyboard_visible(self, visible):
+        """
+        RPC: Update the on-screen keyboard visibility state.
+
+        Called by the frontend's VirtualKeyboardManager callback whenever
+        the Steam virtual keyboard opens (True) or closes (False).
+
+        Args:
+            visible: True if the keyboard is now open, False if closed.
+        """
+        self._keyboard_visible = bool(visible)
+        decky.logger.info(f"{LOG} set_keyboard_visible({self._keyboard_visible})")
 
     # =========================================================================
     # RPC: get_available_voices()
