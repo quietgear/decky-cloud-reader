@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–13)
+### Completed Phases (1–14.5)
 
 | Phase | Summary |
 |-------|---------|
@@ -77,10 +77,8 @@ Frontend (TypeScript/React)           Backend (Python)
 | **12: Capture Modes** | 5 capture modes (full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid), touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, mode-aware UI, debounced region slider saves (800ms) |
 | **13: Global Overlay** | Region preview overlay: `capture_overlay_screenshot()` RPC, `OverlayState` class, `RegionPreviewOverlay` global component mounted/unmounted on demand via `routerHook`, `useUIComposition` for Gamescope layer, auto-close on QAM dismiss/tab switch + 10s auto-dismiss timeout, spotlight cutout for fixed region |
 | **13.5: Keyboard Suppression** | Event-driven on-screen keyboard detection via Steam's `VirtualKeyboardManager` (`m_bIsInlineVirtualKeyboardOpen` observable). Frontend registers callback in `definePlugin()`, calls `set_keyboard_visible()` RPC on open/close. Backend `_keyboard_visible` flag guards all touch callbacks — suppresses two-tap/swipe gestures while typing |
-
-### Phase 14: Text Filtering `[NOT STARTED]`
-- [ ] Backend word filtering in `main.py` (after OCR, before TTS) — parse comma-separated ignore lists, respect enabled toggles
-- [ ] Frontend settings section for `ignored_words_always`, `ignored_words_always_enabled`, `ignored_words_beginning`, `ignored_words_beginning_enabled`, `ignored_words_count`
+| **14: Text Filtering** | `_apply_text_filters()` in `main.py` — two modes: "always" (whole-word case-insensitive removal anywhere) and "beginning" (remove from first N tokens, punctuation-tolerant). Pipeline forces separate OCR→filter→TTS when filtering active (skips combined `ocr_tts`). Frontend section with toggles, `WordFilterModal` (full-screen modal via `showModal()` for proper keyboard focus), and word-count slider with live value label |
+| **14.5: Touch Suppression** | Three-flag touch suppression: `_keyboard_visible` (Phase 13.5), `_modal_visible` (modal dialogs), `_qam_visible` (QAM "..." menu via `useQuickAccessVisible()` hook from `@decky/ui`). Each has a frontend→backend RPC (`set_keyboard_visible`, `set_modal_visible`, `set_qam_visible`). All three touch callbacks (`_on_touch_down/up/tap`) check all flags. QAM flag reset on Content unmount to prevent stuck suppression |
 
 ---
 
@@ -119,6 +117,12 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ### Touch handler callback ordering race
 A single physical touch fires three callbacks sequentially on the event loop: `_handle_touch_down` → `_handle_touch_up` → `_handle_touch_tap`. The `_touch_started_during_playback` flag must survive all three — **only clear it at the start of the next `_handle_touch_down`**, never in `_handle_touch_up`. In `_handle_touch_tap`, check the flag **before** checking `_is_playing`/`_pipeline_running`, because `_handle_touch_down` may have already stopped playback (clearing `_is_playing`) but `_pipeline_running` may still be True, causing a duplicate `_stop_and_sound()` call (double stop sound).
+
+### QAM visibility and component unmount
+`useQuickAccessVisible()` (from `@decky/ui`) detects QAM open/close via `visibilitychange` on the QuickAccess window. However, when the QAM closes, the `Content` component unmounts before the `useEffect` for `isQamVisible=false` can fire, leaving `_qam_visible` stuck at `true`. **Always reset QAM flag in the unmount cleanup** (`setQamVisible(false)` in the `useEffect([], [])` cleanup return).
+
+### TextField in QAM panel
+`TextField` from `@decky/ui` placed directly in the QAM panel does NOT receive proper keyboard focus — the on-screen keyboard appears but input goes to the wrong target, and the keyboard is partially covered by the panel. **Use `showModal()` with a `ModalRoot`** containing the `TextField` instead. The full-screen modal gets proper focus and the keyboard has room.
 
 ### Decky Plugin Sandbox
 - **`plugin.json` must use `"flags": ["root"]`** (exact string `"root"`, NOT `"_root"`). Decky's `sandboxed_plugin.py` checks `"root" in self.flags` — list exact-match, not substring. With `"_root"`, the plugin silently drops to the `deck` user via `setuid`/`setgid` (without `initgroups`, so no supplementary groups). The `deck` user can open `/dev/hidraw*` (Valve udev `uaccess` rules) but NOT `/dev/input/event*` (`root:input 660`). Root is required for touchscreen evdev access.
@@ -199,6 +203,8 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Voice distribution | On-demand HuggingFace download | 16 voices / 14 language variants; persists in settings dir across updates; no zip bloat |
 | Default provider | Local (offline) | Works out of the box; GCP requires service account |
 | Keyboard suppression | Frontend event-driven via `VirtualKeyboardManager` | No polling; callback fires on open/close; RPC notifies backend to guard touch handlers |
+| Touch suppression | Three-flag guard: keyboard + modal + QAM | `useQuickAccessVisible()` for QAM; `useEffect` + RPC for modal; explicit reset on unmount |
+| Text input in QAM | Full-screen modal via `showModal()` | `TextField` in QAM panel doesn't receive keyboard focus; modal gives proper focus + no keyboard overlap |
 | Docker build | Layer caching enabled | Use `--no-cache` when requirements or model URLs change |
 
 ---

@@ -28,6 +28,8 @@ import traceback
 import subprocess
 import signal
 import shutil
+import string
+import re
 import tempfile
 import asyncio
 import time
@@ -393,11 +395,21 @@ class Plugin:
         self._two_tap_timer = None                # asyncio TimerHandle for 5s timeout
         self._touch_started_during_playback = False  # Prevents post-stop capture
 
-        # Phase 14: Virtual keyboard visibility state. Set by the frontend via
+        # Phase 13.5: Virtual keyboard visibility state. Set by the frontend via
         # set_keyboard_visible() RPC when Steam's on-screen keyboard opens/closes.
         # When True, all touch gestures (two-tap, swipe) are suppressed to avoid
         # interfering with keyboard input.
         self._keyboard_visible = False
+
+        # Phase 14: Modal dialog visibility state. Set by the frontend via
+        # set_modal_visible() RPC when a full-screen modal (e.g. word filter
+        # editor) opens/closes. Suppresses touch gestures like _keyboard_visible.
+        self._modal_visible = False
+
+        # Phase 14: QAM ("..." menu) visibility state. Set by the frontend via
+        # set_qam_visible() RPC using useQuickAccessVisible() hook. Suppresses
+        # touch gestures while any part of the Quick Access Menu is open.
+        self._qam_visible = False
 
         # Persistent GCP worker subprocess state.
         # Instead of spawning a new subprocess for every OCR/TTS call (paying
@@ -716,8 +728,8 @@ class Plugin:
         """From monitor thread: finger made contact at (x, y)."""
         if not self._is_enabled:
             return
-        # Suppress touch gestures while the on-screen keyboard is open
-        if self._keyboard_visible:
+        # Suppress touch gestures while keyboard, modal, or QAM is open
+        if self._keyboard_visible or self._modal_visible or self._qam_visible:
             return
         asyncio.run_coroutine_threadsafe(
             self._handle_touch_down(x, y), self._event_loop
@@ -727,8 +739,8 @@ class Plugin:
         """From monitor thread: finger lifted. Provides start/end coords + duration."""
         if not self._is_enabled:
             return
-        # Suppress touch gestures while the on-screen keyboard is open
-        if self._keyboard_visible:
+        # Suppress touch gestures while keyboard, modal, or QAM is open
+        if self._keyboard_visible or self._modal_visible or self._qam_visible:
             return
         asyncio.run_coroutine_threadsafe(
             self._handle_touch_up(end_x, end_y, start_x, start_y, duration),
@@ -739,8 +751,8 @@ class Plugin:
         """From monitor thread: short tap detected (legacy, < 0.5s)."""
         if not self._is_enabled:
             return
-        # Suppress touch gestures while the on-screen keyboard is open
-        if self._keyboard_visible:
+        # Suppress touch gestures while keyboard, modal, or QAM is open
+        if self._keyboard_visible or self._modal_visible or self._qam_visible:
             return
         asyncio.run_coroutine_threadsafe(
             self._handle_touch_tap(x, y), self._event_loop
@@ -1815,6 +1827,67 @@ class Plugin:
             return self._send_to_local_worker(command_dict, timeout)
 
     # =========================================================================
+    # Text filtering: _apply_text_filters()
+    # =========================================================================
+    # Phase 14 — post-OCR text filtering. Applied between OCR and TTS in the
+    # pipeline to strip unwanted words (character names, chapter headers, UI
+    # labels) before speech synthesis. Two independent filter modes:
+    #   - "Always": removes specified words anywhere in the text
+    #   - "Beginning": removes specified words from the first N words only
+
+    def _apply_text_filters(self, text):
+        """
+        Apply configured text filters to OCR output before TTS.
+
+        Two filter modes, each independently toggleable via settings:
+        - "Always": case-insensitive whole-word removal anywhere in text.
+        - "Beginning": remove matching words from the first N tokens only.
+          Strips trailing punctuation before comparison so "Chapter:" matches
+          the ignore word "Chapter".
+
+        Returns the filtered text (or the original if no filters are active).
+        """
+        if not text or not text.strip():
+            return text
+
+        original = text  # stash for debug logging
+
+        # --- "Always" filter: remove words anywhere (whole-word, case-insensitive) ---
+        if self.settings.get("ignored_words_always_enabled", False):
+            words_str = self.settings.get("ignored_words_always", "")
+            if words_str.strip():
+                ignore_words = [w.strip() for w in words_str.split(",") if w.strip()]
+                for word in ignore_words:
+                    # \b = word boundary, re.escape handles special chars in the word
+                    pattern = re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE)
+                    text = pattern.sub('', text)
+
+        # --- "Beginning" filter: remove words from first N tokens ---
+        if self.settings.get("ignored_words_beginning_enabled", False):
+            words_str = self.settings.get("ignored_words_beginning", "")
+            count = self.settings.get("ignored_words_count", 3)
+            if words_str.strip() and count > 0:
+                ignore_set = {w.strip().lower() for w in words_str.split(",") if w.strip()}
+                tokens = text.split()
+                check_count = min(count, len(tokens))
+                # Strip trailing punctuation before comparison so "Chapter:" matches "Chapter"
+                filtered_start = [
+                    t for t in tokens[:check_count]
+                    if t.rstrip(string.punctuation).lower() not in ignore_set
+                ]
+                text = ' '.join(filtered_start + tokens[check_count:])
+
+        # Clean up multiple spaces left by word removals
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        if text != original:
+            decky.logger.debug(
+                f"{LOG} text filter: {len(original)}→{len(text)} chars"
+            )
+
+        return text
+
+    # =========================================================================
     # Audio playback: _start_playback(), _stop_playback(), _cleanup_tts_temp()
     # =========================================================================
     # Audio playback via ffplay/mpv/pw-play. Unlike worker subprocesses (which
@@ -2524,9 +2597,17 @@ class Plugin:
                         }
                     decky.logger.info(f"{LOG} pipeline: voice downloaded, continuing...")
 
-            # Route based on whether both providers are the same
-            if ocr_provider == tts_provider:
-                # Same provider — use combined ocr_tts action for efficiency
+            # Phase 14: check if text filtering is active — when it is, we must
+            # split OCR and TTS into separate steps even for the same provider,
+            # because filtering needs to modify the text between OCR and TTS.
+            filtering_active = (
+                self.settings.get("ignored_words_always_enabled", False) or
+                self.settings.get("ignored_words_beginning_enabled", False)
+            )
+
+            # Route based on whether both providers are the same AND no filtering
+            if ocr_provider == tts_provider and not filtering_active:
+                # Same provider, no filtering — use combined ocr_tts action for efficiency
                 decky.logger.info(f"{LOG} pipeline: running OCR+TTS combined ({ocr_provider})...")
                 command = {
                     "action": "ocr_tts",
@@ -2557,8 +2638,9 @@ class Plugin:
                 audio_size = result.get("audio_size", 0)
 
             else:
-                # Mixed providers — run OCR first, then TTS separately
-                decky.logger.info(f"{LOG} pipeline: running OCR ({ocr_provider}) then TTS ({tts_provider})...")
+                # Mixed providers or filtering active — run OCR first, filter, then TTS separately
+                decky.logger.info(f"{LOG} pipeline: running OCR ({ocr_provider}) then TTS ({tts_provider})"
+                                  f"{' [filtering active]' if filtering_active else ''}...")
 
                 # OCR step — include crop_region if specified (Phase 12)
                 ocr_cmd = {"action": "ocr", "image_path": ocr_tmp_path}
@@ -2578,6 +2660,9 @@ class Plugin:
 
                 ocr_text = ocr_result.get("text", "")
                 char_count = ocr_result.get("char_count", len(ocr_text))
+
+                # Phase 14: apply text filters between OCR and TTS
+                ocr_text = self._apply_text_filters(ocr_text)
 
                 if not ocr_text.strip():
                     t_ocr_tts = time.monotonic() - t_step
@@ -3384,6 +3469,46 @@ class Plugin:
         """
         self._keyboard_visible = bool(visible)
         decky.logger.info(f"{LOG} set_keyboard_visible({self._keyboard_visible})")
+
+    # =========================================================================
+    # RPC: set_modal_visible() — modal dialog state from frontend
+    # =========================================================================
+    # Called by the frontend when a full-screen modal (e.g. word filter editor)
+    # opens or closes. Touch gestures are suppressed while a modal is visible.
+
+    async def set_modal_visible(self, visible):
+        """
+        RPC: Update the modal dialog visibility state.
+
+        Called by the frontend when a WordFilterModal (or similar full-screen
+        modal) opens (True) or closes (False). Suppresses touch gestures
+        while the modal is open, same as keyboard suppression.
+
+        Args:
+            visible: True if a modal is now open, False if closed.
+        """
+        self._modal_visible = bool(visible)
+        decky.logger.info(f"{LOG} set_modal_visible({self._modal_visible})")
+
+    # =========================================================================
+    # RPC: set_qam_visible() — Quick Access Menu state from frontend
+    # =========================================================================
+    # Called by the frontend's useQuickAccessVisible() hook whenever the QAM
+    # ("..." menu) opens or closes. Touch gestures are suppressed while visible.
+
+    async def set_qam_visible(self, visible):
+        """
+        RPC: Update the QAM (Quick Access Menu) visibility state.
+
+        Called by the frontend via useQuickAccessVisible() whenever the
+        "..." menu opens (True) or closes (False). Suppresses touch
+        gestures while the QAM is open.
+
+        Args:
+            visible: True if the QAM is now open, False if closed.
+        """
+        self._qam_visible = bool(visible)
+        decky.logger.info(f"{LOG} set_qam_visible({self._qam_visible})")
 
     # =========================================================================
     # RPC: get_available_voices()

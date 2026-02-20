@@ -22,8 +22,14 @@ import {
   Field,            // Generic field container with label support
   DropdownItem,     // A dropdown selector for picking from a list of options
   SliderField,      // A slider for numeric values with min/max/step
+  TextField,        // Text input field — triggers Steam on-screen keyboard on focus
+  showModal,        // Opens a full-screen modal dialog (needed for keyboard focus in QAM)
+  ModalRoot,        // Container for modal content with onCancel/onEscKeypress handlers
+  DialogButton,     // Button styled for modal dialogs (Save/Cancel)
+  Focusable,        // Makes elements gamepad-focusable, supports flow-children layout
   staticClasses,    // CSS class names for standard Steam UI styling
-  findModuleChild   // Searches Steam's internal modules for hidden hooks/utilities
+  findModuleChild,  // Searches Steam's internal modules for hidden hooks/utilities
+  useQuickAccessVisible // Returns true/false when QAM ("..." menu) opens/closes
 } from "@decky/ui";
 
 import {
@@ -336,9 +342,17 @@ const applyLastSelectionToFixedRegion = callable<[], {success: boolean; message:
 // Phase 13: Capture screenshot for the region preview overlay
 const captureOverlayScreenshot = callable<[], OverlayScreenshotResult>("capture_overlay_screenshot");
 
-// Phase 14: Notify backend when the on-screen keyboard opens/closes
+// Phase 13.5: Notify backend when the on-screen keyboard opens/closes
 // so touch gestures are suppressed while typing
 const setKeyboardVisible = callable<[boolean], void>("set_keyboard_visible");
+
+// Phase 14: Notify backend when a full-screen modal dialog opens/closes
+// so touch gestures are suppressed while the modal is visible
+const setModalVisible = callable<[boolean], void>("set_modal_visible");
+
+// Phase 14: Notify backend when the QAM ("..." menu) opens/closes
+// so touch gestures are suppressed while any part of the QAM is visible
+const setQamVisible = callable<[boolean], void>("set_qam_visible");
 
 
 // =============================================================================
@@ -845,12 +859,71 @@ function FileBrowser({ onFileSelected, onCancel }: {
 // =============================================================================
 // Content component — the main plugin panel UI
 // =============================================================================
+// =============================================================================
+// WordFilterModal — Full-screen modal for editing comma-separated word lists.
+// =============================================================================
+// TextField in the QAM panel doesn't receive keyboard focus properly (input
+// goes to the wrong target, and the keyboard is partially covered by the panel).
+// Opening a full-screen modal via showModal() fixes both issues — the modal
+// takes over the screen so the keyboard has room and focus works correctly.
+// Pattern from Decky-Translator's ApiKeyModal (TabTranslation.tsx:55-95).
+
+function WordFilterModal({ title, description, currentValue, onSave, closeModal }: {
+  title: string;
+  description: string;
+  currentValue: string;
+  onSave: (value: string) => void;
+  closeModal?: () => void;
+}) {
+  const [text, setText] = useState(currentValue || "");
+
+  // Suppress touch gestures while the modal is open (same as keyboard suppression)
+  useEffect(() => {
+    setModalVisible(true);
+    return () => { setModalVisible(false); };
+  }, []);
+
+  return (
+    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal}>
+      <div style={{ padding: "20px", minWidth: "400px" }}>
+        <h2 style={{ marginBottom: "15px" }}>{title}</h2>
+        <p style={{ marginBottom: "15px", color: "#aaa", fontSize: "13px" }}>
+          {description}
+        </p>
+        <TextField
+          label="Words"
+          value={text}
+          bShowClearAction={true}
+          onChange={(e: any) => setText(e.target.value)}
+        />
+        <Focusable
+          style={{ display: "flex", gap: "10px", marginTop: "20px", justifyContent: "flex-end" }}
+          flow-children="horizontal"
+        >
+          <DialogButton onClick={closeModal}>Cancel</DialogButton>
+          <DialogButton onClick={() => { onSave(text); closeModal?.(); }}>
+            Save
+          </DialogButton>
+        </Focusable>
+      </div>
+    </ModalRoot>
+  );
+}
+
 // This is the top-level component rendered inside the Decky sidebar panel.
 // It switches between two modes:
 //   - Normal mode: shows settings, credential status, and action buttons
 //   - File browser mode: shows the FileBrowser for selecting a JSON file
 
 function Content({ overlayState }: { overlayState: OverlayState }) {
+  // Phase 14: Track QAM visibility and notify backend so touch gestures
+  // are suppressed while the "..." menu is open. useQuickAccessVisible()
+  // listens to the QuickAccess window's visibilitychange DOM event.
+  const isQamVisible = useQuickAccessVisible();
+  useEffect(() => {
+    setQamVisible(isQamVisible);
+  }, [isQamVisible]);
+
   // Current plugin settings, loaded from the backend on mount
   const [settings, setSettings] = useState<PluginSettings | null>(null);
   // UI mode: "normal" shows settings, "browser" shows file picker
@@ -1281,6 +1354,10 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       }
       routerHook.removeGlobalComponent("DCRRegionPreview");
       overlayState.hide();
+      // Phase 14: Reset QAM visibility flag on unmount — the useEffect for
+      // isQamVisible may not fire before the component unmounts, so we
+      // explicitly clear it to avoid leaving touch gestures suppressed.
+      setQamVisible(false);
     };
   }, []);
 
@@ -2012,6 +2089,98 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
               {ocrText}
             </div>
           </PanelSectionRow>
+        )}
+      </PanelSection>
+
+      {/* ---- Text Filtering Section (Phase 14) ---- */}
+      {/* Configurable word filters applied between OCR and TTS in the pipeline.
+          Two modes: "Always" removes words anywhere, "Beginning" removes words
+          from the first N tokens only. Each mode has its own enable toggle. */}
+      <PanelSection title="Text Filtering">
+        {/* "Always" filter toggle — remove specified words anywhere in OCR text */}
+        <PanelSectionRow>
+          <ToggleField
+            label="Filter Words (Always)"
+            description="Remove specified words anywhere in detected text"
+            checked={settings.ignored_words_always_enabled}
+            onChange={(value) => handleToggle("ignored_words_always_enabled", value)}
+          />
+        </PanelSectionRow>
+
+        {/* Button to open modal for editing "always" word list. Uses a full-screen
+            modal so the on-screen keyboard gets proper focus and isn't covered. */}
+        {settings.ignored_words_always_enabled && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              description={settings.ignored_words_always || "(none)"}
+              onClick={() => {
+                showModal(
+                  <WordFilterModal
+                    title="Filter Words (Always)"
+                    description="Enter comma-separated words to remove anywhere in detected text (e.g. word1, word2)"
+                    currentValue={settings.ignored_words_always}
+                    onSave={(value) => {
+                      saveSetting("ignored_words_always", value);
+                      if (settings) setSettings({ ...settings, ignored_words_always: value });
+                    }}
+                  />
+                );
+              }}
+            >
+              Edit Word List
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+
+        {/* "Beginning" filter toggle — remove specified words from start of text */}
+        <PanelSectionRow>
+          <ToggleField
+            label="Filter Words (Beginning)"
+            description="Remove specified words from the start of detected text"
+            checked={settings.ignored_words_beginning_enabled}
+            onChange={(value) => handleToggle("ignored_words_beginning_enabled", value)}
+          />
+        </PanelSectionRow>
+
+        {/* Button to open modal for editing "beginning" word list + word count slider */}
+        {settings.ignored_words_beginning_enabled && (
+          <>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                description={settings.ignored_words_beginning || "(none)"}
+                onClick={() => {
+                  showModal(
+                    <WordFilterModal
+                      title="Filter Words (Beginning)"
+                      description="Enter comma-separated words to remove from the start of detected text (e.g. Chapter, Narrator)"
+                      currentValue={settings.ignored_words_beginning}
+                      onSave={(value) => {
+                        saveSetting("ignored_words_beginning", value);
+                        if (settings) setSettings({ ...settings, ignored_words_beginning: value });
+                      }}
+                    />
+                  );
+                }}
+              >
+                Edit Word List
+              </ButtonItem>
+            </PanelSectionRow>
+
+            {/* How many leading words to check for the "beginning" filter */}
+            <PanelSectionRow>
+              <SliderField
+                label={`Words to Check: ${settings.ignored_words_count}`}
+                description="Number of leading words to scan for matches"
+                value={settings.ignored_words_count}
+                min={1}
+                max={10}
+                step={1}
+                onChange={(value: number) => handleRegionChange("ignored_words_count", value)}
+              />
+            </PanelSectionRow>
+          </>
         )}
       </PanelSection>
 
