@@ -904,6 +904,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   const [isOverlayLoading, setIsOverlayLoading] = useState(false);
   // Ref for the overlay auto-dismiss timeout (10s safety net)
   const overlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Ref for scrolling to the bottom of the Debug section after toggle (Phase 21)
+  const debugEndRef = useRef<HTMLDivElement>(null);
 
   // Load settings, monitor status, and voice list from the backend when
   // the component first mounts. Also reload when returning from file browser mode.
@@ -1179,21 +1181,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           </PanelSectionRow>
         )}
 
-        {/* Monitor status indicator — shows whether the device is connected */}
-        {settings.trigger_button !== "disabled" && monitorStatus && (
-          <PanelSectionRow>
-            <Field label="Status">
-              <div style={{
-                color: monitorStatus.initialized ? "#2ecc71" : "#e74c3c",
-                fontWeight: "bold",
-                fontSize: "13px",
-              }}>
-                {monitorStatus.initialized ? "Connected" : "Not connected"}
-              </div>
-            </Field>
-          </PanelSectionRow>
-        )}
-
         {/* Hint text explaining what the button trigger does */}
         <PanelSectionRow>
           <div style={{
@@ -1387,20 +1374,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           </>
         )}
 
-        {/* Touchscreen status — shown for modes that need touch input */}
-        {needsTouch && touchscreenStatus && (
-          <PanelSectionRow>
-            <Field label="Touchscreen">
-              <div style={{
-                color: touchscreenStatus.initialized ? "#2ecc71" : "#e74c3c",
-                fontWeight: "bold",
-                fontSize: "13px",
-              }}>
-                {touchscreenStatus.initialized ? "Connected" : "Not connected"}
-              </div>
-            </Field>
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       {/* ---- Provider Section (Phase 8) ---- */}
@@ -1857,15 +1830,56 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             label="Debug Mode"
             description="Show extra diagnostic logging"
             checked={settings.debug}
-            onChange={(value) => handleToggle("debug", value)}
+            onChange={(value) => {
+              handleToggle("debug", value);
+              // Scroll the debug section's bottom into view after the indicators
+              // appear, so the QAM scroll container reveals the new content (Phase 21).
+              if (value) {
+                setTimeout(() => debugEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 100);
+              }
+            }}
           />
         </PanelSectionRow>
+
+        {/* Monitor status indicators — only visible when Debug Mode is ON (Phase 21) */}
+        {settings.debug && monitorStatus && settings.trigger_button !== "disabled" && (
+          <PanelSectionRow>
+            <Field label="Button Monitor">
+              <div style={{
+                color: monitorStatus.initialized ? "#2ecc71" : "#e74c3c",
+                fontWeight: "bold",
+                fontSize: "13px",
+              }}>
+                {monitorStatus.initialized ? "Connected" : "Not connected"}
+              </div>
+            </Field>
+          </PanelSectionRow>
+        )}
+        {settings.debug && touchscreenStatus && needsTouch && (
+          <PanelSectionRow>
+            <Field label="Touchscreen">
+              <div style={{
+                color: touchscreenStatus.initialized ? "#2ecc71" : "#e74c3c",
+                fontWeight: "bold",
+                fontSize: "13px",
+              }}>
+                {touchscreenStatus.initialized ? "Connected" : "Not connected"}
+              </div>
+            </Field>
+          </PanelSectionRow>
+        )}
+        {/* Scroll anchor — scrollIntoView target when debug is toggled ON */}
+        {settings.debug && <div ref={debugEndRef} />}
       </PanelSection>
 
       {/* ---- Version Footer (Phase 19) ---- */}
       <div style={{ textAlign: "center", fontSize: "11px", color: "#666", padding: "8px 0" }}>
         Plugin v{PLUGIN_VERSION}
       </div>
+      {/* Invisible spacer so gamepad D-pad navigation can reach the bottom */}
+      <PanelSectionRow>
+        <Focusable style={{ height: "1px", opacity: 0 }} onActivate={() => {}} />
+      </PanelSectionRow>
     </>
   );
 }

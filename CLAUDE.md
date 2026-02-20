@@ -85,12 +85,12 @@ Frontend (TypeScript/React)           Backend (Python)
 | **18: Remove Read Screen Section** | Removed "Read Screen" / "Stop" button, pipeline progress indicator, pipeline polling, `getPipelineStepLabel()` helper, and all pipeline/playback RPC callables. Replaced top section with "Cloud Reader" containing just the Enabled toggle. Moved Debug Mode toggle to its own "Debug" section |
 | **19: Versioning** | Version `1.0.0` in `package.json` as single source of truth. `@rollup/plugin-replace` injects `__PLUGIN_VERSION__` at build time via `rollup.config.js`. Version footer at bottom of plugin panel ("Plugin v1.0.0") |
 | **20: GCP Voice Expansion** | Expanded GCP voice dropdown from 8 English-only to 28 multi-language voices (EN-US, EN-GB, UK, DE, FR, ES, JA, PT-BR, RU). Includes Neural2, Wavenet, and Standard voices. Updated `VOICE_OPTIONS` in frontend and `VOICE_REGISTRY` in `gcp_worker.py`. Adopted reference plugin label format |
+| **21: Debug-Only Monitor Status** | Moved button monitor and touchscreen status indicators from their respective sections into the Debug section. Both only render when Debug Mode is ON, reducing UI clutter for normal use. `scrollIntoView` on a ref + invisible `Focusable` spacer to fix QAM scroll container not recalculating height after dynamic content appears |
 
-### Upcoming Phases (21–22)
+### Upcoming Phases (22)
 
 | Phase | Summary |
 |-------|---------|
-| **21: Debug-Only Monitor Status** | Move touchscreen and button monitor status indicators under the Debug Mode toggle. Only show them when Debug Mode is ON |
 | **22: Zero Hold Time Option** | Add "no hold" / 0ms option to the trigger button hold time dropdown — instant trigger on button press without requiring a sustained hold |
 
 ---
@@ -136,6 +136,11 @@ A single physical touch fires three callbacks sequentially on the event loop: `_
 
 ### TextField in QAM panel
 `TextField` from `@decky/ui` placed directly in the QAM panel does NOT receive proper keyboard focus — the on-screen keyboard appears but input goes to the wrong target, and the keyboard is partially covered by the panel. **Use `showModal()` with a `ModalRoot`** containing the `TextField` instead. The full-screen modal gets proper focus and the keyboard has room.
+
+### QAM panel scroll with dynamic content
+Steam's QAM scroll container does NOT recalculate its scrollable height when content is dynamically added/removed (e.g., a toggle revealing extra fields). `window.dispatchEvent(new Event("resize"))` does NOT work in the Steam CEF browser. **Two workarounds:**
+1. **`scrollIntoView`** — place a `ref` at the bottom of the new content, call `ref.current?.scrollIntoView({ behavior: "smooth", block: "nearest" })` via `setTimeout(..., 100)` after the state change
+2. **Invisible `Focusable` spacer** at the very bottom of the panel — ensures gamepad D-pad navigation can always reach the last item: `<Focusable style={{ height: "1px", opacity: 0 }} onActivate={() => {}} />`
 
 ### Decky Plugin Sandbox
 - **`plugin.json` must use `"flags": ["root"]`** (exact string `"root"`, NOT `"_root"`). Decky's `sandboxed_plugin.py` checks `"root" in self.flags` — list exact-match, not substring. With `"_root"`, the plugin silently drops to the `deck` user via `setuid`/`setgid` (without `initgroups`, so no supplementary groups). The `deck` user can open `/dev/hidraw*` (Valve udev `uaccess` rules) but NOT `/dev/input/event*` (`root:input 660`). Root is required for touchscreen evdev access.
