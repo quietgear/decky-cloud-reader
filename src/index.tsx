@@ -623,6 +623,7 @@ const CAPTURE_MODE_OPTIONS = [
 ];
 
 const HOLD_TIME_OPTIONS = [
+  { data: 0,    label: "Instant (0ms)" },
   { data: 300,  label: "300ms (Quick)" },
   { data: 500,  label: "500ms (Default)" },
   { data: 750,  label: "750ms" },
@@ -1190,7 +1191,9 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           }}>
             {settings.trigger_button === "disabled"
               ? "Enable a button to trigger Read Screen without opening this panel"
-              : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to trigger Read Screen`
+              : settings.hold_time_ms === 0
+                ? `Press ${settings.trigger_button} to trigger Read Screen`
+                : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to trigger Read Screen`
             }
           </div>
         </PanelSectionRow>

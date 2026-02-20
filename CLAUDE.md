@@ -86,12 +86,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **19: Versioning** | Version `1.0.0` in `package.json` as single source of truth. `@rollup/plugin-replace` injects `__PLUGIN_VERSION__` at build time via `rollup.config.js`. Version footer at bottom of plugin panel ("Plugin v1.0.0") |
 | **20: GCP Voice Expansion** | Expanded GCP voice dropdown from 8 English-only to 28 multi-language voices (EN-US, EN-GB, UK, DE, FR, ES, JA, PT-BR, RU). Includes Neural2, Wavenet, and Standard voices. Updated `VOICE_OPTIONS` in frontend and `VOICE_REGISTRY` in `gcp_worker.py`. Adopted reference plugin label format |
 | **21: Debug-Only Monitor Status** | Moved button monitor and touchscreen status indicators from their respective sections into the Debug section. Both only render when Debug Mode is ON, reducing UI clutter for normal use. `scrollIntoView` on a ref + invisible `Focusable` spacer to fix QAM scroll container not recalculating height after dynamic content appears |
-
-### Upcoming Phases (22)
-
-| Phase | Summary |
-|-------|---------|
-| **22: Zero Hold Time Option** | Add "no hold" / 0ms option to the trigger button hold time dropdown — instant trigger on button press without requiring a sustained hold |
+| **22: Zero Hold Time Option** | Added "Instant (0ms)" option to the hold time dropdown. Backend's `>=` comparison handles 0 naturally — trigger fires immediately on press. Hint text adapts: "Press L4 to trigger" instead of "Hold L4 for 0ms" |
 
 ---
 
