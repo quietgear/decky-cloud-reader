@@ -84,12 +84,12 @@ Frontend (TypeScript/React)           Backend (Python)
 | **17: Remove Test Capture & Test OCR** | Removed standalone "Test Capture" button (Screen Capture section) and "Test OCR" button (OCR section) with status messages and OCR text display. Removed the entire Screen Capture and OCR sections from UI |
 | **18: Remove Read Screen Section** | Removed "Read Screen" / "Stop" button, pipeline progress indicator, pipeline polling, `getPipelineStepLabel()` helper, and all pipeline/playback RPC callables. Replaced top section with "Cloud Reader" containing just the Enabled toggle. Moved Debug Mode toggle to its own "Debug" section |
 | **19: Versioning** | Version `1.0.0` in `package.json` as single source of truth. `@rollup/plugin-replace` injects `__PLUGIN_VERSION__` at build time via `rollup.config.js`. Version footer at bottom of plugin panel ("Plugin v1.0.0") |
+| **20: GCP Voice Expansion** | Expanded GCP voice dropdown from 8 English-only to 28 multi-language voices (EN-US, EN-GB, UK, DE, FR, ES, JA, PT-BR, RU). Includes Neural2, Wavenet, and Standard voices. Updated `VOICE_OPTIONS` in frontend and `VOICE_REGISTRY` in `gcp_worker.py`. Adopted reference plugin label format |
 
-### Upcoming Phases (20–22)
+### Upcoming Phases (21–22)
 
 | Phase | Summary |
 |-------|---------|
-| **20: GCP Voice Expansion** | Expand GCP voice dropdown from 8 English-only voices to 28 multi-language voices matching `decky-ocr-tts-claude-service-plugin` (EN-US, EN-GB, UK, DE, FR, ES, JA, PT-BR, RU) |
 | **21: Debug-Only Monitor Status** | Move touchscreen and button monitor status indicators under the Debug Mode toggle. Only show them when Debug Mode is ON |
 | **22: Zero Hold Time Option** | Add "no hold" / 0ms option to the trigger button hold time dropdown — instant trigger on button press without requiring a sustained hold |
 

@@ -54,19 +54,51 @@ RETRY_DELAYS = [0.5, 1.0]  # Delays between attempts (seconds)
 MAX_TEXT_LENGTH = 5000
 
 # Voice registry: maps voice IDs to their language codes.
-# These are all Neural2 voices — Google's high-quality neural voices.
-# 4 US English + 4 British English voices for Phase 5. Expandable later.
+# 28 voices across 9 languages (Phase 20). Includes Neural2, Wavenet, and
+# Standard voices for: EN-US, EN-GB, UK, DE, FR, ES, JA, PT-BR, RU.
 VOICE_REGISTRY = {
     # US English Neural2 voices (en-US)
     "en-US-Neural2-A": "en-US",  # Male
     "en-US-Neural2-C": "en-US",  # Female
     "en-US-Neural2-D": "en-US",  # Male
     "en-US-Neural2-F": "en-US",  # Female
+    # US English Wavenet voices (en-US)
+    "en-US-Wavenet-C": "en-US",  # Female
+    "en-US-Wavenet-D": "en-US",  # Male
     # British English Neural2 voices (en-GB)
     "en-GB-Neural2-A": "en-GB",  # Female
     "en-GB-Neural2-B": "en-GB",  # Male
     "en-GB-Neural2-C": "en-GB",  # Female
     "en-GB-Neural2-D": "en-GB",  # Male
+    # Ukrainian voices (uk-UA)
+    "uk-UA-Wavenet-A": "uk-UA",   # Female (Wavenet)
+    "uk-UA-Standard-A": "uk-UA",  # Female (Standard)
+    # German Neural2 voices (de-DE)
+    "de-DE-Neural2-A": "de-DE",  # Female
+    "de-DE-Neural2-B": "de-DE",  # Male
+    "de-DE-Neural2-C": "de-DE",  # Female
+    "de-DE-Neural2-D": "de-DE",  # Male
+    # French Neural2 voices (fr-FR)
+    "fr-FR-Neural2-A": "fr-FR",  # Female
+    "fr-FR-Neural2-B": "fr-FR",  # Male
+    "fr-FR-Neural2-C": "fr-FR",  # Female
+    "fr-FR-Neural2-D": "fr-FR",  # Male
+    # Spanish Neural2 voices (es-ES)
+    "es-ES-Neural2-A": "es-ES",  # Female
+    "es-ES-Neural2-B": "es-ES",  # Male
+    # Japanese Neural2 voices (ja-JP)
+    "ja-JP-Neural2-B": "ja-JP",  # Female
+    "ja-JP-Neural2-C": "ja-JP",  # Male
+    "ja-JP-Neural2-D": "ja-JP",  # Male
+    # Portuguese (Brazil) Neural2 voices (pt-BR)
+    "pt-BR-Neural2-A": "pt-BR",  # Female
+    "pt-BR-Neural2-B": "pt-BR",  # Male
+    "pt-BR-Neural2-C": "pt-BR",  # Female
+    # Russian voices (ru-RU)
+    "ru-RU-Wavenet-A": "ru-RU",   # Female (Wavenet)
+    "ru-RU-Wavenet-B": "ru-RU",   # Male (Wavenet)
+    "ru-RU-Standard-A": "ru-RU",  # Female (Standard)
+    "ru-RU-Standard-B": "ru-RU",  # Male (Standard)
 }
 
 # Speech rate presets: human-friendly names mapped to the float value

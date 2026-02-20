@@ -519,14 +519,48 @@ function RegionPreviewOverlay({ state }: { state: OverlayState }) {
 // Each option has a `data` value (sent to the backend) and a `label` (shown in UI).
 
 const VOICE_OPTIONS = [
-  { data: "en-US-Neural2-A", label: "US English - Male A" },
-  { data: "en-US-Neural2-C", label: "US English - Female C" },
-  { data: "en-US-Neural2-D", label: "US English - Male D" },
-  { data: "en-US-Neural2-F", label: "US English - Female F" },
-  { data: "en-GB-Neural2-A", label: "UK English - Female A" },
-  { data: "en-GB-Neural2-B", label: "UK English - Male B" },
-  { data: "en-GB-Neural2-C", label: "UK English - Female C" },
-  { data: "en-GB-Neural2-D", label: "UK English - Male D" },
+  // English (US) - Neural2 voices
+  { data: "en-US-Neural2-C", label: "English US Female (Neural)" },
+  { data: "en-US-Neural2-D", label: "English US Male (Neural)" },
+  { data: "en-US-Neural2-A", label: "English US Male 2 (Neural)" },
+  { data: "en-US-Neural2-F", label: "English US Female 2 (Neural)" },
+  // English (US) - Wavenet voices
+  { data: "en-US-Wavenet-C", label: "English US Female (Wavenet)" },
+  { data: "en-US-Wavenet-D", label: "English US Male (Wavenet)" },
+  // English (UK) - Neural2 voices
+  { data: "en-GB-Neural2-A", label: "English UK Female (Neural)" },
+  { data: "en-GB-Neural2-B", label: "English UK Male (Neural)" },
+  { data: "en-GB-Neural2-C", label: "English UK Female 2 (Neural)" },
+  { data: "en-GB-Neural2-D", label: "English UK Male 2 (Neural)" },
+  // Ukrainian - Wavenet and Standard voices
+  { data: "uk-UA-Wavenet-A", label: "Ukrainian Female (Wavenet)" },
+  { data: "uk-UA-Standard-A", label: "Ukrainian Female (Standard)" },
+  // German - Neural2 voices
+  { data: "de-DE-Neural2-A", label: "German Female (Neural)" },
+  { data: "de-DE-Neural2-B", label: "German Male (Neural)" },
+  { data: "de-DE-Neural2-C", label: "German Female 2 (Neural)" },
+  { data: "de-DE-Neural2-D", label: "German Male 2 (Neural)" },
+  // French - Neural2 voices
+  { data: "fr-FR-Neural2-A", label: "French Female (Neural)" },
+  { data: "fr-FR-Neural2-B", label: "French Male (Neural)" },
+  { data: "fr-FR-Neural2-C", label: "French Female 2 (Neural)" },
+  { data: "fr-FR-Neural2-D", label: "French Male 2 (Neural)" },
+  // Spanish - Neural2 voices
+  { data: "es-ES-Neural2-A", label: "Spanish Female (Neural)" },
+  { data: "es-ES-Neural2-B", label: "Spanish Male (Neural)" },
+  // Japanese - Neural2 voices
+  { data: "ja-JP-Neural2-B", label: "Japanese Female (Neural)" },
+  { data: "ja-JP-Neural2-C", label: "Japanese Male (Neural)" },
+  { data: "ja-JP-Neural2-D", label: "Japanese Male 2 (Neural)" },
+  // Portuguese (Brazil) - Neural2 voices
+  { data: "pt-BR-Neural2-A", label: "Portuguese BR Female (Neural)" },
+  { data: "pt-BR-Neural2-B", label: "Portuguese BR Male (Neural)" },
+  { data: "pt-BR-Neural2-C", label: "Portuguese BR Female 2 (Neural)" },
+  // Russian - Wavenet and Standard voices
+  { data: "ru-RU-Wavenet-A", label: "Russian Female (Wavenet)" },
+  { data: "ru-RU-Wavenet-B", label: "Russian Male (Wavenet)" },
+  { data: "ru-RU-Standard-A", label: "Russian Female (Standard)" },
+  { data: "ru-RU-Standard-B", label: "Russian Male (Standard)" },
 ];
 
 const SPEECH_RATE_OPTIONS = [
@@ -1639,7 +1673,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                 }))}
                 selectedOption={
                   VOICE_OPTIONS.find((v) => v.data === settings.voice_id)?.data
-                  ?? VOICE_OPTIONS[1].data
+                  ?? VOICE_OPTIONS[0].data
                 }
                 onChange={(option) => {
                   saveSetting("voice_id", option.data);
