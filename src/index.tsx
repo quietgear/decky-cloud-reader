@@ -873,6 +873,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   const playbackPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Ref for the volume save debounce timeout
   const volumeSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Ref for region slider save debounce timeouts (one per setting key)
+  const regionSaveTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
 
   // --- Button monitor state (Phase 7: L4 Button Trigger) ---
   // Status of the hidraw button monitor (fetched on mount and after changes)
@@ -1083,6 +1085,18 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     }, 800);
   };
 
+  // Handle fixed region slider changes — update UI immediately, debounce save
+  // to prevent rapid writes to disk during slider drag (same pattern as volume).
+  const handleRegionChange = (key: string, value: number) => {
+    if (settings) setSettings({ ...settings, [key]: value });
+    if (regionSaveTimeoutsRef.current[key]) {
+      clearTimeout(regionSaveTimeoutsRef.current[key]!);
+    }
+    regionSaveTimeoutsRef.current[key] = setTimeout(() => {
+      saveSetting(key, value);
+    }, 800);
+  };
+
   // --- Pipeline handlers (Phase 6: Read Screen) ---
 
   // Start polling the backend for pipeline status (every 1 second).
@@ -1234,6 +1248,11 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       stopPipelinePoll();
       if (volumeSaveTimeoutRef.current) {
         clearTimeout(volumeSaveTimeoutRef.current);
+      }
+      for (const key of Object.keys(regionSaveTimeoutsRef.current)) {
+        if (regionSaveTimeoutsRef.current[key]) {
+          clearTimeout(regionSaveTimeoutsRef.current[key]!);
+        }
       }
       // Phase 13: Remove overlay component when leaving the plugin panel
       if (overlayTimeoutRef.current) {
@@ -1524,10 +1543,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                 min={0}
                 max={1280}
                 step={10}
-                onChange={(value: number) => {
-                  if (settings) setSettings({ ...settings, fixed_region_x1: value });
-                  saveSetting("fixed_region_x1", value);
-                }}
+                onChange={(value: number) => handleRegionChange("fixed_region_x1", value)}
               />
             </PanelSectionRow>
 
@@ -1539,10 +1555,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                 min={0}
                 max={800}
                 step={10}
-                onChange={(value: number) => {
-                  if (settings) setSettings({ ...settings, fixed_region_y1: value });
-                  saveSetting("fixed_region_y1", value);
-                }}
+                onChange={(value: number) => handleRegionChange("fixed_region_y1", value)}
               />
             </PanelSectionRow>
 
@@ -1554,10 +1567,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                 min={0}
                 max={1280}
                 step={10}
-                onChange={(value: number) => {
-                  if (settings) setSettings({ ...settings, fixed_region_x2: value });
-                  saveSetting("fixed_region_x2", value);
-                }}
+                onChange={(value: number) => handleRegionChange("fixed_region_x2", value)}
               />
             </PanelSectionRow>
 
@@ -1569,10 +1579,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                 min={0}
                 max={800}
                 step={10}
-                onChange={(value: number) => {
-                  if (settings) setSettings({ ...settings, fixed_region_y2: value });
-                  saveSetting("fixed_region_y2", value);
-                }}
+                onChange={(value: number) => handleRegionChange("fixed_region_y2", value)}
               />
             </PanelSectionRow>
 
