@@ -1268,6 +1268,28 @@ class Plugin:
             }
 
     # =========================================================================
+    # Overlay screenshot: capture_overlay_screenshot (Phase 13)
+    # =========================================================================
+    # Returns a base64-encoded PNG screenshot for the region preview overlay.
+    # Reuses the existing _capture_screenshot_sync() method but returns the
+    # image data directly instead of storing it for the OCR pipeline.
+    #
+    # Called from the frontend via:
+    #   const captureOverlayScreenshot = callable<[], OverlayScreenshotResult>("capture_overlay_screenshot");
+    async def capture_overlay_screenshot(self):
+        decky.logger.info(f"{LOG} capture_overlay_screenshot() called")
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_capture_executor, self._capture_screenshot_sync)
+
+        if result["success"]:
+            # Encode the raw PNG bytes as base64 ASCII for JSON transport
+            image_base64 = base64.b64encode(result["image_bytes"]).decode("ascii")
+            return {"success": True, "image_base64": image_base64, "message": "OK"}
+        else:
+            return {"success": False, "image_base64": "", "message": result["error"]}
+
+    # =========================================================================
     # Persistent GCP worker: _start_worker / _stop_worker / _send_to_worker
     # =========================================================================
     # Instead of spawning a new subprocess for every OCR/TTS request (paying

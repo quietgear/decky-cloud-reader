@@ -44,8 +44,8 @@ Frontend (TypeScript/React)           Backend (Python)
 │  - Capture mode config   │         │  - Audio playback (Popen)       │
 │  - Enabled toggle gates  │         │                                 │
 │                          │         │  hidraw_monitor.py (thread)     │
-│ Global Overlay            │         │  touchscreen_monitor.py (thread)│
-│  [Phase 13 — planned]    │         │                                 │
+│ Global Overlay (Phase 13) │         │  touchscreen_monitor.py (thread)│
+│  - Region preview overlay│         │                                 │
 └──────────────────────────┘         │  gcp_worker.py (persistent)     │
                                      │  local_worker.py (persistent)   │
                                      └─────────────────────────────────┘
@@ -75,9 +75,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **10: Settings Defaults** | Added config fields for capture modes, regions, text filtering, and mute toggle |
 | **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, 3 test buttons, Dockerfile audio/ copy |
 | **12: Capture Modes** | 5 capture modes (full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid), touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, mode-aware UI |
-
-### Phase 13: Global Overlay `[NOT STARTED]`
-- [ ] Visual overlay for displaying selected capture zones on screen, reference: `/Users/mshabalov/Documents/claude-projects/Decky-Translator`
+| **13: Global Overlay** | Region preview overlay: `capture_overlay_screenshot()` RPC, `OverlayState` class, `RegionPreviewOverlay` global component mounted/unmounted on demand via `routerHook`, `useUIComposition` for Gamescope layer, auto-close on QAM dismiss/tab switch + 10s auto-dismiss timeout, spotlight cutout for fixed region |
 
 ### Phase 14: Text Filtering `[NOT STARTED]`
 - [ ] Backend word filtering in `main.py` (after OCR, before TTS) — parse comma-separated ignore lists, respect enabled toggles

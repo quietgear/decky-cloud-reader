@@ -22,12 +22,14 @@ import {
   Field,            // Generic field container with label support
   DropdownItem,     // A dropdown selector for picking from a list of options
   SliderField,      // A slider for numeric values with min/max/step
-  staticClasses     // CSS class names for standard Steam UI styling
+  staticClasses,    // CSS class names for standard Steam UI styling
+  findModuleChild   // Searches Steam's internal modules for hidden hooks/utilities
 } from "@decky/ui";
 
 import {
   callable,         // Creates a typed function that calls a Python backend method
-  definePlugin      // Registers this module as a Decky plugin
+  definePlugin,     // Registers this module as a Decky plugin
+  routerHook        // Global component registration for overlays outside the QAM panel
 } from "@decky/api";
 
 import { useState, useEffect, useRef } from "react";
@@ -36,6 +38,45 @@ import { useState, useEffect, useRef } from "react";
 // FaFolder/FaFile icons — used in the file browser for visual clarity.
 import { FaBook, FaFolder, FaFileAlt, FaArrowLeft, FaVolumeUp, FaStop } from "react-icons/fa";
 
+
+// =============================================================================
+// UIComposition — Steam's internal composition layer system (Phase 13)
+// =============================================================================
+// Gamescope uses composition layers to control what renders on top of the game.
+// We need to request a composition layer so the overlay is visible above the
+// game but below full opaque overlays (like the on-screen keyboard).
+//
+// The useUIComposition hook is not publicly exported by @decky/ui, so we use
+// findModuleChild to locate it by matching the function signature in Steam's
+// internal module system.
+
+enum UIComposition {
+  Hidden = 0,           // Not visible
+  Notification = 1,     // Above game, below full overlays (what we want)
+  Overlay = 2,          // Standard overlay layer
+  Opaque = 3,           // Fully opaque (blocks everything below)
+  OverlayKeyboard = 4,  // On-screen keyboard layer
+}
+
+// Search Steam's module registry for the useUIComposition hook.
+// It's identified by three method name strings it uses internally to manage
+// composition state requests with Gamescope's compositor.
+const useUIComposition: (composition: UIComposition) => void = findModuleChild(
+  (m: any) => {
+    if (typeof m !== "object") return undefined;
+    for (let prop in m) {
+      if (
+        typeof m[prop] === "function" &&
+        m[prop].toString().includes("AddMinimumCompositionStateRequest") &&
+        m[prop].toString().includes("ChangeMinimumCompositionStateRequest") &&
+        m[prop].toString().includes("RemoveMinimumCompositionStateRequest") &&
+        !m[prop].toString().includes("m_mapCompositionStateRequests")
+      ) {
+        return m[prop];
+      }
+    }
+  }
+);
 
 // =============================================================================
 // TypeScript interfaces — describe the shape of data from the Python backend
@@ -160,6 +201,13 @@ interface VoiceActionResult {
   file_size?: number;   // Only present in download response
 }
 
+// Response from the capture_overlay_screenshot() backend RPC (Phase 13)
+interface OverlayScreenshotResult {
+  success: boolean;       // true if screenshot was captured successfully
+  image_base64: string;   // Base64-encoded PNG image data (empty on error)
+  message: string;        // Human-readable success or error message
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   // Provider selection (Phase 8)
@@ -269,6 +317,9 @@ const applyLastSelectionToFixedRegion = callable<[], {success: boolean; message:
   "apply_last_selection_to_fixed_region"
 );
 
+// Phase 13: Capture screenshot for the region preview overlay
+const captureOverlayScreenshot = callable<[], OverlayScreenshotResult>("capture_overlay_screenshot");
+
 
 // =============================================================================
 // Helper: format file size in human-readable form
@@ -278,6 +329,228 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+
+// =============================================================================
+// OverlayState — shared state bridge for the region preview overlay (Phase 13)
+// =============================================================================
+// Uses an observer pattern to synchronize the Content component (which owns the
+// toggle button) with the RegionPreviewOverlay global component (which renders
+// outside the QAM panel). The Content component calls show()/hide(), and the
+// overlay component listens via onChange() to update its rendering.
+//
+// This is the same pattern used by Decky-Translator's ImageState class.
+
+// Fixed region coordinates for the overlay rectangle visualization
+interface FixedRegion {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+class OverlayState {
+  // Private state — only mutated via show() / hide()
+  private _visible = false;
+  private _imageBase64 = "";
+  private _fixedRegion: FixedRegion = { x1: 0, y1: 0, x2: 1280, y2: 800 };
+
+  // Observer callbacks — called whenever state changes
+  private _listeners: Array<() => void> = [];
+
+  // --- Public getters ---
+  get visible(): boolean { return this._visible; }
+  get imageBase64(): string { return this._imageBase64; }
+  get fixedRegion(): FixedRegion { return this._fixedRegion; }
+
+  // Show the overlay with a captured screenshot and the current fixed region
+  show(imageBase64: string, region: FixedRegion): void {
+    this._visible = true;
+    this._imageBase64 = imageBase64;
+    this._fixedRegion = region;
+    this._notify();
+  }
+
+  // Hide the overlay and clear image data (frees memory)
+  hide(): void {
+    this._visible = false;
+    this._imageBase64 = "";
+    this._notify();
+  }
+
+  // Register a listener to be called on any state change
+  onChange(cb: () => void): void {
+    this._listeners.push(cb);
+  }
+
+  // Unregister a listener
+  offChange(cb: () => void): void {
+    const idx = this._listeners.indexOf(cb);
+    if (idx !== -1) this._listeners.splice(idx, 1);
+  }
+
+  // Notify all listeners that state has changed
+  private _notify(): void {
+    for (const cb of this._listeners) cb();
+  }
+}
+
+
+// =============================================================================
+// RegionPreviewOverlay — global overlay showing fixed region on a screenshot
+// =============================================================================
+// Mounted/unmounted dynamically via routerHook.addGlobalComponent() and
+// removeGlobalComponent(). This component only exists in the React tree while
+// the overlay is visible — when hidden, it's completely removed. This avoids
+// keeping a useUIComposition hook alive which would interfere with Gamescope's
+// input routing on other Decky pages.
+//
+// Since the component is freshly mounted each time, it reads image data and
+// region coordinates directly from the OverlayState props — no observer needed.
+
+// Game screen dimensions (Steam Deck native resolution in landscape)
+const GAME_WIDTH = 1280;
+const GAME_HEIGHT = 800;
+
+// Maximum size for the preview image. The QAM panel + icon sidebar starts at
+// roughly x=560 on the 1280px screen. With a 20px left margin and ~20px gap
+// before the icons, the preview fits at 500px wide.
+const PREVIEW_MAX_WIDTH = 465;
+// Maintain 16:10 aspect ratio (1280:800)
+const PREVIEW_MAX_HEIGHT = PREVIEW_MAX_WIDTH * (GAME_HEIGHT / GAME_WIDTH);
+
+function RegionPreviewOverlay({ state }: { state: OverlayState }) {
+  // Request Notification composition layer from Gamescope so the overlay
+  // renders above the game. This hook is only active while the component
+  // is mounted (i.e., while the overlay is visible). When the component is
+  // unmounted, the composition request is automatically cleaned up.
+  useUIComposition(UIComposition.Notification);
+
+  // Read current data directly from OverlayState (set before mounting)
+  const imageBase64 = state.imageBase64;
+  const fixedRegion = state.fixedRegion;
+
+  // Calculate the scale factor and region position within the preview
+  const scale = PREVIEW_MAX_WIDTH / GAME_WIDTH;
+  const previewWidth = PREVIEW_MAX_WIDTH;
+  const previewHeight = PREVIEW_MAX_HEIGHT;
+
+  // Region rectangle in preview coordinates (scaled down proportionally)
+  const regionLeft = fixedRegion.x1 * scale;
+  const regionTop = fixedRegion.y1 * scale;
+  const regionWidth = (fixedRegion.x2 - fixedRegion.x1) * scale;
+  const regionHeight = (fixedRegion.y2 - fixedRegion.y1) * scale;
+
+  return (
+    <div
+      style={{
+        // Full viewport overlay container
+        position: "fixed",
+        top: 0,
+        left: 0,
+        width: "100vw",
+        height: "100vh",
+        zIndex: 7002,
+        // Flex layout: vertically centered, pushed to the left edge
+        display: "flex",
+        justifyContent: "flex-start",
+        alignItems: "center",
+        // Small left margin so the preview doesn't touch the screen edge
+        paddingLeft: "20px",
+        backgroundColor: "transparent",
+      }}
+    >
+      {/* Preview container: shrunk screenshot with region highlight */}
+      {imageBase64 && (
+        <div
+          style={{
+            position: "relative",
+            width: `${previewWidth}px`,
+            height: `${previewHeight}px`,
+            borderRadius: "8px",
+            overflow: "hidden",
+            // Subtle border so the preview is visible against dark backgrounds
+            border: "2px solid rgba(103, 183, 220, 0.6)",
+          }}
+        >
+          {/* Shrunk game screenshot as background */}
+          <img
+            src={`data:image/png;base64,${imageBase64}`}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              display: "block",
+            }}
+            alt="Game screenshot"
+          />
+
+          {/* Dark overlay covering the entire image */}
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              backgroundColor: "rgba(0, 0, 0, 0.55)",
+            }}
+          />
+
+          {/* Region cutout — clear window showing the selected area.
+              Uses a bright border and clears the dark overlay for this rectangle
+              by rendering the same screenshot image clipped to the region bounds. */}
+          <div
+            style={{
+              position: "absolute",
+              left: `${regionLeft}px`,
+              top: `${regionTop}px`,
+              width: `${regionWidth}px`,
+              height: `${regionHeight}px`,
+              border: "2px solid #67b7dc",
+              borderRadius: "2px",
+              // Show the original image through the dark overlay
+              overflow: "hidden",
+            }}
+          >
+            {/* Re-render the screenshot, positioned so it aligns exactly
+                with the background image but only shows through this cutout */}
+            <img
+              src={`data:image/png;base64,${imageBase64}`}
+              style={{
+                position: "absolute",
+                // Offset the image so the visible portion matches the region
+                left: `-${regionLeft}px`,
+                top: `-${regionTop}px`,
+                width: `${previewWidth}px`,
+                height: `${previewHeight}px`,
+                objectFit: "cover",
+                display: "block",
+              }}
+              alt=""
+            />
+          </div>
+
+          {/* Region size label at the bottom of the preview */}
+          <div
+            style={{
+              position: "absolute",
+              bottom: "4px",
+              left: 0,
+              right: 0,
+              textAlign: "center",
+              color: "#67b7dc",
+              fontSize: "11px",
+              textShadow: "0 1px 3px rgba(0,0,0,0.8)",
+            }}
+          >
+            {fixedRegion.x2 - fixedRegion.x1} x {fixedRegion.y2 - fixedRegion.y1}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 
@@ -557,7 +830,7 @@ function FileBrowser({ onFileSelected, onCancel }: {
 //   - Normal mode: shows settings, credential status, and action buttons
 //   - File browser mode: shows the FileBrowser for selecting a JSON file
 
-function Content() {
+function Content({ overlayState }: { overlayState: OverlayState }) {
   // Current plugin settings, loaded from the backend on mount
   const [settings, setSettings] = useState<PluginSettings | null>(null);
   // UI mode: "normal" shows settings, "browser" shows file picker
@@ -634,6 +907,14 @@ function Content() {
   const [pipelineIsSuccess, setPipelineIsSuccess] = useState(false);
   // Ref for the pipeline polling interval
   const pipelinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // --- Region preview overlay state (Phase 13) ---
+  // Whether the overlay is currently visible (synced from OverlayState)
+  const [isOverlayVisible, setIsOverlayVisible] = useState(false);
+  // Whether a screenshot is being captured for the overlay
+  const [isOverlayLoading, setIsOverlayLoading] = useState(false);
+  // Ref for the overlay auto-dismiss timeout (10s safety net)
+  const overlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load settings, monitor status, and voice list from the backend when
   // the component first mounts. Also reload when returning from file browser mode.
@@ -918,8 +1199,35 @@ function Content() {
     || settings?.capture_mode === "two_tap_selection"
     || settings?.capture_mode === "hybrid";
 
-  // Cleanup: clear intervals and timeouts when the component unmounts
-  // to prevent memory leaks and stale state updates.
+  // Phase 13: Helper to mount/unmount the overlay global component.
+  // When showing: register the component with routerHook so it renders
+  // outside the QAM panel. When hiding: remove it completely so the
+  // useUIComposition hook is destroyed and Gamescope input routing is restored.
+  const showOverlayComponent = () => {
+    routerHook.addGlobalComponent("DCRRegionPreview", () => (
+      <RegionPreviewOverlay state={overlayState} />
+    ));
+    setIsOverlayVisible(true);
+    // Auto-dismiss after 10 seconds to ensure the composition layer
+    // doesn't stay alive indefinitely (e.g., if user forgets to close it)
+    if (overlayTimeoutRef.current) clearTimeout(overlayTimeoutRef.current);
+    overlayTimeoutRef.current = setTimeout(() => {
+      hideOverlayComponent();
+    }, 10000);
+  };
+
+  const hideOverlayComponent = () => {
+    if (overlayTimeoutRef.current) {
+      clearTimeout(overlayTimeoutRef.current);
+      overlayTimeoutRef.current = null;
+    }
+    routerHook.removeGlobalComponent("DCRRegionPreview");
+    overlayState.hide();
+    setIsOverlayVisible(false);
+  };
+
+  // Cleanup: clear intervals, timeouts, and remove overlay when the component
+  // unmounts. This handles both QAM close and switching to another plugin tab.
   useEffect(() => {
     return () => {
       stopPlaybackPoll();
@@ -927,6 +1235,13 @@ function Content() {
       if (volumeSaveTimeoutRef.current) {
         clearTimeout(volumeSaveTimeoutRef.current);
       }
+      // Phase 13: Remove overlay component when leaving the plugin panel
+      if (overlayTimeoutRef.current) {
+        clearTimeout(overlayTimeoutRef.current);
+        overlayTimeoutRef.current = null;
+      }
+      routerHook.removeGlobalComponent("DCRRegionPreview");
+      overlayState.hide();
     };
   }, []);
 
@@ -1275,6 +1590,45 @@ function Content() {
                 }}
               >
                 Apply Last Selection
+              </ButtonItem>
+            </PanelSectionRow>
+
+            {/* Phase 13: Region Preview toggle button.
+                Captures a fresh screenshot and shows it with the fixed region
+                highlighted, to the left of the QAM panel. Toggle off to hide. */}
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                disabled={isOverlayLoading || isPipelineRunning}
+                onClick={async () => {
+                  if (isOverlayVisible) {
+                    // Toggle off — unmount the overlay component entirely
+                    hideOverlayComponent();
+                  } else {
+                    // Toggle on — capture a fresh screenshot, set state, then mount
+                    setIsOverlayLoading(true);
+                    const result = await captureOverlayScreenshot();
+                    setIsOverlayLoading(false);
+                    if (result.success) {
+                      // Set the data on OverlayState first (component reads on mount)
+                      overlayState.show(result.image_base64, {
+                        x1: settings.fixed_region_x1,
+                        y1: settings.fixed_region_y1,
+                        x2: settings.fixed_region_x2,
+                        y2: settings.fixed_region_y2,
+                      });
+                      // Then mount the global component
+                      showOverlayComponent();
+                    }
+                  }
+                }}
+              >
+                {isOverlayLoading
+                  ? "Capturing..."
+                  : isOverlayVisible
+                  ? "Hide Region Preview"
+                  : "Show Region Preview"
+                }
               </ButtonItem>
             </PanelSectionRow>
 
@@ -1915,6 +2269,14 @@ export default definePlugin(() => {
   // This runs once when the plugin is first loaded on the frontend
   console.log("Decky Cloud Reader: frontend plugin loaded");
 
+  // Phase 13: Create the shared overlay state instance.
+  // This single instance is shared between the Content component (toggle button)
+  // and the RegionPreviewOverlay global component (rendering).
+  // The global component is NOT registered here — it's mounted/unmounted
+  // on-demand by the Content component's toggle handler. This avoids keeping
+  // a useUIComposition hook alive which would interfere with Gamescope input.
+  const overlayState = new OverlayState();
+
   return {
     // The name shown in the Decky plugin list
     name: "Cloud Reader",
@@ -1924,8 +2286,8 @@ export default definePlugin(() => {
       <div className={staticClasses.Title}>Cloud Reader</div>
     ),
 
-    // The main content of the plugin panel
-    content: <Content />,
+    // The main content of the plugin panel, with overlay state for the toggle
+    content: <Content overlayState={overlayState} />,
 
     // The icon shown in the plugin list sidebar (book icon)
     icon: <FaBook />,
@@ -1933,6 +2295,9 @@ export default definePlugin(() => {
     // Called when the plugin is unloaded (e.g., Decky Loader restarts)
     onDismount() {
       console.log("Decky Cloud Reader: frontend plugin unloaded");
+      // Phase 13: Clean up overlay on plugin unload
+      overlayState.hide();
+      routerHook.removeGlobalComponent("DCRRegionPreview");
     },
   };
 });
