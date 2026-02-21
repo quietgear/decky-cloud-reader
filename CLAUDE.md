@@ -89,9 +89,22 @@ Frontend (TypeScript/React)           Backend (Python)
 | **22: Zero Hold Time Option** | Added "Instant (0ms)" option to the hold time dropdown. Backend's `>=` comparison handles 0 naturally — trigger fires immediately on press. Hint text adapts: "Press L4 to trigger" instead of "Hold L4 for 0ms" |
 | **23: Pipeline Feedback** | Three feedback mechanisms for pipeline results: (A) "no_text" sound effect plays on failure/no-text (respects mute); "stop" sound plays at 50% volume, (B) on-screen toast overlay via event-driven `decky.emit("pipeline_toast")` → `addEventListener` — shows "Reading...", "N words read" (green, 3s), "No text found" (yellow, 4s), "Error" (red, 4s), auto-dismisses cancelled immediately; `PipelineToast` child uses `useUIComposition(Notification)` only while visible; `hide_pipeline_toast` setting disables toast display, (C) "Last Pipeline" debug indicator in Debug section shows last result color-coded |
 | **24: Dead Code Cleanup** | Removed 3 unused backend RPC methods: `get_pipeline_status()` (Phase 18 removed UI), `get_playback_status()` (Phase 15 removed UI), `get_last_touch()` (never wired to frontend). Also cleaned stale comment referencing `get_playback_status()` polling |
-| **25: Multi-Language OCR** | 7 OCR language packs (English, Chinese/Japanese, Korean, Latin, Cyrillic, Thai, Greek) with on-demand rec model downloads from HuggingFace (`monkt/paddleocr-onnx`). Upgraded bundled detection model from PaddleOCR v4 to PP-OCRv5 (universal). Recognition models downloaded per-language to `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/`. Lazy OCR engine init in local worker (one cached engine, reinit on language change). GCP Vision API gets `language_hints` from OCR language setting. Frontend: language dropdown in Provider section with download/delete controls. Plugin zip ~72 MB smaller (removed bundled v4 rec model) |
+| **25: Multi-Language OCR** | 7 OCR language packs (English, Chinese/Japanese, Korean, Latin, Cyrillic, Thai, Greek) with on-demand rec model downloads from HuggingFace (`monkt/paddleocr-onnx`). Det/cls use rapidocr-onnxruntime's built-in models (v5 det was incompatible — over-segmentation). Recognition models downloaded per-language to `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/`. Lazy OCR engine init in local worker (one cached engine, reinit on language change). GCP Vision API gets `language_hints` from OCR language setting. Frontend: language dropdown in Provider section with download/delete controls. Plugin zip ~85 MB smaller (removed all bundled OCR models) |
 
+### Next Phase: 26 — Translation Pipeline (GCP-only)
 
+**Goal:** Add optional translation between OCR and TTS so users can play games in foreign languages and hear translated text. Example: Japanese game → OCR (Japanese) → Translate (JA→EN) → TTS (English).
+
+**Scope:** GCP Cloud Translation API only. Local translation (Argos Translate) deferred — models are ~200-500 MB per language pair and compete with OCR+TTS for Steam Deck RAM. Translation is a no-op when `translation_enabled` is false or provider is local.
+
+**Approach:**
+- Add `google-cloud-translate` to `requirements.txt` (reuses existing GCP credentials)
+- New `translate` action in `gcp_worker.py` calling Cloud Translation API
+- Pipeline becomes: capture → OCR → translate → filter → TTS (always split, no combined `ocr_tts` when translation active)
+- Source language derived from `ocr_language` setting (no separate setting needed)
+- New settings: `translation_enabled` (bool), `translation_target_language` (string, e.g. "en")
+- UI: Translation section with enable toggle + target language dropdown
+- Translation runs between OCR and text filtering (filters apply to translated text)
 
 ---
 
