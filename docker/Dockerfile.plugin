@@ -108,29 +108,19 @@ RUN /app/python312/python/bin/python3.12 -m pip install \
     -r requirements_local.txt
 
 # ---------------------------------------------------------------------------
-# Stage 2d: Download OCR models
+# NOTE: No OCR model download stage needed!
 # ---------------------------------------------------------------------------
-# RapidOCR ONNX models (PaddleOCR v4):
-#   - det: text detection (finds text regions in the image)
-#   - rec: text recognition (reads characters in each region)
-#   - cls: text direction classification (handles rotated text)
-#   NOTE: We do NOT download ppocr_keys_v1.txt — the rapidocr_onnxruntime
-#   package has a built-in character dictionary that is guaranteed to match.
-#   Providing a separately downloaded keys file causes IndexError due to
-#   model-dictionary version mismatch (same approach as Decky-Translator).
+# Detection and classification models: rapidocr-onnxruntime bundles its own
+# default det/cls models inside the pip package (in py_modules_local/).
+# These are compatible with the library's post-processing and work well.
 #
-# Piper TTS voice models are NOT bundled — they are downloaded on demand
-# at runtime by main.py and stored in the plugin's settings directory
-# (DECKY_PLUGIN_SETTINGS_DIR/voices/). This keeps the plugin zip small
-# (~241MB instead of ~493MB) and lets users access 16+ voices in 13
-# languages instead of only 4 bundled English voices.
-RUN mkdir -p /app/models/ocr && \
-    curl -L -o /app/models/ocr/ch_PP-OCRv4_det_infer.onnx \
-      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx" && \
-    curl -L -o /app/models/ocr/ch_PP-OCRv4_rec_infer.onnx \
-      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx" && \
-    curl -L -o /app/models/ocr/ch_ppocr_mobile_v2.0_cls_infer.onnx \
-      "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_ppocr_mobile_v2.0_cls_train.onnx"
+# Recognition models are language-specific and downloaded ON DEMAND at runtime
+# by main.py (stored in DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/).
+# Each language has a rec.onnx (~8-85 MB) and dict.txt (~1-74 KB).
+# Source: https://huggingface.co/monkt/paddleocr-onnx
+#
+# Piper TTS voice models are also NOT bundled — downloaded on demand and
+# stored in DECKY_PLUGIN_SETTINGS_DIR/voices/.
 
 # ---------------------------------------------------------------------------
 # Stage 3: Copy source and build frontend
@@ -162,10 +152,9 @@ RUN pnpm build
 #   ├── audio/                  ← UI feedback WAV sound effects (Phase 11)
 #   ├── py_modules/             ← GCP Python dependencies (system Python 3.13)
 #   ├── py_modules_local/       ← Local inference deps (bundled Python 3.12)
-#   ├── python312/              ← Bundled Python 3.12 interpreter
-#   │   └── python/bin/python3.12
-#   └── models/                 ← OCR model files (TTS voices downloaded on demand)
-#       └── ocr/                ← RapidOCR (PaddleOCR v4) ONNX models (no keys file)
+#   │                             (includes rapidocr-onnxruntime with built-in det/cls models)
+#   └── python312/              ← Bundled Python 3.12 interpreter
+#       └── python/bin/python3.12
 RUN mkdir -p /app/output/decky-cloud-reader/dist && \
     cp /app/dist/index.js /app/output/decky-cloud-reader/dist/ && \
     cp /app/plugin.json /app/output/decky-cloud-reader/ && \
@@ -179,6 +168,5 @@ RUN mkdir -p /app/output/decky-cloud-reader/dist && \
     cp -r /app/py_modules /app/output/decky-cloud-reader/ && \
     cp -r /app/py_modules_local /app/output/decky-cloud-reader/ && \
     cp -r /app/python312 /app/output/decky-cloud-reader/ && \
-    cp -r /app/models /app/output/decky-cloud-reader/ && \
     cd /app/output && \
     zip -r decky-cloud-reader.zip decky-cloud-reader/

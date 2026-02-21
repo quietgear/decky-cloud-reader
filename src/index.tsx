@@ -173,6 +173,27 @@ interface VoiceActionResult {
   file_size?: number;   // Only present in download response
 }
 
+// Info about a single OCR language from get_available_ocr_languages() (Phase 25)
+interface OcrLanguageInfo {
+  label: string;       // Human-readable name (e.g., "Chinese / Japanese")
+  languages: string;   // Languages covered (e.g., "Simplified Chinese, Traditional Chinese, ...")
+  size_hint: string;   // Approximate download size (e.g., "~85 MB")
+  downloaded: boolean; // Whether rec.onnx exists in the ocr_models dir
+  file_size: number;   // Size of rec.onnx in bytes (0 if not downloaded)
+}
+
+// OCR language registry returned by get_available_ocr_languages()
+interface OcrLanguageRegistry {
+  [language_id: string]: OcrLanguageInfo;
+}
+
+// Response from download_ocr_language() or delete_ocr_language() backend RPCs
+interface OcrLanguageActionResult {
+  success: boolean;
+  message: string;
+  file_size?: number;   // Only present in download response
+}
+
 // Response from the capture_overlay_screenshot() backend RPC (Phase 13)
 interface OverlayScreenshotResult {
   success: boolean;       // true if screenshot was captured successfully
@@ -196,6 +217,8 @@ interface PluginSettings {
   // Provider selection (Phase 8)
   ocr_provider: string;         // "gcp" or "local"
   tts_provider: string;         // "gcp" or "local"
+  // OCR language (Phase 25)
+  ocr_language: string;         // OCR recognition language (e.g., "english", "chinese")
   // GCP TTS settings
   voice_id: string;             // GCP TTS voice (Phase 5)
   speech_rate: string;          // GCP TTS speed preset (Phase 5)
@@ -265,6 +288,11 @@ const getButtonMonitorStatus = callable<[], ButtonMonitorStatus>("get_button_mon
 const getAvailableVoices = callable<[], VoiceRegistry>("get_available_voices");
 const downloadVoice = callable<[string], VoiceActionResult>("download_voice");
 const deleteVoice = callable<[string], VoiceActionResult>("delete_voice");
+
+// Phase 25: OCR language management — on-demand recognition model downloads
+const getAvailableOcrLanguages = callable<[], OcrLanguageRegistry>("get_available_ocr_languages");
+const downloadOcrLanguage = callable<[string], OcrLanguageActionResult>("download_ocr_language");
+const deleteOcrLanguage = callable<[string], OcrLanguageActionResult>("delete_ocr_language");
 
 // Phase 9: Touchscreen monitor status
 const getTouchscreenStatus = callable<[], TouchscreenStatus>("get_touchscreen_status");
@@ -1033,6 +1061,16 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   // Whether the voice message is a success (green) or error (red)
   const [voiceIsSuccess, setVoiceIsSuccess] = useState(false);
 
+  // --- OCR language management state (Phase 25: Multi-Language OCR) ---
+  // Registry of all available OCR languages with download status
+  const [ocrLanguages, setOcrLanguages] = useState<OcrLanguageRegistry | null>(null);
+  // Whether an OCR language download is in progress (disables buttons)
+  const [isOcrLanguageDownloading, setIsOcrLanguageDownloading] = useState(false);
+  // Status message from the last OCR language download/delete operation
+  const [ocrLanguageMessage, setOcrLanguageMessage] = useState<string | null>(null);
+  // Whether the OCR language message is a success (green) or error (red)
+  const [ocrLanguageIsSuccess, setOcrLanguageIsSuccess] = useState(false);
+
   // --- Touchscreen state (Phase 9) ---
   // Status of the touchscreen monitor (fetched on mount and after mode changes)
   const [touchscreenStatus, setTouchscreenStatus] = useState<TouchscreenStatus | null>(null);
@@ -1062,6 +1100,9 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       // Fetch available voices with download status
       const voices = await getAvailableVoices();
       setLocalVoices(voices);
+      // Fetch available OCR languages with download status (Phase 25)
+      const ocrLangs = await getAvailableOcrLanguages();
+      setOcrLanguages(ocrLangs);
       // Fetch touchscreen monitor status
       const touchStatus = await getTouchscreenStatus();
       setTouchscreenStatus(touchStatus);
@@ -1166,6 +1207,34 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     const voices = await getAvailableVoices();
     setLocalVoices(voices);
     setTimeout(() => setVoiceMessage(null), 5000);
+  };
+
+  // --- OCR language management handlers (Phase 25) ---
+
+  // Handle downloading an OCR recognition model from HuggingFace
+  const handleDownloadOcrLanguage = async (languageId: string) => {
+    setIsOcrLanguageDownloading(true);
+    setOcrLanguageMessage(null);
+    const result = await downloadOcrLanguage(languageId);
+    setIsOcrLanguageDownloading(false);
+    setOcrLanguageMessage(result.message);
+    setOcrLanguageIsSuccess(result.success);
+    // Refresh OCR language list to update download status
+    const ocrLangs = await getAvailableOcrLanguages();
+    setOcrLanguages(ocrLangs);
+    setTimeout(() => setOcrLanguageMessage(null), 5000);
+  };
+
+  // Handle deleting a downloaded OCR recognition model
+  const handleDeleteOcrLanguage = async (languageId: string) => {
+    setOcrLanguageMessage(null);
+    const result = await deleteOcrLanguage(languageId);
+    setOcrLanguageMessage(result.message);
+    setOcrLanguageIsSuccess(result.success);
+    // Refresh OCR language list to update download status
+    const ocrLangs = await getAvailableOcrLanguages();
+    setOcrLanguages(ocrLangs);
+    setTimeout(() => setOcrLanguageMessage(null), 5000);
   };
 
   // Phase 12: Whether the current capture mode needs touchscreen input.
@@ -1572,6 +1641,101 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             }}
           />
         </PanelSectionRow>
+
+        {/* OCR Language dropdown (Phase 25) */}
+        <PanelSectionRow>
+          <DropdownItem
+            label="OCR Language"
+            description="Recognition model for text detection"
+            menuLabel="Select OCR Language"
+            rgOptions={
+              ocrLanguages
+                ? Object.entries(ocrLanguages).map(([id, info]) => ({
+                    data: id,
+                    label: info.downloaded
+                      ? info.label
+                      : `${info.label} [${info.size_hint}]`,
+                  }))
+                : [{ data: settings.ocr_language, label: "Loading..." }]
+            }
+            selectedOption={settings.ocr_language}
+            onChange={async (option) => {
+              await saveSetting("ocr_language", option.data);
+              if (settings) {
+                setSettings({ ...settings, ocr_language: option.data as string });
+              }
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* OCR Language download/delete controls (local provider only) */}
+        {settings.ocr_provider === "local" && ocrLanguages && (() => {
+          const selectedLang = ocrLanguages[settings.ocr_language];
+          const isDownloaded = selectedLang?.downloaded ?? false;
+          return (
+            <>
+              {/* OCR language status message */}
+              {ocrLanguageMessage && (
+                <PanelSectionRow>
+                  <div style={{
+                    color: ocrLanguageIsSuccess ? "#2ecc71" : "#e74c3c",
+                    padding: "4px 0",
+                    fontSize: "13px"
+                  }}>
+                    {ocrLanguageMessage}
+                  </div>
+                </PanelSectionRow>
+              )}
+
+              {isDownloaded ? (
+                <>
+                  {/* Show downloaded indicator + file size */}
+                  <PanelSectionRow>
+                    <div style={{
+                      color: "#2ecc71",
+                      fontSize: "12px",
+                      padding: "4px 0"
+                    }}>
+                      Downloaded ({formatSize(selectedLang.file_size)})
+                    </div>
+                  </PanelSectionRow>
+                  {/* Delete button */}
+                  <PanelSectionRow>
+                    <ButtonItem
+                      layout="below"
+                      onClick={() => handleDeleteOcrLanguage(settings.ocr_language)}
+                    >
+                      Delete Model
+                    </ButtonItem>
+                  </PanelSectionRow>
+                </>
+              ) : (
+                <>
+                  {/* Not downloaded hint */}
+                  <PanelSectionRow>
+                    <div style={{
+                      color: "#b8bcbf",
+                      fontSize: "12px",
+                      padding: "4px 0"
+                    }}>
+                      Model will auto-download on first use
+                    </div>
+                  </PanelSectionRow>
+                  {/* Download button */}
+                  <PanelSectionRow>
+                    <ButtonItem
+                      layout="below"
+                      onClick={() => handleDownloadOcrLanguage(settings.ocr_language)}
+                      disabled={isOcrLanguageDownloading}
+                    >
+                      {isOcrLanguageDownloading ? "Downloading..." : "Download Model"}
+                    </ButtonItem>
+                  </PanelSectionRow>
+                </>
+              )}
+            </>
+          );
+        })()}
 
         {/* Provider status hints */}
         {settings.ocr_provider === "local" && !settings.is_local_available && (

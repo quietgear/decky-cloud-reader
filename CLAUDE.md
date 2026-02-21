@@ -89,6 +89,9 @@ Frontend (TypeScript/React)           Backend (Python)
 | **22: Zero Hold Time Option** | Added "Instant (0ms)" option to the hold time dropdown. Backend's `>=` comparison handles 0 naturally — trigger fires immediately on press. Hint text adapts: "Press L4 to trigger" instead of "Hold L4 for 0ms" |
 | **23: Pipeline Feedback** | Three feedback mechanisms for pipeline results: (A) "no_text" sound effect plays on failure/no-text (respects mute); "stop" sound plays at 50% volume, (B) on-screen toast overlay via event-driven `decky.emit("pipeline_toast")` → `addEventListener` — shows "Reading...", "N words read" (green, 3s), "No text found" (yellow, 4s), "Error" (red, 4s), auto-dismisses cancelled immediately; `PipelineToast` child uses `useUIComposition(Notification)` only while visible; `hide_pipeline_toast` setting disables toast display, (C) "Last Pipeline" debug indicator in Debug section shows last result color-coded |
 | **24: Dead Code Cleanup** | Removed 3 unused backend RPC methods: `get_pipeline_status()` (Phase 18 removed UI), `get_playback_status()` (Phase 15 removed UI), `get_last_touch()` (never wired to frontend). Also cleaned stale comment referencing `get_playback_status()` polling |
+| **25: Multi-Language OCR** | 7 OCR language packs (English, Chinese/Japanese, Korean, Latin, Cyrillic, Thai, Greek) with on-demand rec model downloads from HuggingFace (`monkt/paddleocr-onnx`). Upgraded bundled detection model from PaddleOCR v4 to PP-OCRv5 (universal). Recognition models downloaded per-language to `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/`. Lazy OCR engine init in local worker (one cached engine, reinit on language change). GCP Vision API gets `language_hints` from OCR language setting. Frontend: language dropdown in Provider section with download/delete controls. Plugin zip ~72 MB smaller (removed bundled v4 rec model) |
+
+
 
 ---
 
@@ -96,7 +99,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ### RapidOCR
 - Use `rapidocr-onnxruntime` (NOT `rapidocr` v3.x) — lighter deps, proven API, same as Decky-Translator
-- **Never pass `rec_keys_path`** — causes `IndexError` due to model-dictionary mismatch. Pass custom ONNX model paths only (`det_model_path`, `rec_model_path`, `cls_model_path`); library's built-in keys match
+- **`rec_keys_path` handling**: For the old bundled v4 Chinese models, do NOT pass `rec_keys_path` (causes `IndexError` from model-dictionary mismatch). For downloaded PP-OCRv5 language models, you MUST pass `rec_keys_path=dict.txt` because each language has its own character dictionary that matches its rec model
 - Result format: `result = engine(img)` → `result[0]` is list of `[bbox, text, confidence]` or `None`. Do NOT tuple-unpack
 
 ### Piper TTS (>=1.4.0)
@@ -161,7 +164,7 @@ Decky provides `decky.emit(event_name, *args)` (Python) and `addEventListener`/`
 | OCR (RapidOCR) | ~1.4s | ~1.2s |
 | TTS (Piper) | ~1.3s | ~0.7s |
 
-Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
+Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices: ~63 MB each, downloaded on demand.
 
 ---
 
@@ -172,6 +175,7 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | `enabled` | `true` | Master switch — stops workers, playback, pipeline when disabled |
 | `debug` | `false` | Enables `DEBUG` log level (no restart needed) |
 | `ocr_provider` | `"local"` | `"gcp"` or `"local"` |
+| `ocr_language` | `"english"` | OCR recognition language: english, chinese, korean, latin, eslav, thai, greek |
 | `tts_provider` | `"local"` | `"gcp"` or `"local"` |
 | `voice_id` | `"en-US-Neural2-C"` | GCP Neural2 voice |
 | `speech_rate` | `"medium"` | GCP speech rate |
@@ -223,6 +227,7 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Pipeline optimization | Combined `ocr_tts` action for same-provider | Saves one round-trip; mixed providers run sequentially |
 | Pipeline cancellation | `threading.Event` between steps | Simple; worker timeout bounded at 60s |
 | Voice distribution | On-demand HuggingFace download | 16 voices / 14 language variants; persists in settings dir across updates; no zip bloat |
+| OCR language models | On-demand HuggingFace download (monkt/paddleocr-onnx) | 7 language packs; rec models persist in settings dir; det/cls are universal+bundled; lazy engine init with single-engine cache |
 | Default provider | Local (offline) | Works out of the box; GCP requires service account |
 | Keyboard suppression | Frontend event-driven via `VirtualKeyboardManager` | No polling; callback fires on open/close; RPC notifies backend to guard touch handlers |
 | Touch suppression | Three-flag guard: keyboard + modal + QAM | `useQuickAccessVisible()` for QAM; `useEffect` + RPC for modal; explicit reset on unmount |
@@ -257,6 +262,8 @@ decky-cloud-reader/
 - `py_modules/` — GCP packages (cpython-313-x86_64)
 - `py_modules_local/` — Local inference packages (cpython-312-x86_64)
 - `python312/python/bin/python3.12` — Bundled interpreter
-- `models/ocr/` — PaddleOCR v4 ONNX models (NO `ppocr_keys_v1.txt`)
+- `models/ocr/` — PP-OCRv5 det.onnx (universal) + v2 cls model (rec models downloaded per-language on demand)
 
-**Downloaded on demand:** `DECKY_PLUGIN_SETTINGS_DIR/voices/*.onnx` (~63 MB each)
+**Downloaded on demand:**
+- `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/rec.onnx` + `dict.txt` (8-85 MB per language)
+- `DECKY_PLUGIN_SETTINGS_DIR/voices/*.onnx` (~63 MB each)

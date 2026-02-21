@@ -144,6 +144,63 @@ PIPER_VOICES = {
 DEFAULT_LOCAL_VOICE = "en_US-amy-medium"
 
 
+# =============================================================================
+# OCR Language Registry — per-language recognition models (Phase 25)
+# =============================================================================
+# Detection (det.onnx) and classification (cls) models are universal — bundled
+# in the plugin zip. Only the recognition model (rec.onnx + dict.txt) is
+# language-specific and downloaded on demand from HuggingFace.
+#
+# Source: https://huggingface.co/monkt/paddleocr-onnx
+# PP-OCRv5 recognition models in the "languages/" subdirectory.
+
+OCR_MODEL_BASE_URL = "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages"
+
+OCR_LANGUAGES = {
+    "english": {
+        "label": "English",
+        "languages": "English",
+        "size_hint": "~8 MB",
+    },
+    "chinese": {
+        "label": "Chinese / Japanese",
+        "languages": "Simplified Chinese, Traditional Chinese, Japanese (Hiragana, Katakana, Kanji)",
+        "size_hint": "~85 MB",
+    },
+    "korean": {
+        "label": "Korean",
+        "languages": "Korean",
+        "size_hint": "~13 MB",
+    },
+    "latin": {
+        "label": "Latin Script",
+        "languages": "French, German, Spanish, Italian, Portuguese, Dutch, Polish + 25 more",
+        "size_hint": "~8 MB",
+    },
+    "eslav": {
+        "label": "Cyrillic",
+        "languages": "Russian, Ukrainian, Bulgarian, Belarusian",
+        "size_hint": "~8 MB",
+    },
+    "thai": {
+        "label": "Thai",
+        "languages": "Thai",
+        "size_hint": "~8 MB",
+    },
+    "greek": {
+        "label": "Greek",
+        "languages": "Greek",
+        "size_hint": "~7 MB",
+    },
+}
+
+DEFAULT_OCR_LANGUAGE = "english"
+
+# Timeout for OCR model downloads from HuggingFace. Rec models are 8-85MB,
+# so 120s should be plenty even on slow connections.
+OCR_MODEL_DOWNLOAD_TIMEOUT = 120  # seconds
+
+
 def _piper_voice_url(voice_id, ext=".onnx"):
     """
     Construct the HuggingFace download URL for a Piper voice file.
@@ -198,6 +255,10 @@ DEFAULT_SETTINGS = {
     # Local (Piper) TTS speech rate preset. Same keys as GCP but maps to
     # Piper's length_scale (inverse: lower = faster).
     "local_speech_rate": "medium",
+
+    # OCR recognition language (Phase 25). Determines which rec model is used
+    # for text recognition. Applies to both local and GCP providers.
+    "ocr_language": "english",
 
     # TTS volume level 0-100.
     "volume": 100,
@@ -528,11 +589,9 @@ class Plugin:
         else:
             decky.logger.warning(f"{LOG} local_worker.py NOT found at {self._local_worker_script}")
 
-        self._local_models_dir = os.path.join(plugin_dir, "models")
-        if os.path.isdir(self._local_models_dir):
-            decky.logger.info(f"{LOG} models dir found: {self._local_models_dir}")
-        else:
-            decky.logger.warning(f"{LOG} models dir NOT found at {self._local_models_dir}")
+        # Note: no bundled models/ dir needed — rapidocr-onnxruntime ships its own
+        # det/cls models inside the pip package (in py_modules_local/). Only the
+        # language-specific rec models are downloaded on demand to _ocr_models_dir.
 
         self._local_py_modules_path = os.path.join(plugin_dir, "py_modules_local")
         if os.path.isdir(self._local_py_modules_path):
@@ -550,13 +609,34 @@ class Plugin:
         os.makedirs(self._voices_dir, exist_ok=True)
         decky.logger.info(f"{LOG} voices dir: {self._voices_dir}")
 
-        # Clean up any partial downloads (.tmp files) left from crashes
+        # Clean up any partial voice downloads (.tmp files) left from crashes
         for tmp_file in glob.glob(os.path.join(self._voices_dir, "*.tmp")):
             try:
                 os.remove(tmp_file)
                 decky.logger.debug(f"{LOG} cleaned up partial download: {tmp_file}")
             except OSError:
                 pass
+
+        # -----------------------------------------------------------------
+        # Set up OCR models directory for on-demand language model downloads
+        # -----------------------------------------------------------------
+        # Recognition models are stored per-language in the settings directory
+        # so they persist across plugin updates. Structure:
+        #   ocr_models/{language_id}/rec.onnx   (~8-85 MB)
+        #   ocr_models/{language_id}/dict.txt   (~1-74 KB)
+        self._ocr_models_dir = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "ocr_models")
+        os.makedirs(self._ocr_models_dir, exist_ok=True)
+        decky.logger.info(f"{LOG} ocr_models dir: {self._ocr_models_dir}")
+
+        # Clean up any partial OCR model downloads (.tmp files) left from crashes
+        for lang_dir in glob.glob(os.path.join(self._ocr_models_dir, "*")):
+            if os.path.isdir(lang_dir):
+                for tmp_file in glob.glob(os.path.join(lang_dir, "*.tmp")):
+                    try:
+                        os.remove(tmp_file)
+                        decky.logger.debug(f"{LOG} cleaned up partial OCR model download: {tmp_file}")
+                    except OSError:
+                        pass
 
         # -----------------------------------------------------------------
         # Discover audio player for TTS playback
@@ -1616,9 +1696,10 @@ class Plugin:
         """
         Launch the persistent local_worker.py subprocess in serve mode.
 
-        Pre-flight checks: bundled Python 3.12, local_worker.py, and models dir
-        must exist. The subprocess reads LOCAL_MODELS_DIR from its environment
-        and initializes RapidOCR + Piper models once at startup.
+        Pre-flight checks: bundled Python 3.12 and local_worker.py must exist.
+        The subprocess reads LOCAL_OCR_MODELS_DIR and LOCAL_VOICES_DIR from
+        its environment for on-demand model files. Det/cls models are built
+        into the rapidocr-onnxruntime package (no separate models dir needed).
 
         Returns:
             True if the worker started and signaled ready, False otherwise.
@@ -1631,16 +1712,12 @@ class Plugin:
             decky.logger.error(f"{LOG} local worker: local_worker.py not found at {self._local_worker_script}")
             return False
 
-        if not os.path.isdir(self._local_models_dir):
-            decky.logger.error(f"{LOG} local worker: models dir not found at {self._local_models_dir}")
-            return False
-
         # Build subprocess environment
         env = os.environ.copy()
         env["PYTHONPATH"] = self._local_py_modules_path
         env["PYTHONNOUSERSITE"] = "1"
-        env["LOCAL_MODELS_DIR"] = self._local_models_dir
         env["LOCAL_VOICES_DIR"] = self._voices_dir  # On-demand voice downloads dir
+        env["LOCAL_OCR_MODELS_DIR"] = self._ocr_models_dir  # On-demand OCR rec models dir
         # Limit CPU threads — leave cores for the game
         env["OMP_NUM_THREADS"] = "2"
 
@@ -2611,6 +2688,25 @@ class Plugin:
                         }
                     decky.logger.info(f"{LOG} pipeline: voice downloaded, continuing...")
 
+            # Phase 25: OCR language — determines which recognition model is used.
+            # Auto-download the rec model if not yet present (local provider only).
+            ocr_language = self.settings.get("ocr_language", DEFAULT_OCR_LANGUAGE)
+
+            if ocr_provider == "local" and not self._is_ocr_language_downloaded(ocr_language):
+                if self._pipeline_cancel.is_set():
+                    return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+
+                self._pipeline_step = "downloading"
+                decky.logger.info(f"{LOG} pipeline: OCR language '{ocr_language}' rec model not downloaded, downloading...")
+                dl_result = self._download_ocr_language_sync(ocr_language)
+                if not dl_result["success"]:
+                    return {
+                        "success": False,
+                        "message": f"OCR model download failed: {dl_result['message']}",
+                        "step": "downloading", "text": "", "audio_size": 0,
+                    }
+                decky.logger.info(f"{LOG} pipeline: OCR rec model downloaded, continuing...")
+
             # Phase 14: check if text filtering is active — when it is, we must
             # split OCR and TTS into separate steps even for the same provider,
             # because filtering needs to modify the text between OCR and TTS.
@@ -2629,6 +2725,7 @@ class Plugin:
                     "output_path": tts_tmp_path,
                     "speech_rate": speech_rate,
                     "voice_id": voice_id,
+                    "ocr_language": ocr_language,  # Phase 25
                 }
                 # Phase 12: pass crop_region to worker if specified
                 if crop_region:
@@ -2657,7 +2754,7 @@ class Plugin:
                                   f"{' [filtering active]' if filtering_active else ''}...")
 
                 # OCR step — include crop_region if specified (Phase 12)
-                ocr_cmd = {"action": "ocr", "image_path": ocr_tmp_path}
+                ocr_cmd = {"action": "ocr", "image_path": ocr_tmp_path, "ocr_language": ocr_language}
                 if crop_region:
                     ocr_cmd["crop_region"] = crop_region
                 ocr_result = self._send_command(
@@ -3730,4 +3827,214 @@ class Plugin:
         """
         onnx_path = os.path.join(self._voices_dir, f"{voice_id}.onnx")
         return os.path.exists(onnx_path)
+
+    # =========================================================================
+    # RPC: get_available_ocr_languages() — Phase 25
+    # =========================================================================
+    # Returns the OCR language registry with download status for each language.
+    # Mirrors the pattern of get_available_voices().
+    #
+    # Called from the frontend via:
+    #   const getAvailableOcrLanguages = callable<[], OcrLanguageRegistry>("get_available_ocr_languages");
+    async def get_available_ocr_languages(self):
+        decky.logger.debug(f"{LOG} get_available_ocr_languages() called")
+
+        languages = {}
+        for lang_id, info in OCR_LANGUAGES.items():
+            lang_dir = os.path.join(self._ocr_models_dir, lang_id)
+            rec_path = os.path.join(lang_dir, "rec.onnx")
+            downloaded = os.path.exists(rec_path)
+            file_size = 0
+            if downloaded:
+                try:
+                    file_size = os.path.getsize(rec_path)
+                except OSError:
+                    pass
+            languages[lang_id] = {
+                "label": info["label"],
+                "languages": info["languages"],
+                "size_hint": info["size_hint"],
+                "downloaded": downloaded,
+                "file_size": file_size,
+            }
+
+        return languages
+
+    # =========================================================================
+    # RPC: download_ocr_language(language_id) — Phase 25
+    # =========================================================================
+    # Downloads an OCR recognition model (rec.onnx + dict.txt) from HuggingFace.
+    # Downloads to .tmp files first, then renames on success (same pattern as
+    # voice downloads).
+    #
+    # Called from the frontend via:
+    #   const downloadOcrLanguage = callable<[string], OcrLanguageActionResult>("download_ocr_language");
+    async def download_ocr_language(self, language_id):
+        decky.logger.info(f"{LOG} download_ocr_language({language_id}) called")
+
+        if language_id not in OCR_LANGUAGES:
+            return {"success": False, "message": f"Unknown OCR language: {language_id}", "file_size": 0}
+
+        # Run the blocking download in the thread pool
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            _capture_executor,
+            lambda: self._download_ocr_language_sync(language_id),
+        )
+        return result
+
+    def _download_ocr_language_sync(self, language_id):
+        """
+        Download an OCR recognition model (rec.onnx + dict.txt) from HuggingFace.
+
+        Uses curl for reliable HTTPS/redirect handling. Downloads to .tmp files
+        first, then renames on success (atomic-ish, prevents partial files).
+
+        Args:
+            language_id: The OCR language identifier (e.g., "english", "chinese").
+
+        Returns:
+            Dict with keys: success, message, file_size.
+        """
+        rec_url = f"{OCR_MODEL_BASE_URL}/{language_id}/rec.onnx"
+        dict_url = f"{OCR_MODEL_BASE_URL}/{language_id}/dict.txt"
+
+        lang_dir = os.path.join(self._ocr_models_dir, language_id)
+        os.makedirs(lang_dir, exist_ok=True)
+
+        rec_path = os.path.join(lang_dir, "rec.onnx")
+        dict_path = os.path.join(lang_dir, "dict.txt")
+        rec_tmp = rec_path + ".tmp"
+        dict_tmp = dict_path + ".tmp"
+
+        # Build a clean environment for curl (strip PyInstaller LD_LIBRARY_PATH)
+        curl_env = os.environ.copy()
+        curl_env.pop("LD_LIBRARY_PATH", None)
+        curl_env.pop("LD_PRELOAD", None)
+
+        try:
+            # Download dict.txt first (small file, quick validation)
+            decky.logger.info(f"{LOG} downloading OCR dict: {dict_url}")
+            result = subprocess.run(
+                ["curl", "-L", "-f", "-o", dict_tmp, dict_url],
+                capture_output=True, text=True,
+                timeout=OCR_MODEL_DOWNLOAD_TIMEOUT,
+                env=curl_env,
+            )
+            if result.returncode != 0:
+                decky.logger.error(f"{LOG} OCR dict download failed: {result.stderr[:200]}")
+                return {"success": False, "message": "OCR dict download failed — check internet connection", "file_size": 0}
+
+            # Download rec.onnx model (larger file, 8-85MB)
+            decky.logger.info(f"{LOG} downloading OCR rec model: {rec_url}")
+            result = subprocess.run(
+                ["curl", "-L", "-f", "-o", rec_tmp, rec_url],
+                capture_output=True, text=True,
+                timeout=OCR_MODEL_DOWNLOAD_TIMEOUT,
+                env=curl_env,
+            )
+            if result.returncode != 0:
+                decky.logger.error(f"{LOG} OCR rec model download failed: {result.stderr[:200]}")
+                return {"success": False, "message": "OCR model download failed — check internet connection", "file_size": 0}
+
+            # Validate downloaded files exist and aren't empty
+            if not os.path.exists(rec_tmp) or os.path.getsize(rec_tmp) == 0:
+                return {"success": False, "message": "Downloaded OCR model file is empty", "file_size": 0}
+            if not os.path.exists(dict_tmp) or os.path.getsize(dict_tmp) == 0:
+                return {"success": False, "message": "Downloaded OCR dict file is empty", "file_size": 0}
+
+            # Rename from .tmp to final paths (atomic-ish on same filesystem)
+            os.rename(dict_tmp, dict_path)
+            os.rename(rec_tmp, rec_path)
+
+            file_size = os.path.getsize(rec_path)
+            decky.logger.info(f"{LOG} OCR language downloaded: {language_id} ({file_size:,} bytes)")
+
+            # Stop the local worker so its OCR engine cache is cleared — next
+            # pipeline run will reinitialize with the new rec model.
+            self._stop_local_worker()
+
+            return {
+                "success": True,
+                "message": f"OCR model downloaded: {OCR_LANGUAGES[language_id]['label']}",
+                "file_size": file_size,
+            }
+
+        except subprocess.TimeoutExpired:
+            decky.logger.error(f"{LOG} OCR model download timed out after {OCR_MODEL_DOWNLOAD_TIMEOUT}s")
+            return {"success": False, "message": "Download timed out — check internet connection", "file_size": 0}
+
+        except Exception as e:
+            decky.logger.error(f"{LOG} OCR model download error: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {"success": False, "message": f"Download error: {e}", "file_size": 0}
+
+        finally:
+            # Clean up temp files on failure
+            for tmp in (rec_tmp, dict_tmp):
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+
+    # =========================================================================
+    # RPC: delete_ocr_language(language_id) — Phase 25
+    # =========================================================================
+    # Removes a downloaded OCR recognition model. If the deleted language is
+    # currently selected, stops the local worker so its cached engine is cleared.
+    #
+    # Called from the frontend via:
+    #   const deleteOcrLanguage = callable<[string], OcrLanguageActionResult>("delete_ocr_language");
+    async def delete_ocr_language(self, language_id):
+        decky.logger.info(f"{LOG} delete_ocr_language({language_id}) called")
+
+        lang_dir = os.path.join(self._ocr_models_dir, language_id)
+        rec_path = os.path.join(lang_dir, "rec.onnx")
+        dict_path = os.path.join(lang_dir, "dict.txt")
+
+        deleted = False
+        for path in (rec_path, dict_path):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    deleted = True
+                    decky.logger.debug(f"{LOG} deleted: {path}")
+            except OSError as e:
+                decky.logger.error(f"{LOG} failed to delete {path}: {e}")
+                return {"success": False, "message": f"Failed to delete OCR model: {e}"}
+
+        # If the deleted language is the currently selected one, stop the local
+        # worker so its in-memory OCR engine cache is cleared. Next OCR call will
+        # restart the worker and load a different model (or trigger re-download).
+        current_lang = self.settings.get("ocr_language", DEFAULT_OCR_LANGUAGE)
+        if current_lang == language_id:
+            decky.logger.info(f"{LOG} deleted current OCR language — stopping local worker to clear cache")
+            self._stop_local_worker()
+
+        # Try to remove the language directory if empty
+        try:
+            if os.path.isdir(lang_dir) and not os.listdir(lang_dir):
+                os.rmdir(lang_dir)
+        except OSError:
+            pass
+
+        if deleted:
+            return {"success": True, "message": f"OCR model deleted: {language_id}"}
+        else:
+            return {"success": True, "message": f"OCR model not found: {language_id}"}
+
+    def _is_ocr_language_downloaded(self, language_id):
+        """
+        Quick check whether an OCR recognition model exists for the given language.
+
+        Args:
+            language_id: The OCR language identifier (e.g., "english").
+
+        Returns:
+            True if rec.onnx exists in the language's model directory.
+        """
+        lang_dir = os.path.join(self._ocr_models_dir, language_id)
+        rec_path = os.path.join(lang_dir, "rec.onnx")
+        return os.path.exists(rec_path)
 

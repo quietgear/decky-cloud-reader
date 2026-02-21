@@ -23,7 +23,9 @@
 #   - Logs: All diagnostic messages go to stderr (picked up by parent process)
 #
 # Environment variables:
-#   - LOCAL_MODELS_DIR: path to the models/ directory containing OCR + TTS models
+#   - LOCAL_MODELS_DIR: path to the models/ directory containing bundled OCR det/cls models
+#   - LOCAL_OCR_MODELS_DIR: path to the settings ocr_models/ dir with per-language rec models
+#   - LOCAL_VOICES_DIR: path to the settings voices/ dir with on-demand Piper TTS voices
 #   - OMP_NUM_THREADS: set by this script to limit CPU usage (default: 2)
 #
 # IMPORTANT: This file must NOT import `decky` — it doesn't exist in bundled Python.
@@ -165,7 +167,7 @@ def _crop_image(img, crop_region):
 # OCR action — text detection using RapidOCR (offline)
 # ---------------------------------------------------------------------------
 
-def do_ocr(image_path, ocr_engine=None, crop_region=None):
+def do_ocr(image_path, ocr_engine=None, crop_region=None, ocr_language=None):
     """
     Perform OCR on an image file using RapidOCR (offline, local inference).
 
@@ -185,6 +187,9 @@ def do_ocr(image_path, ocr_engine=None, crop_region=None):
                     bounding box to crop before OCR. Coordinates are clamped
                     to image bounds and normalized (min/max swap). If None
                     or absent, the full image is used.
+        ocr_language: OCR language identifier (e.g., "english"). Used to
+                     initialize the engine with the correct rec model if
+                     ocr_engine is None (CLI mode).
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -212,7 +217,7 @@ def do_ocr(image_path, ocr_engine=None, crop_region=None):
     # Step 2: Initialize OCR engine if not pre-initialized
     if ocr_engine is None:
         try:
-            ocr_engine = _init_ocr_engine()
+            ocr_engine = _init_ocr_engine(language_id=ocr_language)
         except Exception as e:
             log_error(f"Failed to init OCR engine: {e}")
             output_error(f"Failed to initialize OCR engine: {e}")
@@ -357,7 +362,7 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, spea
 
 def do_ocr_tts(image_path, output_audio_path, speech_rate,
                ocr_engine=None, voice_id=None, voice_cache=None, speaker_id=None,
-               crop_region=None):
+               crop_region=None, ocr_language=None):
     """
     Perform OCR and TTS in a single invocation (same as GCP's combined action).
 
@@ -379,6 +384,9 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
                     When None, Piper defaults to speaker 0 for multi-speaker voices.
         crop_region: Optional dict {"x1", "y1", "x2", "y2"} defining the
                     bounding box to crop before OCR. If None, full image is used.
+        ocr_language: OCR language identifier (e.g., "english"). Used to
+                     initialize the engine with the correct rec model if
+                     ocr_engine is None (CLI mode).
 
     Returns:
         Never returns — raises WorkerResult or WorkerError.
@@ -406,7 +414,7 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
     # ---- Step 2: Initialize OCR engine if needed ----
     if ocr_engine is None:
         try:
-            ocr_engine = _init_ocr_engine()
+            ocr_engine = _init_ocr_engine(language_id=ocr_language)
         except Exception as e:
             log_error(f"Failed to init OCR engine: {e}")
             output_error(f"Failed to initialize OCR engine: {e}")
@@ -496,48 +504,66 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
 # Model initialization helpers
 # ---------------------------------------------------------------------------
 
-def _init_ocr_engine():
+def _init_ocr_engine(language_id=None):
     """
-    Initialize the RapidOCR engine with downloaded ONNX model files.
+    Initialize the RapidOCR engine with language-specific recognition model.
 
-    Same approach as Decky-Translator: pass custom model paths for the ONNX
-    files (det, rec, cls) but do NOT pass rec_keys_path. The library's
-    built-in character dictionary is guaranteed to match the recognition
-    model's output vocabulary. Passing a separately downloaded keys file
-    causes IndexError due to model-dictionary version mismatch.
+    Detection and classification models use rapidocr-onnxruntime's built-in
+    defaults (bundled inside the pip package). Only the recognition model is
+    swapped per language — downloaded on demand to LOCAL_OCR_MODELS_DIR/{language_id}/.
 
-    Model files are expected in LOCAL_MODELS_DIR/ocr/:
-      - ch_PP-OCRv4_det_infer.onnx  (text detection)
-      - ch_PP-OCRv4_rec_infer.onnx  (text recognition)
-      - ch_ppocr_mobile_v2.0_cls_infer.onnx  (text direction classification)
+    Why built-in det/cls instead of custom models:
+      - rapidocr-onnxruntime's post-processing expects its own det model format
+      - PP-OCRv5 det models have a different architecture that produces garbage
+        bounding boxes with rapidocr-onnxruntime (over-segmentation, 50+ "lines"
+        from a small image)
+      - The built-in det/cls models are proven to work and well-tested
+
+    Model files:
+      - Built-in detection model (inside rapidocr-onnxruntime package)
+      - Built-in classification model (inside rapidocr-onnxruntime package)
+      - LOCAL_OCR_MODELS_DIR/{language_id}/rec.onnx   (recognition, per-language)
+      - LOCAL_OCR_MODELS_DIR/{language_id}/dict.txt   (character dictionary, per-language)
+
+    Args:
+        language_id: OCR language identifier (e.g., "english", "chinese").
+                     Defaults to "english" if None.
 
     Returns:
         An initialized RapidOCR engine ready to process images.
     """
-    models_dir = os.environ.get("LOCAL_MODELS_DIR", "")
-    if not models_dir:
-        raise RuntimeError("LOCAL_MODELS_DIR environment variable not set")
+    if not language_id:
+        language_id = "english"
 
-    ocr_dir = os.path.join(models_dir, "ocr")
-    det_path = os.path.join(ocr_dir, "ch_PP-OCRv4_det_infer.onnx")
-    rec_path = os.path.join(ocr_dir, "ch_PP-OCRv4_rec_infer.onnx")
-    cls_path = os.path.join(ocr_dir, "ch_ppocr_mobile_v2.0_cls_infer.onnx")
+    ocr_models_dir = os.environ.get("LOCAL_OCR_MODELS_DIR", "")
+    if not ocr_models_dir:
+        raise RuntimeError("LOCAL_OCR_MODELS_DIR environment variable not set")
 
-    # Verify model files exist before attempting to load
-    for path, name in [(det_path, "det"), (rec_path, "rec"), (cls_path, "cls")]:
+    # Language-specific models: recognition + dictionary (downloaded on demand)
+    lang_dir = os.path.join(ocr_models_dir, language_id)
+    rec_path = os.path.join(lang_dir, "rec.onnx")
+    dict_path = os.path.join(lang_dir, "dict.txt")
+
+    # Verify rec model files exist before attempting to load
+    for path, name in [(rec_path, "rec"), (dict_path, "dict")]:
         if not os.path.exists(path):
             raise FileNotFoundError(f"OCR model file not found: {path} ({name})")
 
     from rapidocr_onnxruntime import RapidOCR
 
-    log_info(f"Initializing RapidOCR engine from {ocr_dir}")
+    log_info(f"Initializing RapidOCR engine: language={language_id}")
+    log_info(f"  det: built-in (rapidocr-onnxruntime default)")
+    log_info(f"  cls: built-in (rapidocr-onnxruntime default)")
+    log_info(f"  rec: {rec_path}")
+    log_info(f"  dict: {dict_path}")
+
+    # Only override rec model + dictionary. Det and cls use library defaults
+    # which are compatible with rapidocr-onnxruntime's post-processing.
     engine = RapidOCR(
-        det_model_path=det_path,
         rec_model_path=rec_path,
-        cls_model_path=cls_path,
-        # NO rec_keys_path — use library's built-in keys (avoids mismatch)
+        rec_keys_path=dict_path,
     )
-    log_info("RapidOCR engine initialized")
+    log_info(f"RapidOCR engine initialized for language={language_id}")
     return engine
 
 
@@ -638,9 +664,14 @@ def serve():
     Startup sequence:
       1. Limit CPU threads (OMP_NUM_THREADS=2 for Steam Deck's 4 cores)
       2. Reconfigure stdout for line buffering
-      3. Initialize RapidOCR engine + Piper voice model (pay once)
+      3. Initialize lazy caches for OCR engine and TTS voices
       4. Send {"ready": true} to stdout
       5. Enter command loop
+
+    OCR engine is lazily initialized on first OCR command and cached. Only one
+    engine is kept in memory at a time — when the OCR language changes, the old
+    engine is discarded and a new one is created. This avoids accumulating
+    multiple ~100-200 MB engines in memory on the Steam Deck.
     """
     # Step 1: Limit CPU threads — leave cores for the game.
     # Must be set BEFORE importing onnxruntime (which reads it at import time).
@@ -649,28 +680,42 @@ def serve():
     # Step 2: Ensure stdout flushes after every line (critical for JSON protocol).
     sys.stdout.reconfigure(line_buffering=True)
 
-    # Log the voices directory so we can verify it in debug output
+    # Log environment directories so we can verify in debug output
     voices_dir = os.environ.get("LOCAL_VOICES_DIR", "")
+    ocr_models_dir = os.environ.get("LOCAL_OCR_MODELS_DIR", "")
     log_info(f"serve: voices dir = {voices_dir}")
+    log_info(f"serve: ocr_models dir = {ocr_models_dir}")
 
-    # Step 3: Initialize OCR engine upfront, but use lazy-loading for TTS voices.
-    # OCR engine is always needed and there's only one, so we pay the ~1.5s load
-    # cost at startup. Piper voices are loaded on first use and cached — this way
-    # startup is faster (~1.5s instead of ~3s) and only used voices consume memory.
-    try:
-        log_info("serve: initializing OCR engine...")
-        ocr_engine = _init_ocr_engine()
-        voice_cache = {}  # Lazy voice cache: voice_id → PiperVoice
-        log_info("serve: OCR engine initialized, voice cache empty (lazy-load)")
-    except Exception as e:
-        log_error(f"serve: model init failed: {e}")
-        log_error(traceback.format_exc())
-        print(json.dumps({"ready": False, "message": f"Model init failed: {e}"}), flush=True)
-        return
+    # Step 3: Initialize lazy caches. OCR engine is NOT initialized upfront
+    # (Phase 25) — it's created on first OCR command with the requested language.
+    # This avoids loading a model that may not match the user's language setting.
+    ocr_engine = None             # Lazily initialized RapidOCR engine
+    ocr_engine_language = None    # Language ID of the cached engine
+    voice_cache = {}              # Lazy voice cache: voice_id → PiperVoice
+    log_info("serve: caches empty (lazy-load OCR engine + voices)")
 
     # Step 4: Signal to parent that we're ready to accept commands
     print(json.dumps({"ready": True}), flush=True)
     log_info("serve: ready, waiting for commands...")
+
+    # Helper: get or reinitialize OCR engine for the requested language.
+    # Returns the engine, or raises an exception on failure.
+    def _get_ocr_engine(language_id):
+        nonlocal ocr_engine, ocr_engine_language
+        if not language_id:
+            language_id = "english"
+        # Reuse cached engine if language matches
+        if ocr_engine is not None and ocr_engine_language == language_id:
+            log_debug(f"Using cached OCR engine for language={language_id}")
+            return ocr_engine
+        # Language changed or no engine yet — (re)initialize
+        if ocr_engine is not None:
+            log_info(f"OCR language changed: {ocr_engine_language} → {language_id}, reinitializing...")
+        else:
+            log_info(f"Initializing OCR engine for language={language_id}...")
+        ocr_engine = _init_ocr_engine(language_id=language_id)
+        ocr_engine_language = language_id
+        return ocr_engine
 
     # Step 5: Command loop — read JSON from stdin, dispatch, write JSON to stdout
     while True:
@@ -704,11 +749,14 @@ def serve():
             log_info("serve: shutdown command received, exiting")
             break
 
-        # Dispatch to the appropriate action handler
+        # Dispatch to the appropriate action handler.
+        # For OCR actions, lazily init/reinit the engine based on ocr_language.
         try:
             if action == "ocr":
-                do_ocr(cmd.get("image_path", ""), ocr_engine=ocr_engine,
-                       crop_region=cmd.get("crop_region"))
+                engine = _get_ocr_engine(cmd.get("ocr_language"))
+                do_ocr(cmd.get("image_path", ""), ocr_engine=engine,
+                       crop_region=cmd.get("crop_region"),
+                       ocr_language=cmd.get("ocr_language"))
 
             elif action == "tts":
                 do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
@@ -718,13 +766,15 @@ def serve():
                        speaker_id=cmd.get("speaker_id"))
 
             elif action == "ocr_tts":
+                engine = _get_ocr_engine(cmd.get("ocr_language"))
                 do_ocr_tts(cmd.get("image_path", ""), cmd.get("output_path", ""),
                            cmd.get("speech_rate", "medium"),
-                           ocr_engine=ocr_engine,
+                           ocr_engine=engine,
                            voice_id=cmd.get("voice_id"),
                            voice_cache=voice_cache,
                            speaker_id=cmd.get("speaker_id"),
-                           crop_region=cmd.get("crop_region"))
+                           crop_region=cmd.get("crop_region"),
+                           ocr_language=cmd.get("ocr_language"))
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)

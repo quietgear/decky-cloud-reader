@@ -112,6 +112,20 @@ SPEECH_RATE_MAP = {
     "x-fast": 1.5,
 }
 
+# Phase 25: OCR language → Vision API language hints mapping.
+# Maps our language IDs to BCP-47 codes that the Vision API uses as hints
+# for text detection. Hints improve accuracy for non-Latin scripts.
+# See: https://cloud.google.com/vision/docs/languages
+OCR_LANGUAGE_HINTS = {
+    "english": ["en"],
+    "chinese": ["zh", "ja"],         # Chinese + Japanese share CJK characters
+    "korean": ["ko"],
+    "latin": ["fr", "de", "es", "it", "pt"],  # Major Latin-script languages
+    "eslav": ["ru", "uk", "bg", "be"],         # Cyrillic-script languages
+    "thai": ["th"],
+    "greek": ["el"],
+}
+
 
 # ---------------------------------------------------------------------------
 # Logging helpers — all output goes to stderr, never stdout
@@ -425,7 +439,7 @@ def resize_image_if_needed(image_bytes):
 # OCR action — the main text detection pipeline
 # ---------------------------------------------------------------------------
 
-def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None):
+def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None, ocr_language=None):
     """
     Perform OCR on an image file using Google Cloud Vision API.
 
@@ -434,7 +448,7 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None):
       2. Crop to region if specified (Phase 12)
       3. Resize if over 10 MB
       4. Initialize the Vision client with credentials (skip if pre-initialized)
-      5. Call text_detection() with retry on transient errors
+      5. Call text_detection() with retry on transient errors (+ language hints)
       6. Parse the response and extract detected text
 
     Args:
@@ -444,6 +458,9 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None):
                        (in serve mode), skips client creation for speed.
         crop_region: Optional dict {"x1", "y1", "x2", "y2"} defining the
                     bounding box to crop before OCR. If None, full image is used.
+        ocr_language: OCR language identifier (e.g., "english", "chinese").
+                     Used to provide language hints to the Vision API for
+                     improved accuracy on non-English text.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError via output_result/output_error.
@@ -483,7 +500,16 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None):
     from google.api_core import exceptions as google_exceptions
 
     image = vision.Image(content=image_bytes)
-    log_info(f"Sending {len(image_bytes):,} bytes to Vision API...")
+
+    # Phase 25: Build language hints from ocr_language setting.
+    # Language hints improve accuracy for non-Latin scripts (CJK, Cyrillic, etc.)
+    image_context = None
+    if ocr_language and ocr_language in OCR_LANGUAGE_HINTS:
+        hints = OCR_LANGUAGE_HINTS[ocr_language]
+        image_context = vision.ImageContext(language_hints=hints)
+        log_info(f"Sending {len(image_bytes):,} bytes to Vision API (language_hints={hints})...")
+    else:
+        log_info(f"Sending {len(image_bytes):,} bytes to Vision API...")
 
     # Retry loop: attempts the API call up to MAX_RETRIES times.
     # On transient errors (503, 429, timeouts), we wait and retry.
@@ -491,7 +517,7 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None):
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            response = client.text_detection(image=image)
+            response = client.text_detection(image=image, image_context=image_context)
             break  # Success — exit the retry loop
         except (
             google_exceptions.ServiceUnavailable,    # 503
@@ -710,7 +736,7 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None)
 # ---------------------------------------------------------------------------
 
 def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
-               vision_client=None, tts_client=None, crop_region=None):
+               vision_client=None, tts_client=None, crop_region=None, ocr_language=None):
     """
     Perform OCR and TTS in a single invocation.
 
@@ -723,7 +749,7 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
     Steps:
       1. Decode credentials once (skipped if both clients provided)
       2. Read, crop if specified (Phase 12), and resize image
-      3. Init Vision client → call text_detection() with retry
+      3. Init Vision client → call text_detection() with retry (+ language hints)
       4. If no text → return early (success with empty text, no audio)
       5. Init TTS client (reuses decoded credentials) → synthesize_speech()
       6. Write MP3 to output path
@@ -738,6 +764,8 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
         tts_client: Optional pre-initialized TTS client (serve mode).
         crop_region: Optional dict {"x1", "y1", "x2", "y2"} defining the
                     bounding box to crop before OCR. If None, full image is used.
+        ocr_language: OCR language identifier (e.g., "english", "chinese").
+                     Used to provide language hints to the Vision API.
 
     Returns:
         Never returns — raises WorkerResult or WorkerError via output_result/output_error.
@@ -784,13 +812,21 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
     from google.api_core import exceptions as google_exceptions
 
     image = vision.Image(content=image_bytes)
-    log_info(f"Sending {len(image_bytes):,} bytes to Vision API...")
+
+    # Phase 25: Build language hints from ocr_language setting
+    image_context = None
+    if ocr_language and ocr_language in OCR_LANGUAGE_HINTS:
+        hints = OCR_LANGUAGE_HINTS[ocr_language]
+        image_context = vision.ImageContext(language_hints=hints)
+        log_info(f"Sending {len(image_bytes):,} bytes to Vision API (language_hints={hints})...")
+    else:
+        log_info(f"Sending {len(image_bytes):,} bytes to Vision API...")
 
     # Retry loop for OCR (same pattern as do_ocr)
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            response = vision_client.text_detection(image=image)
+            response = vision_client.text_detection(image=image, image_context=image_context)
             break
         except (
             google_exceptions.ServiceUnavailable,
@@ -1038,7 +1074,8 @@ def serve():
             if action == "ocr":
                 do_ocr(cmd.get("image_path", ""), creds_b64,
                        vision_client=vision_client,
-                       crop_region=cmd.get("crop_region"))
+                       crop_region=cmd.get("crop_region"),
+                       ocr_language=cmd.get("ocr_language"))
 
             elif action == "tts":
                 do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
@@ -1051,7 +1088,8 @@ def serve():
                            cmd.get("voice_id", "en-US-Neural2-C"),
                            cmd.get("speech_rate", "medium"), creds_b64,
                            vision_client=vision_client, tts_client=tts_client,
-                           crop_region=cmd.get("crop_region"))
+                           crop_region=cmd.get("crop_region"),
+                           ocr_language=cmd.get("ocr_language"))
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)
