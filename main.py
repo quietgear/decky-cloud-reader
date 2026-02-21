@@ -72,6 +72,7 @@ INTERFACE_SOUNDS = {
     "selection_start": "mixkit-modern-technology-select-3124.wav",
     "selection_end": "mixkit-old-camera-shutter-click-1137.wav",
     "stop": "mixkit-click-error-1110.wav",
+    "no_text": "mixkit-negative-tone-interface-tap-2569.wav",
 }
 
 # Timeout for the GStreamer capture subprocess. 2 seconds is sufficient —
@@ -227,6 +228,9 @@ DEFAULT_SETTINGS = {
 
     # Phase 10 — When True, skip playing UI feedback sounds (Phase 11).
     "mute_interface_sounds": False,
+
+    # Phase 23 — When True, hide on-screen toast overlay with pipeline status.
+    "hide_pipeline_toast": False,
 
     # Phase 10 — Fixed region coordinates for Phase 12 Fixed Region mode.
     # Defines a persistent bounding box the user can configure manually.
@@ -410,6 +414,14 @@ class Plugin:
         # set_qam_visible() RPC using useQuickAccessVisible() hook. Suppresses
         # touch gestures while any part of the Quick Access Menu is open.
         self._qam_visible = False
+
+        # Phase 23: Pipeline toast state — lightweight status read by the frontend
+        # toast overlay. Seq increments each pipeline run so the frontend can detect
+        # new runs. Status tracks the outcome for display and auto-dismiss timing.
+        self._pipeline_toast_seq = 0          # Increments each pipeline run
+        self._pipeline_toast_status = "idle"  # idle|running|success|no_text|error|cancelled
+        self._pipeline_toast_message = ""     # Short human-readable message
+        self._pipeline_toast_word_count = 0   # Words detected by OCR
 
         # Persistent GCP worker subprocess state.
         # Instead of spawning a new subprocess for every OCR/TTS call (paying
@@ -2141,8 +2153,11 @@ class Plugin:
             decky.logger.error(f"{LOG} no audio player found — cannot play interface sound")
             return False
 
-        # Get volume from settings (0-100)
+        # Get volume from settings (0-100). The "stop" sound is intentionally
+        # quieter (50% of the user's volume) so it's not jarring.
         volume = self.settings.get("volume", DEFAULT_SETTINGS["volume"])
+        if sound_name == "stop":
+            volume = max(1, int(volume * 0.5))
 
         # Build the command based on the discovered player (same logic as
         # _start_playback() but without tracking in self._playback_process).
@@ -2802,7 +2817,7 @@ class Plugin:
         """
         decky.logger.info(f"{LOG} _read_screen_with_crop(crop={crop_region})")
 
-        # Reject if a pipeline is already running
+        # Reject if a pipeline is already running — don't update toast state
         if self._pipeline_running:
             decky.logger.warning(f"{LOG} pipeline already running — rejecting")
             return {
@@ -2818,6 +2833,16 @@ class Plugin:
         self._pipeline_running = True
         self._pipeline_step = "starting"
 
+        # Phase 23: Emit "running" toast event before the pipeline starts.
+        # Increment seq so the frontend knows a new pipeline run has begun.
+        self._pipeline_toast_seq += 1
+        self._pipeline_toast_status = "running"
+        self._pipeline_toast_message = "Reading..."
+        self._pipeline_toast_word_count = 0
+        hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
+        await decky.emit("pipeline_toast",
+            self._pipeline_toast_seq, "running", "Reading...", 0, hide_toast)
+
         # Run the blocking pipeline in the thread pool executor
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -2825,10 +2850,35 @@ class Plugin:
             lambda: self._read_screen_sync(crop_region=crop_region),
         )
 
+        # Phase 23: Update toast state and emit event based on pipeline result.
+        # Also play feedback sound for non-success outcomes.
         if result["success"]:
             decky.logger.info(f"{LOG} pipeline complete: {result['message']}")
+            word_count = len(result.get("text", "").split()) if result.get("text") else 0
+            self._pipeline_toast_status = "success"
+            self._pipeline_toast_message = f"{word_count} words read"
+            self._pipeline_toast_word_count = word_count
+        elif result.get("step") == "cancelled":
+            decky.logger.warning(f"{LOG} pipeline ended: {result['message']}")
+            self._pipeline_toast_status = "cancelled"
+            self._pipeline_toast_message = "Stopped"
         else:
             decky.logger.warning(f"{LOG} pipeline ended: {result['message']}")
+            is_no_text = "no text" in result.get("message", "").lower()
+            self._pipeline_toast_status = "no_text" if is_no_text else "error"
+            self._pipeline_toast_message = "No text found" if is_no_text else "Error"
+            self._pipeline_toast_word_count = 0
+            self._play_interface_sound("no_text")
+
+        # Emit the final toast event to the frontend (re-read setting in case
+        # user toggled it during the pipeline run)
+        hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
+        await decky.emit("pipeline_toast",
+            self._pipeline_toast_seq,
+            self._pipeline_toast_status,
+            self._pipeline_toast_message,
+            self._pipeline_toast_word_count,
+            hide_toast)
 
         return result
 
@@ -2884,6 +2934,25 @@ class Plugin:
             "running": self._pipeline_running,
             "step": self._pipeline_step,
             "is_playing": is_playing,
+        }
+
+    # =========================================================================
+    # RPC: get_pipeline_toast() — Phase 23
+    # =========================================================================
+    # Lightweight poll target for the frontend toast overlay. Returns the
+    # current pipeline toast state: seq (increments per run), status, message,
+    # and word count. The frontend polls this every 1s and uses seq changes
+    # to detect new pipeline runs.
+    #
+    # Called from the frontend via:
+    #   const getPipelineToast = callable<[], PipelineToastData>("get_pipeline_toast");
+    async def get_pipeline_toast(self):
+        return {
+            "seq": self._pipeline_toast_seq,
+            "status": self._pipeline_toast_status,
+            "message": self._pipeline_toast_message,
+            "word_count": self._pipeline_toast_word_count,
+            "hidden": self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"]),
         }
 
     # =========================================================================

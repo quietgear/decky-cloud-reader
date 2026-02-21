@@ -87,6 +87,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **20: GCP Voice Expansion** | Expanded GCP voice dropdown from 8 English-only to 28 multi-language voices (EN-US, EN-GB, UK, DE, FR, ES, JA, PT-BR, RU). Includes Neural2, Wavenet, and Standard voices. Updated `VOICE_OPTIONS` in frontend and `VOICE_REGISTRY` in `gcp_worker.py`. Adopted reference plugin label format |
 | **21: Debug-Only Monitor Status** | Moved button monitor and touchscreen status indicators from their respective sections into the Debug section. Both only render when Debug Mode is ON, reducing UI clutter for normal use. `scrollIntoView` on a ref + invisible `Focusable` spacer to fix QAM scroll container not recalculating height after dynamic content appears |
 | **22: Zero Hold Time Option** | Added "Instant (0ms)" option to the hold time dropdown. Backend's `>=` comparison handles 0 naturally — trigger fires immediately on press. Hint text adapts: "Press L4 to trigger" instead of "Hold L4 for 0ms" |
+| **23: Pipeline Feedback** | Three feedback mechanisms for pipeline results: (A) "no_text" sound effect plays on failure/no-text (respects mute); "stop" sound plays at 50% volume, (B) on-screen toast overlay via event-driven `decky.emit("pipeline_toast")` → `addEventListener` — shows "Reading...", "N words read" (green, 3s), "No text found" (yellow, 4s), "Error" (red, 4s), auto-dismisses cancelled immediately; `PipelineToast` child uses `useUIComposition(Notification)` only while visible; `hide_pipeline_toast` setting disables toast display, (C) "Last Pipeline" debug indicator in Debug section shows last result color-coded |
 
 ---
 
@@ -137,6 +138,12 @@ Steam's QAM scroll container does NOT recalculate its scrollable height when con
 1. **`scrollIntoView`** — place a `ref` at the bottom of the new content, call `ref.current?.scrollIntoView({ behavior: "smooth", block: "nearest" })` via `setTimeout(..., 100)` after the state change
 2. **Invisible `Focusable` spacer** at the very bottom of the panel — ensures gamepad D-pad navigation can always reach the last item: `<Focusable style={{ height: "1px", opacity: 0 }} onActivate={() => {}} />`
 
+### Backend→frontend events (prefer over polling)
+Decky provides `decky.emit(event_name, *args)` (Python) and `addEventListener`/`removeEventListener` (TypeScript, from `@decky/api`). **Always prefer this event-driven push over `setInterval` polling** for backend→frontend notifications. Polling wastes RPC calls when idle and adds latency (up to the poll interval). Events fire instantly with zero idle overhead. Pattern:
+- Backend: `await decky.emit("my_event", arg1, arg2)`
+- Frontend: `const listener = addEventListener<[arg1: type, arg2: type]>("my_event", (a1, a2) => { ... })`
+- Cleanup: `removeEventListener("my_event", listener)` in `onDismount()`
+
 ### Decky Plugin Sandbox
 - **`plugin.json` must use `"flags": ["root"]`** (exact string `"root"`, NOT `"_root"`). Decky's `sandboxed_plugin.py` checks `"root" in self.flags` — list exact-match, not substring. With `"_root"`, the plugin silently drops to the `deck` user via `setuid`/`setgid` (without `initgroups`, so no supplementary groups). The `deck` user can open `/dev/hidraw*` (Valve udev `uaccess` rules) but NOT `/dev/input/event*` (`root:input 660`). Root is required for touchscreen evdev access.
 - `sys.path` doesn't include plugin dir — must add manually before importing split-out `.py` files
@@ -174,6 +181,7 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | `hold_time_ms` | `500` | Button hold threshold |
 | `capture_mode` | `"full_screen"` | Capture method: full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid |
 | `mute_interface_sounds` | `false` | Disable/enable playback of UI feedback sounds |
+| `hide_pipeline_toast` | `false` | Hide on-screen toast overlay with pipeline status |
 | `fixed_region_x1` | `0` | Fixed region left X coordinate |
 | `fixed_region_y1` | `0` | Fixed region top Y coordinate |
 | `fixed_region_x2` | `1280` | Fixed region right X coordinate |
@@ -219,6 +227,7 @@ Plugin zip: ~241 MB. Voices: ~63 MB each, downloaded on demand.
 | Touch suppression | Three-flag guard: keyboard + modal + QAM | `useQuickAccessVisible()` for QAM; `useEffect` + RPC for modal; explicit reset on unmount |
 | Text input in QAM | Full-screen modal via `showModal()` | `TextField` in QAM panel doesn't receive keyboard focus; modal gives proper focus + no keyboard overlap |
 | Pipeline trigger | Hardware only (button/touchscreen) | No UI trigger button — pipeline runs exclusively via L4/R4/L5/R5 hold or touchscreen tap/swipe |
+| Backend→frontend events | `decky.emit()` + `addEventListener` from `@decky/api` | Prefer event-driven push over polling for all backend→frontend notifications; zero overhead when idle |
 | Versioning | `package.json` version + `@rollup/plugin-replace` | Build-time injection of `__PLUGIN_VERSION__`; single source of truth; version footer in panel |
 | Docker build | Layer caching enabled | Use `--no-cache` when requirements or model URLs change |
 

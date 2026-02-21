@@ -33,9 +33,11 @@ import {
 } from "@decky/ui";
 
 import {
-  callable,         // Creates a typed function that calls a Python backend method
-  definePlugin,     // Registers this module as a Decky plugin
-  routerHook        // Global component registration for overlays outside the QAM panel
+  callable,              // Creates a typed function that calls a Python backend method
+  definePlugin,          // Registers this module as a Decky plugin
+  routerHook,            // Global component registration for overlays outside the QAM panel
+  addEventListener,      // Listen for events emitted by the Python backend via decky.emit()
+  removeEventListener    // Unregister an event listener (cleanup on plugin unload)
 } from "@decky/api";
 
 import { useState, useEffect, useRef } from "react";
@@ -178,6 +180,17 @@ interface OverlayScreenshotResult {
   message: string;        // Human-readable success or error message
 }
 
+// Phase 23: Pipeline toast state returned by get_pipeline_toast() backend RPC.
+// The frontend toast manager polls this to detect new pipeline runs (via seq)
+// and display status toasts with auto-dismiss timers.
+interface PipelineToastData {
+  seq: number;       // Increments each pipeline run (0 = no run yet)
+  status: "idle" | "running" | "success" | "no_text" | "error" | "cancelled";
+  message: string;   // Short human-readable message (e.g., "42 words read")
+  word_count: number; // Words detected by OCR
+  hidden: boolean;   // Whether the user has disabled toast display
+}
+
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   // Provider selection (Phase 8)
@@ -199,6 +212,7 @@ interface PluginSettings {
   // Capture mode (Phase 10/12)
   capture_mode: string;           // full_screen | swipe_selection | two_tap_selection | fixed_region | hybrid
   mute_interface_sounds: boolean; // Skip playing UI feedback sounds (Phase 10/11)
+  hide_pipeline_toast: boolean;   // Hide on-screen toast with pipeline status (Phase 23)
   // Fixed region coordinates (Phase 10/12)
   fixed_region_x1: number;
   fixed_region_y1: number;
@@ -277,6 +291,10 @@ const setModalVisible = callable<[boolean], void>("set_modal_visible");
 // Phase 14: Notify backend when the QAM ("..." menu) opens/closes
 // so touch gestures are suppressed while any part of the QAM is visible
 const setQamVisible = callable<[boolean], void>("set_qam_visible");
+
+// Phase 23: Get pipeline toast state (seq, status, message, word_count)
+// Polled by PipelineToastManager every 1s to detect new pipeline runs
+const getPipelineToast = callable<[], PipelineToastData>("get_pipeline_toast");
 
 
 // =============================================================================
@@ -509,6 +527,127 @@ function RegionPreviewOverlay({ state }: { state: OverlayState }) {
       )}
     </div>
   );
+}
+
+
+// =============================================================================
+// PipelineToast — on-screen toast showing pipeline status (Phase 23)
+// =============================================================================
+// Renders a small dark pill in the top-left corner of the screen with the
+// current pipeline status. Mounted/unmounted by PipelineToastManager — only
+// exists in the React tree while a toast is being displayed. This ensures
+// useUIComposition is only active during the brief display window (3-10s).
+
+function PipelineToast({ data }: { data: PipelineToastData }) {
+  // Request Notification composition layer so the toast renders above the game
+  useUIComposition(UIComposition.Notification);
+
+  // Color-code the status text
+  const statusColors: Record<string, string> = {
+    running: "#ffffff",
+    success: "#2ecc71",
+    no_text: "#f39c12",
+    error: "#e74c3c",
+    cancelled: "#999999",
+  };
+  const color = statusColors[data.status] || "#ffffff";
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        top: "20px",
+        left: "20px",
+        zIndex: 7002,
+        backgroundColor: "rgba(0, 0, 0, 0.80)",
+        borderRadius: "16px",
+        padding: "8px 16px",
+        color: color,
+        fontSize: "14px",
+        fontWeight: "bold",
+        pointerEvents: "none",
+        textShadow: "0 1px 2px rgba(0, 0, 0, 0.5)",
+      }}
+    >
+      {data.message}
+    </div>
+  );
+}
+
+
+// =============================================================================
+// PipelineToastManager — global manager for pipeline toast overlay (Phase 23)
+// =============================================================================
+// Always mounted via routerHook.addGlobalComponent(). Has NO useUIComposition
+// (lightweight, zero Gamescope impact when idle). Listens for "pipeline_toast"
+// events pushed from the backend via decky.emit() — no polling needed.
+// When an event arrives, conditionally renders <PipelineToast> which activates
+// UIComposition. Auto-dismiss timers: 3s for success, 4s for no_text/error,
+// immediate for cancelled. Setting toastData to null unmounts PipelineToast →
+// cleans up UIComposition.
+
+function PipelineToastManager() {
+  // Current toast data to display (null = nothing shown, PipelineToast unmounted)
+  const [toastData, setToastData] = useState<PipelineToastData | null>(null);
+  // Auto-dismiss timer handle
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // Listen for "pipeline_toast" events emitted by the backend via decky.emit().
+    // Event args: (seq, status, message, word_count, hidden)
+    const listener = addEventListener<[
+      seq: number,
+      status: string,
+      message: string,
+      word_count: number,
+      hidden: boolean
+    ]>("pipeline_toast", (seq, status, message, word_count, hidden) => {
+      // Clear any pending dismiss timer from a previous event
+      if (dismissTimerRef.current) {
+        clearTimeout(dismissTimerRef.current);
+        dismissTimerRef.current = null;
+      }
+
+      // If toast display is disabled, don't show anything
+      if (hidden) {
+        setToastData(null);
+        return;
+      }
+
+      const data: PipelineToastData = {
+        seq,
+        status: status as PipelineToastData["status"],
+        message,
+        word_count,
+        hidden: false,
+      };
+
+      // Show the toast
+      setToastData(data);
+
+      // Set up auto-dismiss based on status
+      if (status === "cancelled") {
+        // Cancelled — dismiss immediately (stop sound is the feedback)
+        setToastData(null);
+      } else if (status === "success") {
+        dismissTimerRef.current = setTimeout(() => setToastData(null), 3000);
+      } else if (status === "no_text" || status === "error") {
+        dismissTimerRef.current = setTimeout(() => setToastData(null), 4000);
+      }
+      // "running" stays visible until next event
+    });
+
+    return () => {
+      removeEventListener("pipeline_toast", listener);
+      if (dismissTimerRef.current) {
+        clearTimeout(dismissTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Only render PipelineToast when there's data to show
+  if (!toastData) return null;
+  return <PipelineToast data={toastData} />;
 }
 
 
@@ -908,6 +1047,9 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   // Ref for scrolling to the bottom of the Debug section after toggle (Phase 21)
   const debugEndRef = useRef<HTMLDivElement>(null);
 
+  // --- Last pipeline result for debug indicator (Phase 23) ---
+  const [lastPipelineResult, setLastPipelineResult] = useState<PipelineToastData | null>(null);
+
   // Load settings, monitor status, and voice list from the backend when
   // the component first mounts. Also reload when returning from file browser mode.
   useEffect(() => {
@@ -923,6 +1065,9 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       // Fetch touchscreen monitor status
       const touchStatus = await getTouchscreenStatus();
       setTouchscreenStatus(touchStatus);
+      // Fetch last pipeline result for debug indicator (Phase 23)
+      const toastResult = await getPipelineToast();
+      setLastPipelineResult(toastResult);
     };
     loadSettings();
   }, [mode]);  // Re-fetch settings when mode changes (e.g., after loading creds)
@@ -1538,6 +1683,15 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             onChange={(value) => handleToggle("mute_interface_sounds", value)}
           />
         </PanelSectionRow>
+        {/* Phase 23: Pipeline status toast toggle */}
+        <PanelSectionRow>
+          <ToggleField
+            label="Hide Pipeline Status"
+            description="Disable on-screen toast with pipeline results"
+            checked={settings.hide_pipeline_toast}
+            onChange={(value) => handleToggle("hide_pipeline_toast", value)}
+          />
+        </PanelSectionRow>
       </PanelSection>
 
       {/* ---- Text Filtering Section (Phase 14) ---- */}
@@ -1871,6 +2025,24 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             </Field>
           </PanelSectionRow>
         )}
+        {/* Phase 23: Last pipeline result indicator — shows outcome of the most
+            recent pipeline run in the debug section for quick diagnostics */}
+        {settings.debug && lastPipelineResult && lastPipelineResult.seq > 0 && (
+          <PanelSectionRow>
+            <Field label="Last Pipeline">
+              <div style={{
+                color: lastPipelineResult.status === "success" ? "#2ecc71"
+                     : lastPipelineResult.status === "no_text" ? "#f39c12"
+                     : lastPipelineResult.status === "error" ? "#e74c3c"
+                     : "#999999",
+                fontWeight: "bold",
+                fontSize: "13px",
+              }}>
+                {lastPipelineResult.message}
+              </div>
+            </Field>
+          </PanelSectionRow>
+        )}
         {/* Scroll anchor — scrollIntoView target when debug is toggled ON */}
         {settings.debug && <div ref={debugEndRef} />}
       </PanelSection>
@@ -1911,6 +2083,11 @@ export default definePlugin(() => {
   // on-demand by the Content component's toggle handler. This avoids keeping
   // a useUIComposition hook alive which would interfere with Gamescope input.
   const overlayState = new OverlayState();
+
+  // Phase 23: Register the pipeline toast manager as a global component.
+  // Listens for "pipeline_toast" events from the backend (no polling).
+  // Lightweight when idle — no UIComposition, no intervals.
+  routerHook.addGlobalComponent("DCRPipelineToast", () => <PipelineToastManager />);
 
   // Phase 14: Register for on-screen keyboard open/close events.
   // When the virtual keyboard is visible, the backend suppresses touch gestures
@@ -1954,6 +2131,8 @@ export default definePlugin(() => {
       // Phase 13: Clean up overlay on plugin unload
       overlayState.hide();
       routerHook.removeGlobalComponent("DCRRegionPreview");
+      // Phase 23: Unregister the pipeline toast manager
+      routerHook.removeGlobalComponent("DCRPipelineToast");
       // Phase 14: Unregister keyboard visibility callback
       keyboardUnregister?.Unregister();
       keyboardUnregister = null;
