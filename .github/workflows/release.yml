@@ -1,0 +1,86 @@
+# =============================================================================
+# Decky Cloud Reader — GitHub Actions Release Workflow
+# =============================================================================
+#
+# Builds the plugin inside an x86_64 Docker container and publishes the
+# resulting zip file as a GitHub Release asset.
+#
+# Trigger: push a version tag, e.g.:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# The Docker build cross-compiles everything for the Steam Deck (x86_64 Linux):
+#   - Frontend (TypeScript → bundled JS via Rollup)
+#   - GCP Python dependencies (Python 3.13)
+#   - Local inference Python dependencies (Python 3.12, bundled interpreter)
+#   - PaddleOCR ONNX models (downloaded from HuggingFace)
+#
+# Output: decky-cloud-reader.zip (~260 MB) — standard Decky Loader plugin zip
+# =============================================================================
+
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating GitHub Releases
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The docker-compose.yml mounts ../dist:/out (relative to the compose
+      # file at docker/docker-compose.yml), which resolves to <project-root>/dist/.
+      # This directory must exist before the container starts.
+      - name: Create output directory
+        run: mkdir -p dist
+
+      # Build the plugin using the same Docker pipeline as local development.
+      # This downloads models, installs dual Python deps, builds the frontend,
+      # assembles the plugin directory, and creates the zip.
+      # Expected build time: ~10-20 minutes (no Docker layer cache on CI).
+      - name: Build plugin
+        run: |
+          docker compose -f docker/docker-compose.yml build
+          docker compose -f docker/docker-compose.yml up
+
+      - name: Verify build artifact
+        run: |
+          if [ ! -f dist/decky-cloud-reader.zip ]; then
+            echo "ERROR: dist/decky-cloud-reader.zip not found"
+            exit 1
+          fi
+          echo "Build artifact:"
+          ls -lh dist/decky-cloud-reader.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Decky Cloud Reader ${{ github.ref_name }}"
+          body: |
+            ## Installation
+
+            1. Download `decky-cloud-reader.zip` below
+            2. Transfer the zip to your Steam Deck (USB drive, SCP, KDE Connect, etc.)
+            3. Switch to **Gaming Mode**
+            4. Press the **...** (Quick Access) button > **Decky** tab (plug icon)
+            5. Open Decky **Settings** (gear icon) > **Developer**
+            6. Enable **Developer Mode** if not already enabled
+            7. Click **Install Plugin From ZIP**
+            8. Navigate to and select the downloaded zip file
+
+            **Local mode** (offline OCR + TTS) works out of the box — no additional setup needed.
+
+            For **GCP mode** (higher accuracy, more voices), see the [Google Cloud Setup Guide](https://github.com/${{ github.repository }}/blob/main/GOOGLE_CLOUD_SETUP.md).
+          files: dist/decky-cloud-reader.zip
+          draft: false
+          prerelease: false
