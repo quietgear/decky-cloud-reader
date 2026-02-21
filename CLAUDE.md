@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–19)
+### Completed Phases (1–24)
 
 | Phase | Summary |
 |-------|---------|
@@ -88,6 +88,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **21: Debug-Only Monitor Status** | Moved button monitor and touchscreen status indicators from their respective sections into the Debug section. Both only render when Debug Mode is ON, reducing UI clutter for normal use. `scrollIntoView` on a ref + invisible `Focusable` spacer to fix QAM scroll container not recalculating height after dynamic content appears |
 | **22: Zero Hold Time Option** | Added "Instant (0ms)" option to the hold time dropdown. Backend's `>=` comparison handles 0 naturally — trigger fires immediately on press. Hint text adapts: "Press L4 to trigger" instead of "Hold L4 for 0ms" |
 | **23: Pipeline Feedback** | Three feedback mechanisms for pipeline results: (A) "no_text" sound effect plays on failure/no-text (respects mute); "stop" sound plays at 50% volume, (B) on-screen toast overlay via event-driven `decky.emit("pipeline_toast")` → `addEventListener` — shows "Reading...", "N words read" (green, 3s), "No text found" (yellow, 4s), "Error" (red, 4s), auto-dismisses cancelled immediately; `PipelineToast` child uses `useUIComposition(Notification)` only while visible; `hide_pipeline_toast` setting disables toast display, (C) "Last Pipeline" debug indicator in Debug section shows last result color-coded |
+| **24: Dead Code Cleanup** | Removed 3 unused backend RPC methods: `get_pipeline_status()` (Phase 18 removed UI), `get_playback_status()` (Phase 15 removed UI), `get_last_touch()` (never wired to frontend). Also cleaned stale comment referencing `get_playback_status()` polling |
 
 ---
 

@@ -1999,10 +1999,9 @@ class Plugin:
             decky.logger.info(f"{LOG} playback started (pid={self._playback_process.pid})")
 
             # Start a daemon thread that waits for the playback process to
-            # exit.  This ensures waitpid() is called promptly even when the
-            # UI panel is closed and nobody is polling get_playback_status().
-            # Without this, ffplay becomes a zombie (Z / <defunct>) after it
-            # finishes playing because no code path calls wait() on it.
+            # exit.  This ensures waitpid() is called promptly so ffplay
+            # doesn't become a zombie (Z / <defunct>) after it finishes
+            # playing because no code path calls wait() on it.
             proc = self._playback_process  # capture for the closure
             reaper = threading.Thread(
                 target=self._reap_playback,
@@ -2918,25 +2917,6 @@ class Plugin:
         }
 
     # =========================================================================
-    # RPC: get_pipeline_status()
-    # =========================================================================
-    # Lightweight poll target for the frontend. Returns the current pipeline
-    # step and whether audio is playing. No subprocess involved.
-    #
-    # Called from the frontend via:
-    #   const getPipelineStatus = callable<[], PipelineStatus>("get_pipeline_status");
-    async def get_pipeline_status(self):
-        is_playing = (
-            self._playback_process is not None
-            and self._playback_process.poll() is None
-        )
-        return {
-            "running": self._pipeline_running,
-            "step": self._pipeline_step,
-            "is_playing": is_playing,
-        }
-
-    # =========================================================================
     # RPC: get_pipeline_toast() — Phase 23
     # =========================================================================
     # Lightweight poll target for the frontend toast overlay. Returns the
@@ -2997,21 +2977,6 @@ class Plugin:
             "success": True,
             "message": "Playback stopped",
         }
-
-    # =========================================================================
-    # RPC: get_playback_status()
-    # =========================================================================
-    # Lightweight status check — tells the frontend whether audio is currently
-    # playing. No subprocess involved, just checks self._playback_process.poll().
-    #
-    # Called from the frontend via:
-    #   const getPlaybackStatus = callable<[], PlaybackStatus>("get_playback_status");
-    async def get_playback_status(self):
-        is_playing = (
-            self._playback_process is not None
-            and self._playback_process.poll() is None
-        )
-        return {"is_playing": is_playing}
 
     # =========================================================================
     # RPC: play_interface_sound() (Phase 11)
@@ -3478,18 +3443,6 @@ class Plugin:
             "physical_max_y": 0,
             "last_touch": None,
         }
-
-    # =========================================================================
-    # RPC: get_last_touch()
-    # =========================================================================
-    # Returns the coordinates of the last detected tap. Lightweight poll target.
-    #
-    # Called from the frontend via:
-    #   const getLastTouch = callable<[], {x: number, y: number} | null>("get_last_touch");
-    async def get_last_touch(self):
-        if self._touchscreen_monitor:
-            return self._touchscreen_monitor.get_last_touch()
-        return None
 
     # =========================================================================
     # RPC: apply_last_selection_to_fixed_region() (Phase 12)
