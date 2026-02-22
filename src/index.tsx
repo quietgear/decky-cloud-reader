@@ -252,6 +252,9 @@ interface PluginSettings {
   ignored_words_beginning: string;
   ignored_words_beginning_enabled: boolean;
   ignored_words_count: number;
+  // Translation (Phase 26)
+  translation_enabled: boolean;           // Enable GCP Cloud Translation between OCR and TTS
+  translation_target_language: string;    // ISO 639-1 target language code (e.g., "en")
   // Computed fields
   is_configured: boolean;       // Whether current providers are ready
   is_gcp_configured: boolean;   // Whether GCP credentials are loaded
@@ -763,6 +766,26 @@ const LOCAL_SPEECH_RATE_OPTIONS = [
   { data: "medium", label: "Normal" },
   { data: "fast",   label: "Fast" },
   { data: "x-fast", label: "Very Fast" },
+];
+
+// Phase 26: Translation target language options for the dropdown.
+// ISO 639-1 codes that Cloud Translation v2 accepts as target_language.
+const TRANSLATION_TARGET_OPTIONS = [
+  { data: "en", label: "English" },
+  { data: "de", label: "German" },
+  { data: "es", label: "Spanish" },
+  { data: "fr", label: "French" },
+  { data: "it", label: "Italian" },
+  { data: "ja", label: "Japanese" },
+  { data: "ko", label: "Korean" },
+  { data: "pt", label: "Portuguese" },
+  { data: "ru", label: "Russian" },
+  { data: "uk", label: "Ukrainian" },
+  { data: "zh", label: "Chinese (Simplified)" },
+  { data: "th", label: "Thai" },
+  { data: "el", label: "Greek" },
+  { data: "pl", label: "Polish" },
+  { data: "nl", label: "Dutch" },
 ];
 
 
@@ -1767,6 +1790,61 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           </PanelSectionRow>
         )}
       </PanelSection>
+
+      {/* ---- Translation Section (Phase 26) ---- */}
+      {/* Only shown when at least one provider uses GCP, since translation
+          uses GCP Cloud Translation API. Allows translating OCR text before TTS. */}
+      {needsGcp && (
+        <PanelSection title="Translation">
+          <PanelSectionRow>
+            <ToggleField
+              label="Enable Translation"
+              description="Translate OCR text before TTS (GCP Cloud Translation)"
+              checked={settings.translation_enabled ?? false}
+              onChange={async (checked) => {
+                await saveSetting("translation_enabled", checked);
+                if (settings) {
+                  setSettings({ ...settings, translation_enabled: checked });
+                }
+              }}
+            />
+          </PanelSectionRow>
+
+          {settings.translation_enabled && (
+            <>
+              {/* Target language dropdown */}
+              <PanelSectionRow>
+                <DropdownItem
+                  label="Translate To"
+                  description="Target language for translation"
+                  menuLabel="Select Target Language"
+                  rgOptions={TRANSLATION_TARGET_OPTIONS.map((o) => ({
+                    data: o.data,
+                    label: o.label,
+                  }))}
+                  selectedOption={
+                    TRANSLATION_TARGET_OPTIONS.find((o) => o.data === settings.translation_target_language)?.data
+                    ?? TRANSLATION_TARGET_OPTIONS[0].data
+                  }
+                  onChange={async (option) => {
+                    await saveSetting("translation_target_language", option.data);
+                    if (settings) {
+                      setSettings({ ...settings, translation_target_language: option.data as string });
+                    }
+                  }}
+                />
+              </PanelSectionRow>
+
+              {/* Source language hint */}
+              <PanelSectionRow>
+                <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
+                  Source: auto-detected from OCR language ({settings.ocr_language})
+                </div>
+              </PanelSectionRow>
+            </>
+          )}
+        </PanelSection>
+      )}
 
       {/* ---- GCP Credentials Section ---- */}
       {/* Only shown when at least one provider uses GCP */}

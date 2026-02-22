@@ -96,6 +96,10 @@ TTS_TIMEOUT = 30  # seconds
 # 60 seconds is generous — the combined call typically takes ~3s.
 OCR_TTS_TIMEOUT = 60  # seconds
 
+# Timeout for the translation subprocess (Phase 26). Cloud Translation is
+# a text-only API — much faster than Vision or TTS. 15 seconds with retries.
+TRANSLATE_TIMEOUT = 15  # seconds
+
 # Timeout for voice model downloads from HuggingFace. Each voice is ~63MB,
 # so 120s should be plenty even on slow connections.
 VOICE_DOWNLOAD_TIMEOUT = 120  # seconds
@@ -195,6 +199,19 @@ OCR_LANGUAGES = {
 }
 
 DEFAULT_OCR_LANGUAGE = "english"
+
+# Phase 26: OCR language → Cloud Translation source language mapping.
+# Maps our language IDs to ISO 639-1 codes for the Translation API.
+# None = let Cloud Translation auto-detect (for groups covering multiple languages).
+TRANSLATION_SOURCE_LANGUAGE = {
+    "english": "en",
+    "chinese": None,   # zh or ja — auto-detect
+    "korean": "ko",
+    "latin": None,     # fr/de/es/it/pt — auto-detect
+    "eslav": None,     # ru/uk/bg/be — auto-detect
+    "thai": "th",
+    "greek": "el",
+}
 
 # Timeout for OCR model downloads from HuggingFace. Rec models are 8-85MB,
 # so 120s should be plenty even on slow connections.
@@ -316,6 +333,11 @@ DEFAULT_SETTINGS = {
     "ignored_words_beginning": "",
     "ignored_words_beginning_enabled": False,
     "ignored_words_count": 3,
+
+    # Phase 26 — Translation pipeline (GCP-only). When enabled, OCR text is
+    # translated to the target language before text filtering and TTS.
+    "translation_enabled": False,
+    "translation_target_language": "en",
 }
 
 # Fields that must be present in a valid GCP service account JSON file.
@@ -1459,8 +1481,18 @@ class Plugin:
             decky.logger.error(f"{LOG} worker: no GCP credentials configured")
             return False
 
-        # Build subprocess environment
+        # Build subprocess environment.
+        # Strip LD_LIBRARY_PATH and LD_PRELOAD — Decky Loader (PyInstaller) sets
+        # these to its temp dir containing an older libssl.so.3 that breaks Python's
+        # ssl module for requests/urllib3. This affects OAuth2 token refresh (which
+        # all GCP clients need via google.auth.transport.requests), even though the
+        # actual API calls use gRPC (bundled BoringSSL, unaffected). Vision and TTS
+        # clients dodge this because gRPC handles their auth internally via its C core,
+        # but lazy-initialized clients (like Translation) trigger a fresh token refresh
+        # through the Python requests path.
         env = os.environ.copy()
+        env.pop("LD_LIBRARY_PATH", None)
+        env.pop("LD_PRELOAD", None)
         env["PYTHONPATH"] = self._py_modules_path
         env["PYTHONNOUSERSITE"] = "1"
         env["GCP_CREDENTIALS_BASE64"] = creds_b64
@@ -2715,8 +2747,16 @@ class Plugin:
                 self.settings.get("ignored_words_beginning_enabled", False)
             )
 
-            # Route based on whether both providers are the same AND no filtering
-            if ocr_provider == tts_provider and not filtering_active:
+            # Phase 26: check if translation is active — requires at least one
+            # GCP provider (translation uses GCP Cloud Translation API). When
+            # active, we must split OCR and TTS so we can translate between them.
+            translation_active = (
+                self.settings.get("translation_enabled", False)
+                and (ocr_provider == "gcp" or tts_provider == "gcp")
+            )
+
+            # Route based on whether both providers are the same AND no mid-pipeline processing
+            if ocr_provider == tts_provider and not filtering_active and not translation_active:
                 # Same provider, no filtering — use combined ocr_tts action for efficiency
                 decky.logger.info(f"{LOG} pipeline: running OCR+TTS combined ({ocr_provider})...")
                 command = {
@@ -2749,9 +2789,16 @@ class Plugin:
                 audio_size = result.get("audio_size", 0)
 
             else:
-                # Mixed providers or filtering active — run OCR first, filter, then TTS separately
+                # Mixed providers, filtering, or translation active — run steps separately
+                split_reasons = []
+                if ocr_provider != tts_provider:
+                    split_reasons.append("mixed providers")
+                if filtering_active:
+                    split_reasons.append("filtering")
+                if translation_active:
+                    split_reasons.append("translation")
                 decky.logger.info(f"{LOG} pipeline: running OCR ({ocr_provider}) then TTS ({tts_provider})"
-                                  f"{' [filtering active]' if filtering_active else ''}...")
+                                  f" [{', '.join(split_reasons)}]...")
 
                 # OCR step — include crop_region if specified (Phase 12)
                 ocr_cmd = {"action": "ocr", "image_path": ocr_tmp_path, "ocr_language": ocr_language}
@@ -2772,7 +2819,40 @@ class Plugin:
                 ocr_text = ocr_result.get("text", "")
                 char_count = ocr_result.get("char_count", len(ocr_text))
 
-                # Phase 14: apply text filters between OCR and TTS
+                # Phase 26: translate OCR text before filtering/TTS if enabled.
+                # Translation always routes to the GCP worker (Cloud Translation API).
+                if translation_active and ocr_text.strip():
+                    if self._pipeline_cancel.is_set():
+                        return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": 0}
+
+                    self._pipeline_step = "translating"
+                    target_lang = self.settings.get("translation_target_language", "en")
+                    source_lang = TRANSLATION_SOURCE_LANGUAGE.get(ocr_language)
+
+                    decky.logger.info(f"{LOG} pipeline: translating {len(ocr_text):,} chars "
+                                      f"({source_lang or 'auto'} → {target_lang})...")
+
+                    translate_result = self._send_command(
+                        {
+                            "action": "translate",
+                            "text": ocr_text,
+                            "target_language": target_lang,
+                            "source_language": source_lang,
+                        },
+                        provider="gcp", timeout=TRANSLATE_TIMEOUT,
+                    )
+
+                    if not translate_result.get("success", False):
+                        return {
+                            "success": False,
+                            "message": f"Translation failed: {translate_result.get('message', 'Unknown error')}",
+                            "step": "translating", "text": ocr_text, "audio_size": 0,
+                        }
+
+                    ocr_text = translate_result.get("text", ocr_text)
+                    decky.logger.info(f"{LOG} pipeline: translation complete — {len(ocr_text):,} chars")
+
+                # Phase 14: apply text filters between OCR (+ translation) and TTS
                 ocr_text = self._apply_text_filters(ocr_text)
 
                 if not ocr_text.strip():
