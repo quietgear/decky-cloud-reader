@@ -90,21 +90,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **23: Pipeline Feedback** | Three feedback mechanisms for pipeline results: (A) "no_text" sound effect plays on failure/no-text (respects mute); "stop" sound plays at 50% volume, (B) on-screen toast overlay via event-driven `decky.emit("pipeline_toast")` → `addEventListener` — shows "Reading...", "N words read" (green, 3s), "No text found" (yellow, 4s), "Error" (red, 4s), auto-dismisses cancelled immediately; `PipelineToast` child uses `useUIComposition(Notification)` only while visible; `hide_pipeline_toast` setting disables toast display, (C) "Last Pipeline" debug indicator in Debug section shows last result color-coded |
 | **24: Dead Code Cleanup** | Removed 3 unused backend RPC methods: `get_pipeline_status()` (Phase 18 removed UI), `get_playback_status()` (Phase 15 removed UI), `get_last_touch()` (never wired to frontend). Also cleaned stale comment referencing `get_playback_status()` polling |
 | **25: Multi-Language OCR** | 7 OCR language packs (English, Chinese/Japanese, Korean, Latin, Cyrillic, Thai, Greek) with on-demand rec model downloads from HuggingFace (`monkt/paddleocr-onnx`). Det/cls use rapidocr-onnxruntime's built-in models (v5 det was incompatible — over-segmentation). Recognition models downloaded per-language to `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/`. Lazy OCR engine init in local worker (one cached engine, reinit on language change). GCP Vision API gets `language_hints` from OCR language setting. Frontend: language dropdown in Provider section with download/delete controls. Plugin zip ~85 MB smaller (removed all bundled OCR models) |
-
-### Next Phase: 26 — Translation Pipeline (GCP-only)
-
-**Goal:** Add optional translation between OCR and TTS so users can play games in foreign languages and hear translated text. Example: Japanese game → OCR (Japanese) → Translate (JA→EN) → TTS (English).
-
-**Scope:** GCP Cloud Translation API only. Local translation (Argos Translate) deferred — models are ~200-500 MB per language pair and compete with OCR+TTS for Steam Deck RAM. Translation is a no-op when `translation_enabled` is false or provider is local.
-
-**Approach:**
-- Add `google-cloud-translate` to `requirements.txt` (reuses existing GCP credentials)
-- New `translate` action in `gcp_worker.py` calling Cloud Translation API
-- Pipeline becomes: capture → OCR → translate → filter → TTS (always split, no combined `ocr_tts` when translation active)
-- Source language derived from `ocr_language` setting (no separate setting needed)
-- New settings: `translation_enabled` (bool), `translation_target_language` (string, e.g. "en")
-- UI: Translation section with enable toggle + target language dropdown
-- Translation runs between OCR and text filtering (filters apply to translated text)
+| **26: Translation Pipeline** | Optional GCP Cloud Translation between OCR and TTS for playing games in foreign languages (e.g., JA game → OCR → Translate JA→EN → TTS English). Uses Translation API v3 (gRPC transport — immune to PyInstaller SSL contamination). Lazy-initialized `TranslationServiceClient` cached in `gcp_worker.py`. Pipeline: capture → OCR → translate → filter → TTS (always splits, no combined `ocr_tts` when translation active). Source language auto-derived from `ocr_language` setting via `TRANSLATION_SOURCE_LANGUAGE` mapping (`None` = auto-detect for multi-language OCR groups). 15 target languages. UI: Translation section between Provider and GCP Credentials (visible only when `needsGcp`). GCP worker env now strips `LD_LIBRARY_PATH`/`LD_PRELOAD` to fix OAuth2 token refresh for lazy-initialized clients |
 
 ---
 
@@ -125,7 +111,7 @@ Frontend (TypeScript/React)           Backend (Python)
 - Some voices don't follow obvious naming (e.g., Ukrainian is `uk_UA-ukrainian_tts-medium`). Always verify against the actual repo tree
 
 ### Subprocess Environment
-- **Strip `LD_LIBRARY_PATH` and `LD_PRELOAD`** when spawning system commands (curl, etc.) — Decky Loader (PyInstaller) bundles older libssl.so.3 that breaks system binaries
+- **Strip `LD_LIBRARY_PATH` and `LD_PRELOAD`** when spawning subprocesses (GCP worker, curl, etc.) — Decky Loader (PyInstaller) bundles older libssl.so.3 that breaks Python's `ssl` module for `requests`/`urllib3`. This affects OAuth2 token refresh for lazy-initialized GCP clients (Translation) even though the actual API calls use gRPC (bundled BoringSSL, unaffected). Vision/TTS dodge this because gRPC handles their auth internally via its C core, but new clients trigger a fresh token refresh through the Python `requests` path
 
 ### Gamescope Screen Capture
 - Gamescope runs two Xwayland displays: `:0` (Steam UI/overlay) and `:1` (game windows)
@@ -213,6 +199,8 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | `ignored_words_beginning` | `""` | Comma-separated words to remove from start of text |
 | `ignored_words_beginning_enabled` | `false` | Enable/disable the "ignore at beginning" list |
 | `ignored_words_count` | `3` | How many leading words to check for "beginning" list |
+| `translation_enabled` | `false` | Enable GCP Cloud Translation between OCR and TTS |
+| `translation_target_language` | `"en"` | ISO 639-1 target language code for translation |
 
 ---
 
@@ -237,7 +225,8 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | Button input | Hidraw direct reading | Background operation, no UI needed |
 | Touchscreen | Raw evdev + `struct.unpack` | Stdlib only; ioctl axis calibration; 90° CW coordinate transform; auto-managed by capture mode |
 | Capture modes | State machine in main.py | 5 modes; touchscreen auto-started/stopped per mode; PIL crop before OCR; during playback all touches = stop only |
-| Pipeline optimization | Combined `ocr_tts` action for same-provider | Saves one round-trip; mixed providers run sequentially |
+| Pipeline optimization | Combined `ocr_tts` action for same-provider | Saves one round-trip; mixed providers or translation/filtering active → split |
+| Translation | GCP Cloud Translation v3 (gRPC), lazy-init | v3 uses gRPC (immune to PyInstaller SSL); v2 uses REST/urllib3 (broken). Lazy-init avoids startup cost for users who don't translate |
 | Pipeline cancellation | `threading.Event` between steps | Simple; worker timeout bounded at 60s |
 | Voice distribution | On-demand HuggingFace download | 16 voices / 14 language variants; persists in settings dir across updates; no zip bloat |
 | OCR language models | On-demand HuggingFace download (monkt/paddleocr-onnx) | 7 language packs; rec models persist in settings dir; det/cls are universal+bundled; lazy engine init with single-engine cache |
