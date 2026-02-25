@@ -210,6 +210,10 @@ interface PipelineToastData {
   message: string;   // Short human-readable message (e.g., "42 words read")
   word_count: number; // Words detected by OCR
   hidden: boolean;   // Whether the user has disabled toast display
+  // Phase 27: spoken text overlay fields
+  text: string;      // Final OCR/translated text (empty for non-success)
+  crop_region: { x1: number; y1: number; x2: number; y2: number } | null;  // Scanned region or null (full screen)
+  show_overlay: boolean;  // Whether text overlay mode is enabled
 }
 
 // Current plugin settings returned by get_settings() backend RPC
@@ -236,6 +240,7 @@ interface PluginSettings {
   capture_mode: string;           // full_screen | swipe_selection | two_tap_selection | fixed_region | hybrid
   mute_interface_sounds: boolean; // Skip playing UI feedback sounds (Phase 10/11)
   hide_pipeline_toast: boolean;   // Hide on-screen toast with pipeline status (Phase 23)
+  show_text_overlay: boolean;     // Show spoken text overlay instead of word count pill (Phase 27)
   // Fixed region coordinates (Phase 10/12)
   fixed_region_x1: number;
   fixed_region_y1: number;
@@ -323,8 +328,8 @@ const setModalVisible = callable<[boolean], void>("set_modal_visible");
 // so touch gestures are suppressed while any part of the QAM is visible
 const setQamVisible = callable<[boolean], void>("set_qam_visible");
 
-// Phase 23: Get pipeline toast state (seq, status, message, word_count)
-// Polled by PipelineToastManager every 1s to detect new pipeline runs
+/// Phase 23: Get pipeline toast state (seq, status, message, word_count, text, crop_region, show_overlay)
+// Used by Content component to fetch last pipeline result for debug indicator
 const getPipelineToast = callable<[], PipelineToastData>("get_pipeline_toast");
 
 
@@ -607,32 +612,192 @@ function PipelineToast({ data }: { data: PipelineToastData }) {
 
 
 // =============================================================================
+// SpokenTextOverlay — full-text overlay with region border (Phase 27)
+// =============================================================================
+// Replaces the "N words read" pill toast when show_text_overlay is enabled.
+// Shows the actual spoken text in a subtitle bar at the bottom of the screen,
+// plus a thin border around the scanned region (if not full screen).
+// Uses useUIComposition(Notification) to render above the game.
+
+function SpokenTextOverlay({ data }: { data: PipelineToastData }) {
+  // Request Notification composition layer so the overlay renders above the game
+  useUIComposition(UIComposition.Notification);
+
+  const region = data.crop_region;
+
+  // Determine if this is a full-screen capture (no specific region to highlight).
+  // Full screen: null region or 0,0,1280,800.
+  const isFullScreen = !region ||
+    (region.x1 === 0 && region.y1 === 0 && region.x2 === GAME_WIDTH && region.y2 === GAME_HEIGHT);
+
+  // Truncate long text at 500 chars to prevent overflow
+  const MAX_TEXT_LENGTH = 500;
+  const displayText = data.text.length > MAX_TEXT_LENGTH
+    ? data.text.substring(0, MAX_TEXT_LENGTH) + "..."
+    : data.text;
+
+  // ---------------------------------------------------------------------------
+  // Dynamic font sizing — calculate a font size that fits all text in the area.
+  //
+  // Given available width W and height H (in game pixels), and N characters:
+  //   chars_per_line ≈ W / (fontSize * avgCharWidth)
+  //   num_lines ≈ N / chars_per_line
+  //   total_height ≈ num_lines * fontSize * lineHeight
+  //
+  // Solving for fontSize:
+  //   fontSize ≤ sqrt( W * H / (N * avgCharWidth * lineHeight) )
+  //
+  // avgCharWidth ~0.55 of font size for proportional fonts, lineHeight = 1.4
+  // Combined factor: 0.55 * 1.4 = 0.77. Word-wrap overhead ~1.6x (lines don't
+  // break at exact character boundaries). FIT_FACTOR = 0.77 * 1.6 ≈ 1.2.
+  // ---------------------------------------------------------------------------
+  const LINE_HEIGHT = 1.4;
+  const FIT_FACTOR = 2.0;   // conservative: ensures text fits even with word-wrap waste
+  const PADDING = 12;        // total inset: 4px padding + 2px border, each side
+
+  let fontSize: number;
+  if (!isFullScreen && region) {
+    // Cropped region: fit text inside the scanned area
+    const availW = (region.x2 - region.x1) - PADDING;
+    const availH = (region.y2 - region.y1) - PADDING;
+    fontSize = Math.floor(Math.sqrt((availW * availH) / (displayText.length * FIT_FACTOR)));
+    fontSize = Math.max(7, Math.min(16, fontSize));
+  } else {
+    // Full-screen: fit text inside subtitle bar (94vw x 25vh minus padding)
+    const availW = GAME_WIDTH * 0.94 - 32;
+    const availH = GAME_HEIGHT * 0.25 - 24;
+    fontSize = Math.floor(Math.sqrt((availW * availH) / (displayText.length * FIT_FACTOR)));
+    fontSize = Math.max(12, Math.min(20, fontSize));
+  }
+
+  // Shared text style: white with heavy dark shadow for readability on any background
+  const textStyle: React.CSSProperties = {
+    color: "#ffffff",
+    fontSize: `${fontSize}px`,
+    textAlign: "center",
+    wordBreak: "break-word",
+    textShadow:
+      "-1px -1px 0 #000, 1px -1px 0 #000, " +
+      "-1px 1px 0 #000, 1px 1px 0 #000, " +
+      "0 0 4px rgba(0, 0, 0, 0.8), 0 0 8px rgba(0, 0, 0, 0.5)",
+    lineHeight: `${LINE_HEIGHT}`,
+  };
+
+  // For cropped regions: overlay text INSIDE the scanned area on top of the
+  // original game text. Uses vw/vh units (percentages of viewport) instead of
+  // px — the CSS viewport in Steam's CEF browser may not be exactly 1280x800
+  // CSS pixels, but 100vw/100vh always maps to the full screen.
+  if (!isFullScreen && region) {
+    const leftPct = (region.x1 / GAME_WIDTH) * 100;
+    const topPct = (region.y1 / GAME_HEIGHT) * 100;
+    const widthPct = ((region.x2 - region.x1) / GAME_WIDTH) * 100;
+    const heightPct = ((region.y2 - region.y1) / GAME_HEIGHT) * 100;
+
+    return (
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100vw",
+          height: "100vh",
+          zIndex: 7002,
+          pointerEvents: "none",
+        }}
+      >
+        {/* Region overlay: dark fill with cyan border, text centered inside */}
+        <div
+          style={{
+            position: "absolute",
+            left: `${leftPct}vw`,
+            top: `${topPct}vh`,
+            width: `${widthPct}vw`,
+            height: `${heightPct}vh`,
+            boxSizing: "border-box",
+            border: "2px solid rgba(103, 183, 220, 0.8)",
+            borderRadius: "2px",
+            backgroundColor: "rgba(0, 0, 0, 0.99)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "flex-start",
+            padding: "4px",
+            overflow: "hidden",
+          }}
+        >
+          <div style={{ ...textStyle, textAlign: "left", maxHeight: "100%", overflow: "hidden" }}>
+            {displayText}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Full-screen capture: subtitle text bar at the bottom of the screen
+  return (
+    <div
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        width: "100vw",
+        height: "100vh",
+        zIndex: 7002,
+        pointerEvents: "none",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          bottom: "5vh",
+          left: "3vw",
+          right: "3vw",
+          backgroundColor: "rgba(0, 0, 0, 0.75)",
+          borderRadius: "8px",
+          padding: "12px 16px",
+          maxHeight: "25vh",
+          overflow: "hidden",
+        }}
+      >
+        <div style={textStyle}>
+          {displayText}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// =============================================================================
 // PipelineToastManager — global manager for pipeline toast overlay (Phase 23)
 // =============================================================================
 // Always mounted via routerHook.addGlobalComponent(). Has NO useUIComposition
 // (lightweight, zero Gamescope impact when idle). Listens for "pipeline_toast"
 // events pushed from the backend via decky.emit() — no polling needed.
-// When an event arrives, conditionally renders <PipelineToast> which activates
-// UIComposition. Auto-dismiss timers: 3s for success, 4s for no_text/error,
-// immediate for cancelled. Setting toastData to null unmounts PipelineToast →
+// When an event arrives, conditionally renders <PipelineToast> or
+// <SpokenTextOverlay> (Phase 27) which activates UIComposition. Auto-dismiss
+// timers: 3s for success pill, 6s for text overlay, 4s for no_text/error,
+// 1.5s for cancelled. Setting toastData to null unmounts the component →
 // cleans up UIComposition.
 
 function PipelineToastManager() {
-  // Current toast data to display (null = nothing shown, PipelineToast unmounted)
+  // Current toast data to display (null = nothing shown, toast/overlay unmounted)
   const [toastData, setToastData] = useState<PipelineToastData | null>(null);
   // Auto-dismiss timer handle
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     // Listen for "pipeline_toast" events emitted by the backend via decky.emit().
-    // Event args: (seq, status, message, word_count, hidden)
+    // Event args: (seq, status, message, word_count, hidden, text, crop_region, show_overlay)
     const listener = addEventListener<[
       seq: number,
       status: string,
       message: string,
       word_count: number,
-      hidden: boolean
-    ]>("pipeline_toast", (seq, status, message, word_count, hidden) => {
+      hidden: boolean,
+      text: string,
+      crop_region: { x1: number; y1: number; x2: number; y2: number } | null,
+      show_overlay: boolean
+    ]>("pipeline_toast", (seq, status, message, word_count, hidden, text, crop_region, show_overlay) => {
       // Clear any pending dismiss timer from a previous event
       if (dismissTimerRef.current) {
         clearTimeout(dismissTimerRef.current);
@@ -651,33 +816,63 @@ function PipelineToastManager() {
         message,
         word_count,
         hidden: false,
+        text: text || "",
+        crop_region: crop_region || null,
+        show_overlay: show_overlay || false,
       };
 
-      // Show the toast
+      // Show the toast/overlay
       setToastData(data);
 
       // Set up auto-dismiss based on status
       if (status === "cancelled") {
-        // Cancelled — dismiss immediately (stop sound is the feedback)
-        setToastData(null);
+        // Cancelled — show "Stopped" pill for 1.5s then dismiss
+        dismissTimerRef.current = setTimeout(() => setToastData(null), 1500);
       } else if (status === "success") {
-        dismissTimerRef.current = setTimeout(() => setToastData(null), 3000);
+        if (show_overlay && text) {
+          // Text overlay: stay visible until playback finishes (pipeline_toast_dismiss
+          // event). Safety-net timeout at 45s to prevent stuck overlay.
+          dismissTimerRef.current = setTimeout(() => setToastData(null), 45000);
+        } else {
+          // Pill toast: 3s auto-dismiss
+          dismissTimerRef.current = setTimeout(() => setToastData(null), 3000);
+        }
       } else if (status === "no_text" || status === "error") {
         dismissTimerRef.current = setTimeout(() => setToastData(null), 4000);
       }
       // "running" stays visible until next event
     });
 
+    // Listen for playback-finished event to dismiss the text overlay.
+    // Emitted by the backend reaper thread when TTS audio finishes naturally.
+    const dismissListener = addEventListener("pipeline_toast_dismiss", () => {
+      if (dismissTimerRef.current) {
+        clearTimeout(dismissTimerRef.current);
+        dismissTimerRef.current = null;
+      }
+      setToastData(null);
+    });
+
     return () => {
       removeEventListener("pipeline_toast", listener);
+      removeEventListener("pipeline_toast_dismiss", dismissListener);
       if (dismissTimerRef.current) {
         clearTimeout(dismissTimerRef.current);
       }
     };
   }, []);
 
-  // Only render PipelineToast when there's data to show
+  // Nothing to show — no component mounted, no UIComposition active
   if (!toastData) return null;
+
+  // Phase 27: if text overlay is enabled and this is a success with text,
+  // render SpokenTextOverlay instead of the standard pill toast.
+  if (toastData.show_overlay && toastData.status === "success" && toastData.text) {
+    return <SpokenTextOverlay data={toastData} />;
+  }
+
+  // All other statuses (running, cancelled, no_text, error, success without overlay)
+  // use the standard pill toast.
   return <PipelineToast data={toastData} />;
 }
 
@@ -1934,6 +2129,18 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             onChange={(value) => handleToggle("hide_pipeline_toast", value)}
           />
         </PanelSectionRow>
+        {/* Phase 27: Show text overlay toggle — only visible when pipeline toast
+            is not hidden (since hide_pipeline_toast overrides all display) */}
+        {!settings.hide_pipeline_toast && (
+          <PanelSectionRow>
+            <ToggleField
+              label="Show Text Overlay"
+              description="Display scanned text and region border on screen"
+              checked={settings.show_text_overlay}
+              onChange={(value) => handleToggle("show_text_overlay", value)}
+            />
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       {/* ---- Text Filtering Section (Phase 14) ---- */}

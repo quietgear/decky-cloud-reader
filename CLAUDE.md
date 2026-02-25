@@ -91,6 +91,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **24: Dead Code Cleanup** | Removed 3 unused backend RPC methods: `get_pipeline_status()` (Phase 18 removed UI), `get_playback_status()` (Phase 15 removed UI), `get_last_touch()` (never wired to frontend). Also cleaned stale comment referencing `get_playback_status()` polling |
 | **25: Multi-Language OCR** | 7 OCR language packs (English, Chinese/Japanese, Korean, Latin, Cyrillic, Thai, Greek) with on-demand rec model downloads from HuggingFace (`monkt/paddleocr-onnx`). Det/cls use rapidocr-onnxruntime's built-in models (v5 det was incompatible — over-segmentation). Recognition models downloaded per-language to `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/`. Lazy OCR engine init in local worker (one cached engine, reinit on language change). GCP Vision API gets `language_hints` from OCR language setting. Frontend: language dropdown in Provider section with download/delete controls. Plugin zip ~85 MB smaller (removed all bundled OCR models) |
 | **26: Translation Pipeline** | Optional GCP Cloud Translation between OCR and TTS for playing games in foreign languages (e.g., JA game → OCR → Translate JA→EN → TTS English). Uses Translation API v3 (gRPC transport — immune to PyInstaller SSL contamination). Lazy-initialized `TranslationServiceClient` cached in `gcp_worker.py`. Pipeline: capture → OCR → translate → filter → TTS (always splits, no combined `ocr_tts` when translation active). Source language auto-derived from `ocr_language` setting via `TRANSLATION_SOURCE_LANGUAGE` mapping (`None` = auto-detect for multi-language OCR groups). 15 target languages. UI: Translation section between Provider and GCP Credentials (visible only when `needsGcp`). GCP worker env now strips `LD_LIBRARY_PATH`/`LD_PRELOAD` to fix OAuth2 token refresh for lazy-initialized clients |
+| **27: Spoken Text Overlay** | Optional text overlay replaces "N words read" pill toast with actual spoken text + scanned region border. `show_text_overlay` setting (off by default, hidden when `hide_pipeline_toast` is on). `SpokenTextOverlay` component: text top-left aligned inside region box (`boxSizing: "border-box"`, 4px padding, `rgba(0,0,0,0.99)` near-opaque background, cyan border) with dynamic font sizing (`FIT_FACTOR=2.0`, min 7px, max 16px for regions). Full-screen: centered subtitle bar at bottom. Backend emits 3 new args on `pipeline_toast` event: `text`, `crop_region`, `show_overlay`. Text truncated at 500 chars. Overlay stays visible for entire TTS playback duration via `pipeline_toast_dismiss` event emitted by reaper thread on natural audio finish (exit code 0); 45s safety-net timeout. Cancelled toast shows "Stopped" pill for 1.5s. Trigger cooldown (`TRIGGER_COOLDOWN_S=0.8`) prevents accidental double-taps in all handlers (button + touch_down/up/tap) |
 
 ---
 
@@ -147,6 +148,18 @@ Decky provides `decky.emit(event_name, *args)` (Python) and `addEventListener`/`
 - Frontend: `const listener = addEventListener<[arg1: type, arg2: type]>("my_event", (a1, a2) => { ... })`
 - Cleanup: `removeEventListener("my_event", listener)` in `onDismount()`
 
+### ffplay exit codes
+ffplay does NOT use standard POSIX signal exit codes. When killed via `proc.terminate()` (SIGTERM), ffplay exits with code **123** (not -15). Natural playback completion with `-autoexit` exits with **0**. Always check `proc.returncode == 0` for natural finish, not `>= 0`.
+
+### CSS box-sizing for game coordinate overlays
+When positioning overlay elements using game coordinates (vw/vh percentages), padding and border add to the element's visual size with the default `content-box` model. A 10px padding + 2px border makes the rectangle 24px wider and taller than intended. **Always use `boxSizing: "border-box"`** so padding and border are contained within the specified dimensions.
+
+### Gamescope notification layer and backdrop-filter
+`backdrop-filter: blur()` has **no effect** on Gamescope's notification composition layer — the game renders in a separate compositor layer, so CSS blur cannot reach through. Use opaque/near-opaque backgrounds instead for text readability.
+
+### Trigger cooldown across all touch callbacks
+A single physical touch fires 3 independent callbacks: `touch_down` → `touch_up` → `touch_tap`. Cooldown checks must be applied in **all three** handlers, not just `touch_down`. Without this, `touch_tap` fires after `touch_down` is blocked by cooldown and triggers unintended actions (e.g., double stop sound).
+
 ### Decky Plugin Sandbox
 - **`plugin.json` must use `"flags": ["root"]`** (exact string `"root"`, NOT `"_root"`). Decky's `sandboxed_plugin.py` checks `"root" in self.flags` — list exact-match, not substring. With `"_root"`, the plugin silently drops to the `deck` user via `setuid`/`setgid` (without `initgroups`, so no supplementary groups). The `deck` user can open `/dev/hidraw*` (Valve udev `uaccess` rules) but NOT `/dev/input/event*` (`root:input 660`). Root is required for touchscreen evdev access.
 - `sys.path` doesn't include plugin dir — must add manually before importing split-out `.py` files
@@ -186,6 +199,7 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | `capture_mode` | `"full_screen"` | Capture method: full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid |
 | `mute_interface_sounds` | `false` | Disable/enable playback of UI feedback sounds |
 | `hide_pipeline_toast` | `false` | Hide on-screen toast overlay with pipeline status |
+| `show_text_overlay` | `false` | Show spoken text + region border overlay instead of word count pill |
 | `fixed_region_x1` | `0` | Fixed region left X coordinate |
 | `fixed_region_y1` | `0` | Fixed region top Y coordinate |
 | `fixed_region_x2` | `1280` | Fixed region right X coordinate |

@@ -104,6 +104,11 @@ TRANSLATE_TIMEOUT = 15  # seconds
 # so 120s should be plenty even on slow connections.
 VOICE_DOWNLOAD_TIMEOUT = 120  # seconds
 
+# Cooldown between trigger actions (pipeline start or playback stop).
+# Prevents accidental double-taps from immediately cancelling a just-started
+# pipeline. 800ms is enough to avoid bounces without feeling sluggish.
+TRIGGER_COOLDOWN_S = 0.8  # seconds
+
 # Thread pool for running blocking subprocess calls (like gst-launch-1.0)
 # without blocking the async event loop. Only 1 worker needed since we
 # only ever capture one screenshot at a time.
@@ -338,6 +343,12 @@ DEFAULT_SETTINGS = {
     # translated to the target language before text filtering and TTS.
     "translation_enabled": False,
     "translation_target_language": "en",
+
+    # Phase 27 — When True, replace the "N words read" pill toast with a
+    # full-text overlay showing the spoken text and scanned region border.
+    # Only affects "success" status — other statuses use the standard pill toast.
+    # Overridden by hide_pipeline_toast (no display at all when that is True).
+    "show_text_overlay": False,
 }
 
 # Fields that must be present in a valid GCP service account JSON file.
@@ -482,6 +493,12 @@ class Plugin:
         self._two_tap_timer = None                # asyncio TimerHandle for 5s timeout
         self._touch_started_during_playback = False  # Prevents post-stop capture
 
+        # Phase 27: Trigger cooldown — prevents accidental double-taps from
+        # immediately cancelling a just-started pipeline. After any pipeline
+        # start or stop action, subsequent button/touch triggers are ignored
+        # for TRIGGER_COOLDOWN_S seconds.
+        self._last_trigger_time = 0.0  # monotonic timestamp of last start/stop
+
         # Phase 13.5: Virtual keyboard visibility state. Set by the frontend via
         # set_keyboard_visible() RPC when Steam's on-screen keyboard opens/closes.
         # When True, all touch gestures (two-tap, swipe) are suppressed to avoid
@@ -505,6 +522,8 @@ class Plugin:
         self._pipeline_toast_status = "idle"  # idle|running|success|no_text|error|cancelled
         self._pipeline_toast_message = ""     # Short human-readable message
         self._pipeline_toast_word_count = 0   # Words detected by OCR
+        self._pipeline_toast_text = ""           # Phase 27: final OCR/translated text for overlay
+        self._pipeline_toast_crop_region = None  # Phase 27: crop region dict or None (full screen)
 
         # Persistent GCP worker subprocess state.
         # Instead of spawning a new subprocess for every OCR/TTS call (paying
@@ -782,9 +801,16 @@ class Plugin:
             decky.logger.debug(f"{LOG} button trigger: plugin disabled, ignoring")
             return
 
+        # Guard: trigger cooldown — ignore if too soon after last start/stop
+        now = time.monotonic()
+        if now - self._last_trigger_time < TRIGGER_COOLDOWN_S:
+            decky.logger.debug(f"{LOG} button trigger: cooldown active, ignoring")
+            return
+
         # Guard: if playing or pipeline running, stop and return (all modes)
         if self._is_playing or self._pipeline_running:
             decky.logger.info(f"{LOG} button trigger: stopping playback/pipeline")
+            self._last_trigger_time = now
             await self._stop_and_sound()
             return
 
@@ -886,12 +912,20 @@ class Plugin:
         # handlers that fire later in the same touch cycle.
         self._touch_started_during_playback = False
 
+        # Guard: trigger cooldown — ignore if too soon after last start/stop.
+        # Must be checked AFTER clearing the flag above so it resets cleanly.
+        now = time.monotonic()
+        if now - self._last_trigger_time < TRIGGER_COOLDOWN_S:
+            decky.logger.debug(f"{LOG} touch_down: cooldown active, ignoring")
+            return
+
         mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
         decky.logger.debug(f"{LOG} touch_down: ({x},{y}) mode={mode}")
 
         # During playback or pipeline: mark this touch as a stop gesture
         if self._is_playing or self._pipeline_running:
             self._touch_started_during_playback = True
+            self._last_trigger_time = now
             await self._stop_and_sound()
             return
 
@@ -909,6 +943,11 @@ class Plugin:
             f"{LOG} touch_up: start=({start_x},{start_y}) end=({end_x},{end_y}) "
             f"dur={duration:.2f}s mode={mode}"
         )
+
+        # Guard: trigger cooldown — if touch_down was ignored by cooldown,
+        # touch_up must also be ignored to keep the touch cycle consistent.
+        if time.monotonic() - self._last_trigger_time < TRIGGER_COOLDOWN_S:
+            return
 
         # If this touch started during playback, it was a stop gesture — don't start pipeline.
         # Do NOT clear the flag here: touch_tap fires after touch_up and also needs it.
@@ -951,6 +990,13 @@ class Plugin:
         Handle short tap event (< 0.5s). Used by two-tap and hybrid modes
         to define rectangle corners.
         """
+        # Guard: trigger cooldown — if touch_down was ignored by cooldown,
+        # touch_tap must also be ignored. Without this, the tap handler would
+        # fire stop/pipeline actions that the cooldown was meant to prevent.
+        if time.monotonic() - self._last_trigger_time < TRIGGER_COOLDOWN_S:
+            decky.logger.debug(f"{LOG} touch_tap: cooldown active, ignoring")
+            return
+
         mode = self.settings.get("capture_mode", DEFAULT_SETTINGS["capture_mode"])
         decky.logger.debug(f"{LOG} touch_tap: ({x},{y}) mode={mode}")
 
@@ -962,6 +1008,7 @@ class Plugin:
         # During playback or pipeline: stop (fallback for edge cases where
         # touch_down didn't catch it, e.g. pipeline started between down and tap)
         if self._is_playing or self._pipeline_running:
+            self._last_trigger_time = time.monotonic()
             await self._stop_and_sound()
             return
 
@@ -1019,10 +1066,25 @@ class Plugin:
     # =========================================================================
 
     async def _stop_and_sound(self):
-        """Stop playback/pipeline and play the stop sound."""
+        """Stop playback/pipeline, play the stop sound, and emit cancelled toast."""
         self._play_interface_sound("stop")
         self._pipeline_cancel.set()
         self._stop_playback()
+
+        # Phase 27: Emit "cancelled" toast so the frontend shows "Stopped" pill.
+        # This covers the common case of stopping during playback (after the
+        # pipeline already returned success). Mid-pipeline cancellation also
+        # emits from _read_screen_with_crop(), but a duplicate is harmless
+        # (just resets the 1.5s timer).
+        self._pipeline_toast_seq += 1
+        self._pipeline_toast_status = "cancelled"
+        self._pipeline_toast_message = "Stopped"
+        self._pipeline_toast_text = ""
+        hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
+        show_overlay = self.settings.get("show_text_overlay", DEFAULT_SETTINGS["show_text_overlay"])
+        await decky.emit("pipeline_toast",
+            self._pipeline_toast_seq, "cancelled", "Stopped", 0, hide_toast,
+            "", None, show_overlay)
 
     def _get_fixed_region_crop(self):
         """
@@ -2154,6 +2216,18 @@ class Plugin:
         if self._playback_process is proc:
             self._playback_process = None
             self._cleanup_tts_temp()
+            # Notify frontend that playback finished naturally so the text
+            # overlay can be dismissed (instead of waiting for a fixed timer).
+            # Only emit when exit code is 0 (natural finish). ffplay returns
+            # 123 when killed by SIGTERM — the "cancelled" toast handles that
+            # case, so emitting here would race and wipe the "Stopped" pill.
+            if proc.returncode == 0:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        decky.emit("pipeline_toast_dismiss"), self._event_loop
+                    )
+                except Exception:
+                    pass  # best-effort — overlay has a safety-net timeout anyway
 
     def _stop_playback(self):
         """
@@ -3008,6 +3082,7 @@ class Plugin:
         self._pipeline_cancel.clear()
         self._pipeline_running = True
         self._pipeline_step = "starting"
+        self._last_trigger_time = time.monotonic()  # Phase 27: cooldown starts now
 
         # Phase 23: Emit "running" toast event before the pipeline starts.
         # Increment seq so the frontend knows a new pipeline run has begun.
@@ -3015,9 +3090,13 @@ class Plugin:
         self._pipeline_toast_status = "running"
         self._pipeline_toast_message = "Reading..."
         self._pipeline_toast_word_count = 0
+        self._pipeline_toast_text = ""
+        self._pipeline_toast_crop_region = crop_region
         hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
+        show_overlay = self.settings.get("show_text_overlay", DEFAULT_SETTINGS["show_text_overlay"])
         await decky.emit("pipeline_toast",
-            self._pipeline_toast_seq, "running", "Reading...", 0, hide_toast)
+            self._pipeline_toast_seq, "running", "Reading...", 0, hide_toast,
+            "", crop_region, show_overlay)
 
         # Run the blocking pipeline in the thread pool executor
         loop = asyncio.get_event_loop()
@@ -3028,6 +3107,10 @@ class Plugin:
 
         # Phase 23: Update toast state and emit event based on pipeline result.
         # Also play feedback sound for non-success outcomes.
+        # Phase 27: capture final text for overlay display.
+        final_text = result.get("text", "") if result["success"] else ""
+        self._pipeline_toast_text = final_text
+
         if result["success"]:
             decky.logger.info(f"{LOG} pipeline complete: {result['message']}")
             word_count = len(result.get("text", "").split()) if result.get("text") else 0
@@ -3049,12 +3132,14 @@ class Plugin:
         # Emit the final toast event to the frontend (re-read setting in case
         # user toggled it during the pipeline run)
         hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
+        show_overlay = self.settings.get("show_text_overlay", DEFAULT_SETTINGS["show_text_overlay"])
         await decky.emit("pipeline_toast",
             self._pipeline_toast_seq,
             self._pipeline_toast_status,
             self._pipeline_toast_message,
             self._pipeline_toast_word_count,
-            hide_toast)
+            hide_toast,
+            final_text, crop_region, show_overlay)
 
         return result
 
@@ -3110,6 +3195,9 @@ class Plugin:
             "message": self._pipeline_toast_message,
             "word_count": self._pipeline_toast_word_count,
             "hidden": self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"]),
+            "text": self._pipeline_toast_text,
+            "crop_region": self._pipeline_toast_crop_region,
+            "show_overlay": self.settings.get("show_text_overlay", DEFAULT_SETTINGS["show_text_overlay"]),
         }
 
     # =========================================================================
