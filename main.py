@@ -1039,6 +1039,14 @@ class Plugin:
                 x2 = max(self._first_tap_x, x)
                 y2 = max(self._first_tap_y, y)
 
+                # Check minimum selection size (50x50 pixels) — same as swipe
+                if (x2 - x1) < 50 or (y2 - y1) < 50:
+                    decky.logger.debug(
+                        f"{LOG} two-tap too small: {x2 - x1}x{y2 - y1}, ignoring"
+                    )
+                    self._play_interface_sound("stop")
+                    return
+
                 # Save selection coordinates
                 self.settings.set("last_selection_x1", x1)
                 self.settings.set("last_selection_y1", y1)
@@ -1770,10 +1778,17 @@ class Plugin:
         logger. Without this thread, the stderr pipe buffer would fill up
         (~64KB) and the worker would block trying to write diagnostic logs.
 
-        Runs until the pipe is closed (worker exits) or an error occurs.
+        Uses readline() + poll() instead of bare iteration so the thread
+        exits promptly if the worker process dies without closing its pipe.
         """
         try:
-            for line in self._worker_process.stderr:
+            while True:
+                # Exit if the worker process has died
+                if self._worker_process.poll() is not None:
+                    break
+                line = self._worker_process.stderr.readline()
+                if not line:  # EOF — pipe closed
+                    break
                 stripped = line.strip()
                 if stripped:
                     decky.logger.debug(f"{LOG} worker: {stripped}")
@@ -1985,7 +2000,13 @@ class Plugin:
     def _drain_local_worker_stderr(self):
         """Drain the local worker's stderr in a daemon thread (same as GCP version)."""
         try:
-            for line in self._local_worker_process.stderr:
+            while True:
+                # Exit if the local worker process has died
+                if self._local_worker_process.poll() is not None:
+                    break
+                line = self._local_worker_process.stderr.readline()
+                if not line:  # EOF — pipe closed
+                    break
                 stripped = line.strip()
                 if stripped:
                     decky.logger.debug(f"{LOG} local: {stripped}")
