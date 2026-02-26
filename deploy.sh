@@ -117,6 +117,7 @@ deploy() {
     echo "--- Installing plugin on Steam Deck ---"
     ssh "${DECK_SSH}" "
         sudo rm -rf ${DECK_PLUGIN_DIR} &&
+        sudo rm -f /home/deck/homebrew/settings/decky-cloud-reader/settings.json &&
         sudo unzip -o /tmp/${PLUGIN_NAME}.zip -d ${DECK_PLUGINS_DIR}/ &&
         rm /tmp/${PLUGIN_NAME}.zip &&
         echo 'Plugin installed to ${DECK_PLUGIN_DIR}'

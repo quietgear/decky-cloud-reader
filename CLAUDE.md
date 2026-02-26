@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–24)
+### Completed Phases (1–29)
 
 | Phase | Summary |
 |-------|---------|
@@ -74,7 +74,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **9: Touchscreen** | `touchscreen_monitor.py` — evdev tap detection, axis calibration via ioctl, 90° coordinate transform; frontend fetches status on mount only (no polling) |
 | **10: Settings Defaults** | Added config fields for capture modes, regions, text filtering, and mute toggle |
 | **11: Sound Effects** | Fire-and-forget `_play_interface_sound()` independent of TTS, mute toggle, Dockerfile audio/ copy |
-| **12: Capture Modes** | 5 capture modes (full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid), touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, mode-aware UI, debounced region slider saves (800ms) |
+| **12: Capture Modes** | Touchscreen auto-management, PIL image cropping in workers, state machine for two-tap/swipe, debounced region slider saves (800ms). *(Originally 5 mutually exclusive modes — simplified to independent controls in Phase 29)* |
 | **13: Global Overlay** | Region preview overlay: `capture_overlay_screenshot()` RPC, `OverlayState` class, `RegionPreviewOverlay` global component mounted/unmounted on demand via `routerHook`, `useUIComposition` for Gamescope layer, auto-close on QAM dismiss/tab switch + 10s auto-dismiss timeout, spotlight cutout for fixed region |
 | **13.5: Keyboard Suppression** | Event-driven on-screen keyboard detection via Steam's `VirtualKeyboardManager` (`m_bIsInlineVirtualKeyboardOpen` observable). Frontend registers callback in `definePlugin()`, calls `set_keyboard_visible()` RPC on open/close. Backend `_keyboard_visible` flag guards all touch callbacks — suppresses two-tap/swipe gestures while typing |
 | **14: Text Filtering** | `_apply_text_filters()` in `main.py` — two modes: "always" (whole-word case-insensitive removal anywhere) and "beginning" (remove from first N tokens, punctuation-tolerant). Pipeline forces separate OCR→filter→TTS when filtering active (skips combined `ocr_tts`). Frontend section with toggles, `WordFilterModal` (full-screen modal via `showModal()` for proper keyboard focus), and word-count slider with live value label |
@@ -93,6 +93,7 @@ Frontend (TypeScript/React)           Backend (Python)
 | **26: Translation Pipeline** | Optional GCP Cloud Translation between OCR and TTS for playing games in foreign languages (e.g., JA game → OCR → Translate JA→EN → TTS English). Uses Translation API v3 (gRPC transport — immune to PyInstaller SSL contamination). Lazy-initialized `TranslationServiceClient` cached in `gcp_worker.py`. Pipeline: capture → OCR → translate → filter → TTS (always splits, no combined `ocr_tts` when translation active). Source language auto-derived from `ocr_language` setting via `TRANSLATION_SOURCE_LANGUAGE` mapping (`None` = auto-detect for multi-language OCR groups). 15 target languages. UI: Translation section between Provider and GCP Credentials (visible only when `needsGcp`). GCP worker env now strips `LD_LIBRARY_PATH`/`LD_PRELOAD` to fix OAuth2 token refresh for lazy-initialized clients |
 | **27: Spoken Text Overlay** | Optional text overlay replaces "N words read" pill toast with actual spoken text + scanned region border. `show_text_overlay` setting (off by default, hidden when `hide_pipeline_toast` is on). `SpokenTextOverlay` component: text top-left aligned inside region box (`boxSizing: "border-box"`, 4px padding, `rgba(0,0,0,0.99)` near-opaque background, cyan border) with dynamic font sizing (`FIT_FACTOR=2.0`, min 7px, max 16px for regions). Full-screen: centered subtitle bar at bottom. Backend emits 3 new args on `pipeline_toast` event: `text`, `crop_region`, `show_overlay`. Text truncated at 500 chars. Overlay stays visible for entire TTS playback duration via `pipeline_toast_dismiss` event emitted by reaper thread on natural audio finish (exit code 0); 45s safety-net timeout. Cancelled toast shows "Stopped" pill for 1.5s. Trigger cooldown (`TRIGGER_COOLDOWN_S=0.8`) prevents accidental double-taps in all handlers (button + touch_down/up/tap) |
 | **28: Pipeline Hardening** | Two reliability fixes: (1) Two-tap minimum crop region (50x50 pixels) — mirrors existing swipe check; tapping twice close together plays stop sound and discards instead of wasting OCR/API quota. Applies to `two_tap_selection` and `hybrid` modes. (2) Stderr drain thread liveness check — `_drain_worker_stderr()` and `_drain_local_worker_stderr()` now use `readline()` + `poll()` loop instead of bare `for line in stderr:`, so threads exit promptly if the worker process dies without cleanly closing its pipe |
+| **29: Mode-Free Capture** | Replaced 5 mutually exclusive capture modes with two independent controls: **Touch Input toggle** (on/off + swipe/two-tap style selector) and **Trigger Button dropdown** (None/L4-R5 for fixed-region capture). Button always captures fixed region (default 0,0,1280,800 = full screen). Touch and button work independently — both can be active simultaneously. Removed `capture_mode` and `touchscreen_enabled` settings; added `touch_input_enabled` and `touch_input_style`. UI: single "Capture" section replaces old "Button Trigger" + "Capture Mode" sections. Trigger button label changed from "Disabled" to "None". Deploy script now deletes settings.json for clean state |
 
 ---
 
@@ -197,7 +198,8 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | `volume` | `100` | TTS volume 0-100 |
 | `trigger_button` | `"L4"` | Hidraw button: disabled/L4/R4/L5/R5 |
 | `hold_time_ms` | `500` | Button hold threshold |
-| `capture_mode` | `"full_screen"` | Capture method: full_screen, swipe_selection, two_tap_selection, fixed_region, hybrid |
+| `touch_input_enabled` | `false` | Enable touchscreen gestures (swipe or two-tap) for OCR region selection |
+| `touch_input_style` | `"two_tap"` | Touch gesture style: `"swipe"` (drag to select) or `"two_tap"` (tap two corners) |
 | `mute_interface_sounds` | `false` | Disable/enable playback of UI feedback sounds |
 | `hide_pipeline_toast` | `false` | Hide on-screen toast overlay with pipeline status |
 | `show_text_overlay` | `false` | Show spoken text + region border overlay instead of word count pill |
@@ -239,7 +241,7 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | Audio playback | ffplay (primary) / mpv / pw-play | Auto-discovered; needs `XDG_RUNTIME_DIR=/run/user/1000` (Decky runs as root); reaper thread prevents zombies |
 | Button input | Hidraw direct reading | Background operation, no UI needed |
 | Touchscreen | Raw evdev + `struct.unpack` | Stdlib only; ioctl axis calibration; 90° CW coordinate transform; auto-managed by capture mode |
-| Capture modes | State machine in main.py | 5 modes; touchscreen auto-started/stopped per mode; PIL crop before OCR; during playback all touches = stop only |
+| Capture controls | Independent toggle + button | Touch input (on/off + swipe/two-tap style) and trigger button (fixed region) work independently; touchscreen auto-started/stopped by toggle; PIL crop before OCR; during playback all touches = stop only |
 | Pipeline optimization | Combined `ocr_tts` action for same-provider | Saves one round-trip; mixed providers or translation/filtering active → split |
 | Translation | GCP Cloud Translation v3 (gRPC), lazy-init | v3 uses gRPC (immune to PyInstaller SSL); v2 uses REST/urllib3 (broken). Lazy-init avoids startup cost for users who don't translate |
 | Pipeline cancellation | `threading.Event` between steps | Simple; worker timeout bounded at 60s |

@@ -235,9 +235,9 @@ interface PluginSettings {
   debug: boolean;               // Verbose logging
   trigger_button: string;       // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
   hold_time_ms: number;         // Hold threshold in ms (Phase 7)
-  touchscreen_enabled: boolean; // Touchscreen tap input (Phase 9)
-  // Capture mode (Phase 10/12)
-  capture_mode: string;           // full_screen | swipe_selection | two_tap_selection | fixed_region | hybrid
+  // Touch input (Phase 29)
+  touch_input_enabled: boolean;   // Whether touchscreen gestures are enabled
+  touch_input_style: string;      // "swipe" | "two_tap"
   mute_interface_sounds: boolean; // Skip playing UI feedback sounds (Phase 10/11)
   hide_pipeline_toast: boolean;   // Hide on-screen toast with pipeline status (Phase 23)
   show_text_overlay: boolean;     // Show spoken text overlay instead of word count pill (Phase 27)
@@ -991,20 +991,17 @@ const TRANSLATION_TARGET_OPTIONS = [
 // L4/R4/L5/R5 are the back grip buttons on the Steam Deck.
 
 const TRIGGER_BUTTON_OPTIONS = [
-  { data: "disabled", label: "Disabled" },
+  { data: "disabled", label: "None" },
   { data: "L4",       label: "L4 (Back Left Upper)" },
   { data: "R4",       label: "R4 (Back Right Upper)" },
   { data: "L5",       label: "L5 (Back Left Lower)" },
   { data: "R5",       label: "R5 (Back Right Lower)" },
 ];
 
-// Phase 12: Capture mode options for the dropdown selector
-const CAPTURE_MODE_OPTIONS = [
-  { data: "full_screen",        label: "Full Screen" },
-  { data: "swipe_selection",    label: "Swipe Selection" },
-  { data: "two_tap_selection",  label: "Two-Tap Selection" },
-  { data: "fixed_region",       label: "Fixed Region" },
-  { data: "hybrid",             label: "Hybrid (Fixed + Two-Tap)" },
+// Phase 29: Touch input gesture style options
+const TOUCH_STYLE_OPTIONS = [
+  { data: "two_tap", label: "Two-Tap (tap two corners)" },
+  { data: "swipe",   label: "Swipe (drag to select)" },
 ];
 
 const HOLD_TIME_OPTIONS = [
@@ -1455,10 +1452,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     setTimeout(() => setOcrLanguageMessage(null), 5000);
   };
 
-  // Phase 12: Whether the current capture mode needs touchscreen input.
-  const needsTouch = settings?.capture_mode === "swipe_selection"
-    || settings?.capture_mode === "two_tap_selection"
-    || settings?.capture_mode === "hybrid";
+  // Phase 29: Whether touch input is enabled (controls touchscreen monitor).
+  const needsTouch = settings?.touch_input_enabled === true;
 
   // Phase 13: Helper to mount/unmount the overlay global component.
   // When showing: register the component with routerHook so it renders
@@ -1555,16 +1550,70 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
         </PanelSectionRow>
       </PanelSection>
 
-      {/* ---- Button Trigger Section (Phase 7) ---- */}
-      {/* Configures which hardware button triggers the Read Screen pipeline
-          without opening the Decky panel. This is the key UX feature for
-          in-game use — press-and-hold a back button to hear screen text. */}
-      <PanelSection title="Button Trigger">
-        {/* Button selection dropdown */}
+      {/* ---- Capture Section (Phase 29) ---- */}
+      {/* Two independent controls: touch input toggle + trigger button selector.
+          Replaces the old Button Trigger and Capture Mode sections. */}
+      <PanelSection title="Capture">
+        {/* Touch Input toggle */}
+        <PanelSectionRow>
+          <ToggleField
+            label="Touch Input"
+            description="Use touchscreen gestures to select OCR region"
+            checked={settings.touch_input_enabled}
+            onChange={async (value) => {
+              await saveSetting("touch_input_enabled", value);
+              if (settings) {
+                setSettings({ ...settings, touch_input_enabled: value });
+              }
+              // Fetch touchscreen status after toggle change (auto-managed)
+              setTimeout(async () => {
+                const status = await getTouchscreenStatus();
+                setTouchscreenStatus(status);
+              }, 500);
+            }}
+          />
+        </PanelSectionRow>
+
+        {/* Touch style dropdown — only shown when touch input is enabled */}
+        {settings.touch_input_enabled && (
+          <>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Touch Style"
+                description="How touch gestures select a region"
+                menuLabel="Select Touch Style"
+                rgOptions={TOUCH_STYLE_OPTIONS.map((o) => ({
+                  data: o.data,
+                  label: o.label,
+                }))}
+                selectedOption={
+                  TOUCH_STYLE_OPTIONS.find((o) => o.data === settings.touch_input_style)?.data
+                  ?? TOUCH_STYLE_OPTIONS[0].data
+                }
+                onChange={async (option) => {
+                  await saveSetting("touch_input_style", option.data);
+                  if (settings) {
+                    setSettings({ ...settings, touch_input_style: option.data as string });
+                  }
+                }}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
+                {settings.touch_input_style === "swipe"
+                  ? "Swipe on screen to select a region for OCR"
+                  : "Tap two corners to define a rectangle for OCR"
+                }
+              </div>
+            </PanelSectionRow>
+          </>
+        )}
+
+        {/* Trigger Button dropdown */}
         <PanelSectionRow>
           <DropdownItem
             label="Trigger Button"
-            description="Hold to trigger Read Screen"
+            description="Hardware button for fixed region capture"
             menuLabel="Select Button"
             rgOptions={TRIGGER_BUTTON_OPTIONS.map((o) => ({
               data: o.data,
@@ -1572,7 +1621,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             }))}
             selectedOption={
               TRIGGER_BUTTON_OPTIONS.find((o) => o.data === settings.trigger_button)?.data
-              ?? TRIGGER_BUTTON_OPTIONS[0].data  // Default: disabled
+              ?? TRIGGER_BUTTON_OPTIONS[0].data
             }
             onChange={async (option) => {
               await saveSetting("trigger_button", option.data);
@@ -1586,106 +1635,36 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           />
         </PanelSectionRow>
 
-        {/* Hold time dropdown — only shown when trigger is not disabled */}
+        {/* Button-specific settings — shown when a button is assigned */}
         {settings.trigger_button !== "disabled" && (
-          <PanelSectionRow>
-            <DropdownItem
-              label="Hold Time"
-              description="How long to hold before triggering"
-              menuLabel="Select Hold Time"
-              rgOptions={HOLD_TIME_OPTIONS.map((o) => ({
-                data: o.data,
-                label: o.label,
-              }))}
-              selectedOption={
-                HOLD_TIME_OPTIONS.find((o) => o.data === settings.hold_time_ms)?.data
-                ?? HOLD_TIME_OPTIONS[1].data  // Default: 500ms
-              }
-              onChange={async (option) => {
-                await saveSetting("hold_time_ms", option.data);
-                if (settings) {
-                  setSettings({ ...settings, hold_time_ms: option.data as number });
-                }
-                // Re-fetch monitor status after changing hold time
-                const status = await getButtonMonitorStatus();
-                setMonitorStatus(status);
-              }}
-            />
-          </PanelSectionRow>
-        )}
-
-        {/* Hint text explaining what the button trigger does */}
-        <PanelSectionRow>
-          <div style={{
-            color: "#b8bcbf",
-            fontSize: "12px",
-            padding: "4px 0",
-          }}>
-            {settings.trigger_button === "disabled"
-              ? "Enable a button to trigger Read Screen without opening this panel"
-              : settings.hold_time_ms === 0
-                ? `Press ${settings.trigger_button} to trigger Read Screen`
-                : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to trigger Read Screen`
-            }
-          </div>
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* ---- Capture Mode Section (Phase 12) ---- */}
-      {/* Configures how the screen region is selected for OCR. Modes range from
-          full-screen (button only) to interactive touchscreen selection. The
-          touchscreen monitor is auto-managed based on the selected mode. */}
-      <PanelSection title="Capture Mode">
-        {/* Mode selection dropdown */}
-        <PanelSectionRow>
-          <DropdownItem
-            label="Capture Mode"
-            description="How the OCR region is selected"
-            menuLabel="Select Capture Mode"
-            rgOptions={CAPTURE_MODE_OPTIONS.map((o) => ({
-              data: o.data,
-              label: o.label,
-            }))}
-            selectedOption={
-              CAPTURE_MODE_OPTIONS.find((o) => o.data === settings.capture_mode)?.data
-              ?? CAPTURE_MODE_OPTIONS[0].data
-            }
-            onChange={async (option) => {
-              await saveSetting("capture_mode", option.data);
-              if (settings) {
-                setSettings({ ...settings, capture_mode: option.data as string });
-              }
-              // Fetch touchscreen status after mode change (auto-managed)
-              setTimeout(async () => {
-                const status = await getTouchscreenStatus();
-                setTouchscreenStatus(status);
-              }, 500);
-            }}
-          />
-        </PanelSectionRow>
-
-        {/* Mode description — explains how the selected mode works */}
-        <PanelSectionRow>
-          <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
-            {settings.capture_mode === "full_screen"
-              ? `Press ${settings.trigger_button !== "disabled" ? settings.trigger_button : "trigger button"} to capture entire screen`
-              : settings.capture_mode === "swipe_selection"
-              ? "Swipe on screen to select a region for OCR"
-              : settings.capture_mode === "two_tap_selection"
-              ? "Tap two corners to define a rectangle for OCR"
-              : settings.capture_mode === "fixed_region"
-              ? `Press ${settings.trigger_button !== "disabled" ? settings.trigger_button : "trigger button"} to capture the configured region`
-              : settings.capture_mode === "hybrid"
-              ? `Press ${settings.trigger_button !== "disabled" ? settings.trigger_button : "trigger button"} for fixed region, or tap for two-tap selection`
-              : ""
-            }
-          </div>
-        </PanelSectionRow>
-
-        {/* Fixed region configuration — shown for fixed_region and hybrid modes */}
-        {(settings.capture_mode === "fixed_region" || settings.capture_mode === "hybrid") && (
           <>
-            {/* Current fixed region coordinates display */}
+            {/* Hold time dropdown */}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Hold Time"
+                description="How long to hold before triggering"
+                menuLabel="Select Hold Time"
+                rgOptions={HOLD_TIME_OPTIONS.map((o) => ({
+                  data: o.data,
+                  label: o.label,
+                }))}
+                selectedOption={
+                  HOLD_TIME_OPTIONS.find((o) => o.data === settings.hold_time_ms)?.data
+                  ?? HOLD_TIME_OPTIONS[1].data
+                }
+                onChange={async (option) => {
+                  await saveSetting("hold_time_ms", option.data);
+                  if (settings) {
+                    setSettings({ ...settings, hold_time_ms: option.data as number });
+                  }
+                  // Re-fetch monitor status after changing hold time
+                  const status = await getButtonMonitorStatus();
+                  setMonitorStatus(status);
+                }}
+              />
+            </PanelSectionRow>
+
+            {/* Fixed region coordinates display */}
             <PanelSectionRow>
               <Field label="Fixed Region">
                 <div style={{ color: "#67b7dc", fontSize: "13px" }}>
@@ -1759,31 +1738,25 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
               </ButtonItem>
             </PanelSectionRow>
 
-            {/* Phase 13: Region Preview toggle button.
-                Captures a fresh screenshot and shows it with the fixed region
-                highlighted, to the left of the QAM panel. Toggle off to hide. */}
+            {/* Region Preview toggle button */}
             <PanelSectionRow>
               <ButtonItem
                 layout="below"
                 disabled={isOverlayLoading}
                 onClick={async () => {
                   if (isOverlayVisible) {
-                    // Toggle off — unmount the overlay component entirely
                     hideOverlayComponent();
                   } else {
-                    // Toggle on — capture a fresh screenshot, set state, then mount
                     setIsOverlayLoading(true);
                     const result = await captureOverlayScreenshot();
                     setIsOverlayLoading(false);
                     if (result.success) {
-                      // Set the data on OverlayState first (component reads on mount)
                       overlayState.show(result.image_base64, {
                         x1: settings.fixed_region_x1,
                         y1: settings.fixed_region_y1,
                         x2: settings.fixed_region_x2,
                         y2: settings.fixed_region_y2,
                       });
-                      // Then mount the global component
                       showOverlayComponent();
                     }
                   }
@@ -1806,9 +1779,41 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                 </div>
               </Field>
             </PanelSectionRow>
+
+            {/* Button hint text */}
+            <PanelSectionRow>
+              <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
+                {settings.hold_time_ms === 0
+                  ? `Press ${settings.trigger_button} to capture the fixed region`
+                  : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to capture the fixed region`
+                }
+              </div>
+            </PanelSectionRow>
           </>
         )}
 
+        {/* Hint when no button is assigned */}
+        {settings.trigger_button === "disabled" && (
+          <PanelSectionRow>
+            <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
+              Assign a button to capture a fixed screen region
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {/* Summary hint — describes active configuration */}
+        <PanelSectionRow>
+          <div style={{ color: "#8f9ba3", fontSize: "11px", padding: "4px 0", fontStyle: "italic" }}>
+            {settings.touch_input_enabled && settings.trigger_button !== "disabled"
+              ? `Touch (${settings.touch_input_style === "swipe" ? "swipe" : "two-tap"}) + ${settings.trigger_button} (fixed region)`
+              : settings.touch_input_enabled
+              ? `Touch only (${settings.touch_input_style === "swipe" ? "swipe" : "two-tap"})`
+              : settings.trigger_button !== "disabled"
+              ? `${settings.trigger_button} only (fixed region)`
+              : "No capture method configured"
+            }
+          </div>
+        </PanelSectionRow>
       </PanelSection>
 
       {/* ---- Provider Section (Phase 8) ---- */}
