@@ -350,6 +350,9 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, spea
             "message": f"TTS complete: {audio_size:,} bytes, piper/{resolved_voice_id}",
         })
 
+    except (WorkerResult, WorkerError):
+        # Re-raise flow-control exceptions so the serve loop can handle them
+        raise
     except Exception as e:
         log_error(f"TTS synthesis error: {e}")
         log_error(traceback.format_exc())

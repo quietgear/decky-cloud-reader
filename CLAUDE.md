@@ -7,7 +7,7 @@
 ## Development Environment
 
 - **Host:** M1 MacBook Pro (ARM / Apple Silicon)
-- **Target:** Steam Deck at `192.168.50.116` (SSH, passwordless sudo)
+- **Target:** Steam Deck at `192.168.50.58` (SSH, passwordless sudo)
 - **Build:** x86 Docker image with Python 3.13 (matching Steam Deck) → deploy via SSH
 
 ## Development Workflow
@@ -40,8 +40,8 @@ Frontend (TypeScript/React)           Backend (Python)
 │  - Enabled toggle        │◄───────►│  - Pipeline orchestration       │
 │  - Provider selection    │         │  - Provider routing (GCP/local) │
 │  - Settings / credentials│         │  - Screen capture (ximagesrc)   │
-│  - Button trigger config │         │  - Dual worker lifecycle mgmt   │
-│  - Capture mode config   │         │  - Audio playback (Popen)       │
+│  - Capture config        │         │  - Dual worker lifecycle mgmt   │
+│  - Translation config    │         │  - Audio playback (Popen)       │
 │  - Version footer        │         │                                 │
 │                          │         │  hidraw_monitor.py (thread)     │
 │ Global Overlay (Phase 13) │         │  touchscreen_monitor.py (thread)│
@@ -55,7 +55,7 @@ Frontend (TypeScript/React)           Backend (Python)
 
 ## Implementation Progress
 
-### Completed Phases (1–29)
+### Completed Phases (1–32)
 
 | Phase | Summary |
 |-------|---------|
@@ -89,11 +89,14 @@ Frontend (TypeScript/React)           Backend (Python)
 | **22: Zero Hold Time Option** | Added "Instant (0ms)" option to the hold time dropdown. Backend's `>=` comparison handles 0 naturally — trigger fires immediately on press. Hint text adapts: "Press L4 to trigger" instead of "Hold L4 for 0ms" |
 | **23: Pipeline Feedback** | Three feedback mechanisms for pipeline results: (A) "no_text" sound effect plays on failure/no-text (respects mute); "stop" sound plays at 50% volume, (B) on-screen toast overlay via event-driven `decky.emit("pipeline_toast")` → `addEventListener` — shows "Reading...", "N words read" (green, 3s), "No text found" (yellow, 4s), "Error" (red, 4s), auto-dismisses cancelled immediately; `PipelineToast` child uses `useUIComposition(Notification)` only while visible; `hide_pipeline_toast` setting disables toast display, (C) "Last Pipeline" debug indicator in Debug section shows last result color-coded |
 | **24: Dead Code Cleanup** | Removed 3 unused backend RPC methods: `get_pipeline_status()` (Phase 18 removed UI), `get_playback_status()` (Phase 15 removed UI), `get_last_touch()` (never wired to frontend). Also cleaned stale comment referencing `get_playback_status()` polling |
-| **25: Multi-Language OCR** | 7 OCR language packs (English, Chinese/Japanese, Korean, Latin, Cyrillic, Thai, Greek) with on-demand rec model downloads from HuggingFace (`monkt/paddleocr-onnx`). Det/cls use rapidocr-onnxruntime's built-in models (v5 det was incompatible — over-segmentation). Recognition models downloaded per-language to `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/`. Lazy OCR engine init in local worker (one cached engine, reinit on language change). GCP Vision API gets `language_hints` from OCR language setting. Frontend: language dropdown in Provider section with download/delete controls. Plugin zip ~85 MB smaller (removed all bundled OCR models) |
+| **25: Multi-Language OCR** | 7 OCR language packs (English, Chinese/Japanese, Korean, Latin, Cyrillic, Thai, Greek) with on-demand rec model downloads from HuggingFace (`monkt/paddleocr-onnx`). Det/cls use rapidocr-onnxruntime's built-in models (v5 det was incompatible — over-segmentation). Recognition models downloaded per-language to `DECKY_PLUGIN_SETTINGS_DIR/ocr_models/{language_id}/`. Lazy OCR engine init in local worker (one cached engine, reinit on language change). GCP Vision API receives `language_hints` based on `ocr_language` setting when available, otherwise auto-detects. Frontend: language dropdown in Provider section with download/delete controls. Plugin zip ~85 MB smaller (removed all bundled OCR models) |
 | **26: Translation Pipeline** | Optional GCP Cloud Translation between OCR and TTS for playing games in foreign languages (e.g., JA game → OCR → Translate JA→EN → TTS English). Uses Translation API v3 (gRPC transport — immune to PyInstaller SSL contamination). Lazy-initialized `TranslationServiceClient` cached in `gcp_worker.py`. Pipeline: capture → OCR → translate → filter → TTS (always splits, no combined `ocr_tts` when translation active). Source language auto-derived from `ocr_language` setting via `TRANSLATION_SOURCE_LANGUAGE` mapping (`None` = auto-detect for multi-language OCR groups). 15 target languages. UI: Translation section between Provider and GCP Credentials (visible only when `needsGcp`). GCP worker env now strips `LD_LIBRARY_PATH`/`LD_PRELOAD` to fix OAuth2 token refresh for lazy-initialized clients |
 | **27: Spoken Text Overlay** | Optional text overlay replaces "N words read" pill toast with actual spoken text + scanned region border. `show_text_overlay` setting (off by default, hidden when `hide_pipeline_toast` is on). `SpokenTextOverlay` component: text top-left aligned inside region box (`boxSizing: "border-box"`, 4px padding, `rgba(0,0,0,0.99)` near-opaque background, cyan border) with dynamic font sizing (`FIT_FACTOR=2.0`, min 7px, max 16px for regions). Full-screen: centered subtitle bar at bottom. Backend emits 3 new args on `pipeline_toast` event: `text`, `crop_region`, `show_overlay`. Text truncated at 500 chars. Overlay stays visible for entire TTS playback duration via `pipeline_toast_dismiss` event emitted by reaper thread on natural audio finish (exit code 0); 45s safety-net timeout. Cancelled toast shows "Stopped" pill for 1.5s. Trigger cooldown (`TRIGGER_COOLDOWN_S=0.8`) prevents accidental double-taps in all handlers (button + touch_down/up/tap) |
-| **28: Pipeline Hardening** | Two reliability fixes: (1) Two-tap minimum crop region (50x50 pixels) — mirrors existing swipe check; tapping twice close together plays stop sound and discards instead of wasting OCR/API quota. Applies to `two_tap_selection` and `hybrid` modes. (2) Stderr drain thread liveness check — `_drain_worker_stderr()` and `_drain_local_worker_stderr()` now use `readline()` + `poll()` loop instead of bare `for line in stderr:`, so threads exit promptly if the worker process dies without cleanly closing its pipe |
+| **28: Pipeline Hardening** | Two reliability fixes: (1) Two-tap minimum crop region (50x50 pixels) — mirrors existing swipe check; tapping twice close together plays stop sound and discards instead of wasting OCR/API quota. Applies to `two_tap` and `swipe` touch input styles. (2) Stderr drain thread liveness check — `_drain_worker_stderr()` and `_drain_local_worker_stderr()` now use `readline()` + `poll()` loop instead of bare `for line in stderr:`, so threads exit promptly if the worker process dies without cleanly closing its pipe |
 | **29: Mode-Free Capture** | Replaced 5 mutually exclusive capture modes with two independent controls: **Touch Input toggle** (on/off + swipe/two-tap style selector) and **Trigger Button dropdown** (None/L4-R5 for fixed-region capture). Button always captures fixed region (default 0,0,1280,800 = full screen). Touch and button work independently — both can be active simultaneously. Removed `capture_mode` and `touchscreen_enabled` settings; added `touch_input_enabled` and `touch_input_style`. UI: single "Capture" section replaces old "Button Trigger" + "Capture Mode" sections. Trigger button label changed from "Disabled" to "None". Deploy script now deletes settings.json for clean state |
+| **30: Conditional OCR Language** | OCR Language dropdown + download/delete controls only visible when local OCR engine selected; moved directly below OCR Engine selector for logical grouping. GCP Vision relies on `language_hints` from saved `ocr_language` setting (defaults to English) with auto-detection fallback |
+| **31: GCP Credentials Before Translation** | Swapped GCP Credentials and Translation section order — credentials now appear directly below Provider section (right after the "not configured" hint), translation follows after |
+| **32: Free Google Translate** | Added free translation provider using unofficial `translate.googleapis.com/translate_a/single?client=gtx` endpoint — no GCP credentials needed. New `translation_provider` setting (`"free"` default, `"gcp"` optional). Free translation implemented as curl subprocess in `main.py` with stripped `LD_LIBRARY_PATH` (PyInstaller SSL fix). Translation section now always visible (not gated by `needsGcp`). `needsGcp` updated to include GCP translation provider. Pre-flight credential checks updated for GCP translation edge case. UI: Translation Engine dropdown between Enable toggle and Translate To dropdown, red hint when GCP selected without credentials |
 
 ---
 
@@ -196,7 +199,7 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | `local_voice_id` | `"en_US-amy-medium"` | Piper voice (auto-downloads on first use) |
 | `local_speech_rate` | `"medium"` | Piper speech rate |
 | `volume` | `100` | TTS volume 0-100 |
-| `trigger_button` | `"L4"` | Hidraw button: disabled/L4/R4/L5/R5 |
+| `trigger_button` | `"L4"` | Hidraw button: None/L4/R4/L5/R5 |
 | `hold_time_ms` | `500` | Button hold threshold |
 | `touch_input_enabled` | `false` | Enable touchscreen gestures (swipe or two-tap) for OCR region selection |
 | `touch_input_style` | `"two_tap"` | Touch gesture style: `"swipe"` (drag to select) or `"two_tap"` (tap two corners) |
@@ -216,7 +219,8 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | `ignored_words_beginning` | `""` | Comma-separated words to remove from start of text |
 | `ignored_words_beginning_enabled` | `false` | Enable/disable the "ignore at beginning" list |
 | `ignored_words_count` | `3` | How many leading words to check for "beginning" list |
-| `translation_enabled` | `false` | Enable GCP Cloud Translation between OCR and TTS |
+| `translation_enabled` | `false` | Enable translation between OCR and TTS |
+| `translation_provider` | `"free"` | `"free"` (unofficial Google Translate, no credentials) or `"gcp"` (Cloud Translation v3, requires service account) |
 | `translation_target_language` | `"en"` | ISO 639-1 target language code for translation |
 
 ---
@@ -240,10 +244,10 @@ Plugin zip: ~170 MB. OCR rec models: 8-85 MB each, downloaded on demand. Voices:
 | Screen capture | GStreamer ximagesrc (primary) + pipewiresrc (fallback) | ximagesrc captures game window from Xwayland :1 (no Steam overlay); falls back to pipewiresrc composited output when no game is focused |
 | Audio playback | ffplay (primary) / mpv / pw-play | Auto-discovered; needs `XDG_RUNTIME_DIR=/run/user/1000` (Decky runs as root); reaper thread prevents zombies |
 | Button input | Hidraw direct reading | Background operation, no UI needed |
-| Touchscreen | Raw evdev + `struct.unpack` | Stdlib only; ioctl axis calibration; 90° CW coordinate transform; auto-managed by capture mode |
+| Touchscreen | Raw evdev + `struct.unpack` | Stdlib only; ioctl axis calibration; 90° CW coordinate transform; auto-managed by touch input toggle |
 | Capture controls | Independent toggle + button | Touch input (on/off + swipe/two-tap style) and trigger button (fixed region) work independently; touchscreen auto-started/stopped by toggle; PIL crop before OCR; during playback all touches = stop only |
 | Pipeline optimization | Combined `ocr_tts` action for same-provider | Saves one round-trip; mixed providers or translation/filtering active → split |
-| Translation | GCP Cloud Translation v3 (gRPC), lazy-init | v3 uses gRPC (immune to PyInstaller SSL); v2 uses REST/urllib3 (broken). Lazy-init avoids startup cost for users who don't translate |
+| Translation | Free Google Translate (default) + GCP Cloud Translation v3 (optional) | Free: unofficial `translate.googleapis.com` endpoint via curl subprocess (no credentials, no worker dependency). GCP: v3 gRPC via gcp_worker (immune to PyInstaller SSL). Free is default — works out of the box with just internet |
 | Pipeline cancellation | `threading.Event` between steps | Simple; worker timeout bounded at 60s |
 | Voice distribution | On-demand HuggingFace download | 16 voices / 14 language variants; persists in settings dir across updates; no zip bloat |
 | OCR language models | On-demand HuggingFace download (monkt/paddleocr-onnx) | 7 language packs; rec models persist in settings dir; det/cls are universal+bundled; lazy engine init with single-engine cache |
@@ -274,7 +278,8 @@ decky-cloud-reader/
 ├── audio/                     # Sound effect WAV files (Phase 11)
 ├── docker/Dockerfile.plugin + docker-compose.yml
 ├── deploy.sh
-└── CLAUDE.md
+├── CLAUDE.md
+└── GOOGLE_CLOUD_SETUP.md   # GCP service account setup guide
 ```
 
 **Built by Docker (deployed to Deck):**

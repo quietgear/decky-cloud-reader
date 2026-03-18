@@ -257,8 +257,9 @@ interface PluginSettings {
   ignored_words_beginning: string;
   ignored_words_beginning_enabled: boolean;
   ignored_words_count: number;
-  // Translation (Phase 26)
-  translation_enabled: boolean;           // Enable GCP Cloud Translation between OCR and TTS
+  // Translation (Phase 26/32)
+  translation_enabled: boolean;           // Enable translation between OCR and TTS
+  translation_provider: string;           // "free" (no credentials) or "gcp" (Cloud Translation v3)
   translation_target_language: string;    // ISO 639-1 target language code (e.g., "en")
   // Computed fields
   is_configured: boolean;       // Whether current providers are ready
@@ -963,8 +964,14 @@ const LOCAL_SPEECH_RATE_OPTIONS = [
   { data: "x-fast", label: "Very Fast" },
 ];
 
+// Phase 32: Translation provider options for the dropdown.
+const TRANSLATION_PROVIDER_OPTIONS = [
+  { data: "free", label: "Free Google Translate" },
+  { data: "gcp",  label: "GCP Cloud Translation" },
+];
+
 // Phase 26: Translation target language options for the dropdown.
-// ISO 639-1 codes that Cloud Translation v2 accepts as target_language.
+// ISO 639-1 codes accepted by both free and GCP translation providers.
 const TRANSLATION_TARGET_OPTIONS = [
   { data: "en", label: "English" },
   { data: "de", label: "German" },
@@ -1531,8 +1538,11 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     );
   }
 
-  // Check if either provider uses GCP (controls GCP Credentials section visibility)
-  const needsGcp = settings.ocr_provider === "gcp" || settings.tts_provider === "gcp";
+  // Check if any provider uses GCP (controls GCP Credentials section visibility).
+  // Phase 32: also true when GCP translation provider is selected.
+  const needsGcp = settings.ocr_provider === "gcp"
+    || settings.tts_provider === "gcp"
+    || (settings.translation_enabled && settings.translation_provider === "gcp");
 
   // --- Normal mode (settings view) ---
   return (
@@ -1843,53 +1853,33 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           />
         </PanelSectionRow>
 
-        {/* TTS Engine dropdown */}
-        <PanelSectionRow>
-          <DropdownItem
-            label="TTS Engine"
-            description="Speech synthesis engine"
-            menuLabel="Select TTS Engine"
-            rgOptions={TTS_PROVIDER_OPTIONS.map((o) => ({
-              data: o.data,
-              label: o.label,
-            }))}
-            selectedOption={
-              TTS_PROVIDER_OPTIONS.find((o) => o.data === settings.tts_provider)?.data
-              ?? TTS_PROVIDER_OPTIONS[0].data
-            }
-            onChange={async (option) => {
-              await saveSetting("tts_provider", option.data);
-              const updated = await getSettings();
-              setSettings(updated);
-            }}
-          />
-        </PanelSectionRow>
-
-        {/* OCR Language dropdown (Phase 25) */}
-        <PanelSectionRow>
-          <DropdownItem
-            label="OCR Language"
-            description="Recognition model for text detection"
-            menuLabel="Select OCR Language"
-            rgOptions={
-              ocrLanguages
-                ? Object.entries(ocrLanguages).map(([id, info]) => ({
-                    data: id,
-                    label: info.downloaded
-                      ? info.label
-                      : `${info.label} [${info.size_hint}]`,
-                  }))
-                : [{ data: settings.ocr_language, label: "Loading..." }]
-            }
-            selectedOption={settings.ocr_language}
-            onChange={async (option) => {
-              await saveSetting("ocr_language", option.data);
-              if (settings) {
-                setSettings({ ...settings, ocr_language: option.data as string });
+        {/* OCR Language dropdown — only shown for local engine (Phase 25, Phase 30) */}
+        {settings.ocr_provider === "local" && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="OCR Language"
+              description="Recognition model for text detection"
+              menuLabel="Select OCR Language"
+              rgOptions={
+                ocrLanguages
+                  ? Object.entries(ocrLanguages).map(([id, info]) => ({
+                      data: id,
+                      label: info.downloaded
+                        ? info.label
+                        : `${info.label} [${info.size_hint}]`,
+                    }))
+                  : [{ data: settings.ocr_language, label: "Loading..." }]
               }
-            }}
-          />
-        </PanelSectionRow>
+              selectedOption={settings.ocr_language}
+              onChange={async (option) => {
+                await saveSetting("ocr_language", option.data);
+                if (settings) {
+                  setSettings({ ...settings, ocr_language: option.data as string });
+                }
+              }}
+            />
+          </PanelSectionRow>
+        )}
 
         {/* OCR Language download/delete controls (local provider only) */}
         {settings.ocr_provider === "local" && ocrLanguages && (() => {
@@ -1960,6 +1950,28 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           );
         })()}
 
+        {/* TTS Engine dropdown */}
+        <PanelSectionRow>
+          <DropdownItem
+            label="TTS Engine"
+            description="Speech synthesis engine"
+            menuLabel="Select TTS Engine"
+            rgOptions={TTS_PROVIDER_OPTIONS.map((o) => ({
+              data: o.data,
+              label: o.label,
+            }))}
+            selectedOption={
+              TTS_PROVIDER_OPTIONS.find((o) => o.data === settings.tts_provider)?.data
+              ?? TTS_PROVIDER_OPTIONS[0].data
+            }
+            onChange={async (option) => {
+              await saveSetting("tts_provider", option.data);
+              const updated = await getSettings();
+              setSettings(updated);
+            }}
+          />
+        </PanelSectionRow>
+
         {/* Provider status hints */}
         {settings.ocr_provider === "local" && !settings.is_local_available && (
           <PanelSectionRow>
@@ -1991,62 +2003,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
         )}
       </PanelSection>
 
-      {/* ---- Translation Section (Phase 26) ---- */}
-      {/* Only shown when at least one provider uses GCP, since translation
-          uses GCP Cloud Translation API. Allows translating OCR text before TTS. */}
-      {needsGcp && (
-        <PanelSection title="Translation">
-          <PanelSectionRow>
-            <ToggleField
-              label="Enable Translation"
-              description="Translate OCR text before TTS (GCP Cloud Translation)"
-              checked={settings.translation_enabled ?? false}
-              onChange={async (checked) => {
-                await saveSetting("translation_enabled", checked);
-                if (settings) {
-                  setSettings({ ...settings, translation_enabled: checked });
-                }
-              }}
-            />
-          </PanelSectionRow>
-
-          {settings.translation_enabled && (
-            <>
-              {/* Target language dropdown */}
-              <PanelSectionRow>
-                <DropdownItem
-                  label="Translate To"
-                  description="Target language for translation"
-                  menuLabel="Select Target Language"
-                  rgOptions={TRANSLATION_TARGET_OPTIONS.map((o) => ({
-                    data: o.data,
-                    label: o.label,
-                  }))}
-                  selectedOption={
-                    TRANSLATION_TARGET_OPTIONS.find((o) => o.data === settings.translation_target_language)?.data
-                    ?? TRANSLATION_TARGET_OPTIONS[0].data
-                  }
-                  onChange={async (option) => {
-                    await saveSetting("translation_target_language", option.data);
-                    if (settings) {
-                      setSettings({ ...settings, translation_target_language: option.data as string });
-                    }
-                  }}
-                />
-              </PanelSectionRow>
-
-              {/* Source language hint */}
-              <PanelSectionRow>
-                <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
-                  Source: auto-detected from OCR language ({settings.ocr_language})
-                </div>
-              </PanelSectionRow>
-            </>
-          )}
-        </PanelSection>
-      )}
-
-      {/* ---- GCP Credentials Section ---- */}
+      {/* ---- GCP Credentials Section (moved before Translation in Phase 31) ---- */}
       {/* Only shown when at least one provider uses GCP */}
       {needsGcp && <PanelSection title="GCP Credentials">
         {/* Status: Configured or Not Configured */}
@@ -2110,6 +2067,92 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
           </PanelSectionRow>
         )}
       </PanelSection>}
+
+      {/* ---- Translation Section (Phase 26/32) ---- */}
+      {/* Always visible — free provider needs no GCP credentials.
+          Translates OCR text before TTS using either the unofficial Google
+          Translate endpoint (free, no credentials) or GCP Cloud Translation. */}
+      <PanelSection title="Translation">
+        <PanelSectionRow>
+          <ToggleField
+            label="Enable Translation"
+            description="Translate OCR text before TTS"
+            checked={settings.translation_enabled ?? false}
+            onChange={async (checked) => {
+              await saveSetting("translation_enabled", checked);
+              // Refresh all settings so needsGcp recalculates
+              const updated = await getSettings();
+              setSettings(updated);
+            }}
+          />
+        </PanelSectionRow>
+
+        {settings.translation_enabled && (
+          <>
+            {/* Phase 32: Translation provider dropdown */}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Translation Engine"
+                description="Free works without credentials"
+                menuLabel="Select Translation Engine"
+                rgOptions={TRANSLATION_PROVIDER_OPTIONS.map((o) => ({
+                  data: o.data,
+                  label: o.label,
+                }))}
+                selectedOption={
+                  TRANSLATION_PROVIDER_OPTIONS.find((o) => o.data === settings.translation_provider)?.data
+                  ?? TRANSLATION_PROVIDER_OPTIONS[0].data
+                }
+                onChange={async (option) => {
+                  await saveSetting("translation_provider", option.data);
+                  // Refresh all settings so needsGcp recalculates
+                  const updated = await getSettings();
+                  setSettings(updated);
+                }}
+              />
+            </PanelSectionRow>
+
+            {/* Warning: GCP translation needs credentials */}
+            {settings.translation_provider === "gcp" && !settings.is_gcp_configured && (
+              <PanelSectionRow>
+                <div style={{ color: "#e74c3c", fontSize: "12px", padding: "4px 0" }}>
+                  GCP Translation requires credentials — configure them below
+                </div>
+              </PanelSectionRow>
+            )}
+
+            {/* Target language dropdown */}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Translate To"
+                description="Target language for translation"
+                menuLabel="Select Target Language"
+                rgOptions={TRANSLATION_TARGET_OPTIONS.map((o) => ({
+                  data: o.data,
+                  label: o.label,
+                }))}
+                selectedOption={
+                  TRANSLATION_TARGET_OPTIONS.find((o) => o.data === settings.translation_target_language)?.data
+                  ?? TRANSLATION_TARGET_OPTIONS[0].data
+                }
+                onChange={async (option) => {
+                  await saveSetting("translation_target_language", option.data);
+                  if (settings) {
+                    setSettings({ ...settings, translation_target_language: option.data as string });
+                  }
+                }}
+              />
+            </PanelSectionRow>
+
+            {/* Source language hint */}
+            <PanelSectionRow>
+              <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
+                Source: auto-detected from OCR language ({settings.ocr_language})
+              </div>
+            </PanelSectionRow>
+          </>
+        )}
+      </PanelSection>
 
       {/* ---- Sound Effects Section (Phase 11) ---- */}
       {/* UI feedback sounds for capture mode interactions. Sounds play

@@ -16,7 +16,7 @@
 #
 # Prerequisites:
 #   - Docker Desktop running (with x86 emulation for Apple Silicon)
-#   - SSH key configured for deck@192.168.50.116 (passwordless login)
+#   - SSH key configured for deck@192.168.50.58 (passwordless login)
 #   - Passwordless sudo on the Steam Deck (for restarting Decky Loader)
 #
 # The zip file produced by "build" is compatible with Decky Loader's
@@ -32,7 +32,7 @@ set -euo pipefail
 
 # Steam Deck connection info
 DECK_USER="deck"
-DECK_HOST="192.168.50.116"
+DECK_HOST="192.168.50.58"
 DECK_SSH="${DECK_USER}@${DECK_HOST}"
 
 # Plugin folder name — must match the directory inside the zip file.
