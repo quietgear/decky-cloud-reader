@@ -1,0 +1,126 @@
+# =============================================================================
+# Decky Cloud Reader — CI Workflow
+# =============================================================================
+# Runs linting, type checking, and tests on every push and pull request.
+# All jobs use native runners (Ubuntu x86_64) — no Docker needed since
+# there's no ARM/x86 mismatch on CI (unlike the Mac dev host).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Python linting: Ruff (linter) + Black (formatter)
+  # ---------------------------------------------------------------------------
+  lint-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install linters
+        run: pip install black ruff
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Black check
+        run: black --check .
+
+  # ---------------------------------------------------------------------------
+  # TypeScript linting: ESLint + Prettier
+  # ---------------------------------------------------------------------------
+  lint-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: ESLint
+        run: pnpm exec eslint .
+
+      - name: Prettier check
+        run: pnpm exec prettier --check 'src/**/*.{ts,tsx}'
+
+  # ---------------------------------------------------------------------------
+  # TypeScript type checking
+  # ---------------------------------------------------------------------------
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm exec tsc --noEmit
+
+  # ---------------------------------------------------------------------------
+  # Python unit tests
+  # ---------------------------------------------------------------------------
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest pytest-cov Pillow
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # TypeScript unit tests
+  # ---------------------------------------------------------------------------
+  test-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: pnpm exec vitest run

@@ -40,13 +40,12 @@
 # independently if needed.
 # =============================================================================
 
-import os
-import struct
 import fcntl
+import os
 import select
-import time
+import struct
 import threading
-
+import time
 
 # =============================================================================
 # Button mask definitions
@@ -56,45 +55,45 @@ import threading
 
 # ButtonsL: bytes 8-11 of the HID packet (uint32 little-endian)
 BUTTONS_L = {
-    'R2': 0x00000001,
-    'L2': 0x00000002,
-    'R1': 0x00000004,
-    'L1': 0x00000008,
-    'Y': 0x00000010,
-    'B': 0x00000020,
-    'X': 0x00000040,
-    'A': 0x00000080,
-    'DPAD_UP': 0x00000100,
-    'DPAD_RIGHT': 0x00000200,
-    'DPAD_LEFT': 0x00000400,
-    'DPAD_DOWN': 0x00000800,
-    'SELECT': 0x00001000,
-    'STEAM': 0x00002000,
-    'START': 0x00004000,
-    'L5': 0x00008000,
-    'R5': 0x00010000,
-    'LEFT_PAD_TOUCH': 0x00020000,
-    'RIGHT_PAD_TOUCH': 0x00040000,
-    'LEFT_PAD_CLICK': 0x00080000,
-    'RIGHT_PAD_CLICK': 0x00100000,
-    'L3': 0x00400000,
-    'R3': 0x04000000,
+    "R2": 0x00000001,
+    "L2": 0x00000002,
+    "R1": 0x00000004,
+    "L1": 0x00000008,
+    "Y": 0x00000010,
+    "B": 0x00000020,
+    "X": 0x00000040,
+    "A": 0x00000080,
+    "DPAD_UP": 0x00000100,
+    "DPAD_RIGHT": 0x00000200,
+    "DPAD_LEFT": 0x00000400,
+    "DPAD_DOWN": 0x00000800,
+    "SELECT": 0x00001000,
+    "STEAM": 0x00002000,
+    "START": 0x00004000,
+    "L5": 0x00008000,
+    "R5": 0x00010000,
+    "LEFT_PAD_TOUCH": 0x00020000,
+    "RIGHT_PAD_TOUCH": 0x00040000,
+    "LEFT_PAD_CLICK": 0x00080000,
+    "RIGHT_PAD_CLICK": 0x00100000,
+    "L3": 0x00400000,
+    "R3": 0x04000000,
 }
 
 # ButtonsH: bytes 12-15 of the HID packet (uint32 little-endian)
 BUTTONS_H = {
-    'L4': 0x00000200,
-    'R4': 0x00000400,
-    'QAM': 0x00040000,
+    "L4": 0x00000200,
+    "R4": 0x00000400,
+    "QAM": 0x00040000,
 }
 
 # Combine both dicts for easy lookup — given a button name, find which
 # group it belongs to (so we know which bytes to check in the packet).
 ALL_BUTTONS = {}
 for name, mask in BUTTONS_L.items():
-    ALL_BUTTONS[name] = ('L', mask)
+    ALL_BUTTONS[name] = ("L", mask)
 for name, mask in BUTTONS_H.items():
-    ALL_BUTTONS[name] = ('H', mask)
+    ALL_BUTTONS[name] = ("H", mask)
 
 # Buttons that can be used as triggers (the back grip buttons)
 TRIGGER_BUTTONS = ["L4", "R4", "L5", "R5"]
@@ -103,6 +102,7 @@ TRIGGER_BUTTONS = ["L4", "R4", "L5", "R5"]
 # =============================================================================
 # HidrawButtonMonitor class
 # =============================================================================
+
 
 class HidrawButtonMonitor:
     """
@@ -134,7 +134,7 @@ class HidrawButtonMonitor:
     # Formula: _IOC(IOC_WRITE|IOC_READ, 'H', 0x06, size)
     @staticmethod
     def _hidiocsfeature(size):
-        return 0xC0000000 | (size << 16) | (ord('H') << 8) | 0x06
+        return 0xC0000000 | (size << 16) | (ord("H") << 8) | 0x06
 
     # HID command IDs for controller initialization
     ID_CLEAR_DIGITAL_MAPPINGS = 0x81
@@ -144,8 +144,7 @@ class HidrawButtonMonitor:
     TRACKPAD_NONE = 0x07
     SETTING_STEAM_WATCHDOG_ENABLE = 0x2D
 
-    def __init__(self, target_button="L4", hold_threshold_ms=500,
-                 on_trigger=None, logger=None, log_prefix="[DCR]"):
+    def __init__(self, target_button="L4", hold_threshold_ms=500, on_trigger=None, logger=None, log_prefix="[DCR]"):
         """
         Initialize the button monitor.
 
@@ -186,8 +185,8 @@ class HidrawButtonMonitor:
 
         # Hold detection state (only accessed from monitor thread)
         self._button_press_start = None  # monotonic timestamp when target button was first pressed
-        self._triggered = False          # True if we already fired the callback for this press
-        self._cooldown_until = 0.0       # monotonic timestamp — ignore triggers until this time
+        self._triggered = False  # True if we already fired the callback for this press
+        self._cooldown_until = 0.0  # monotonic timestamp — ignore triggers until this time
 
         # Cooldown duration after a successful trigger (seconds).
         # Prevents rapid re-triggering if the user holds the button too long.
@@ -349,9 +348,12 @@ class HidrawButtonMonitor:
             settings_cmd = [
                 self.ID_SET_SETTINGS_VALUES,
                 3,  # Number of settings to set
-                self.SETTING_LEFT_TRACKPAD_MODE, self.TRACKPAD_NONE,
-                self.SETTING_RIGHT_TRACKPAD_MODE, self.TRACKPAD_NONE,
-                self.SETTING_STEAM_WATCHDOG_ENABLE, 0,
+                self.SETTING_LEFT_TRACKPAD_MODE,
+                self.TRACKPAD_NONE,
+                self.SETTING_RIGHT_TRACKPAD_MODE,
+                self.TRACKPAD_NONE,
+                self.SETTING_STEAM_WATCHDOG_ENABLE,
+                0,
             ]
             if not self._send_feature_report(settings_cmd):
                 self._log_warning("hidraw: failed to set controller settings")
@@ -557,8 +559,8 @@ class HidrawButtonMonitor:
             data: Raw bytes of the HID packet (at least 16 bytes).
         """
         # Parse button bitmasks from the packet
-        buttons_l = struct.unpack('<I', data[8:12])[0]
-        buttons_h = struct.unpack('<I', data[12:16])[0]
+        buttons_l = struct.unpack("<I", data[8:12])[0]
+        buttons_h = struct.unpack("<I", data[12:16])[0]
 
         # Skip processing if nothing changed (common case — most packets
         # are identical when the user isn't pressing anything)
@@ -635,10 +637,7 @@ class HidrawButtonMonitor:
             self._triggered = True
             self._cooldown_until = now + self._cooldown_duration
 
-            self._log_info(
-                f"hidraw: button hold trigger fired "
-                f"(held {held_duration:.2f}s >= {threshold:.2f}s)"
-            )
+            self._log_info(f"hidraw: button hold trigger fired " f"(held {held_duration:.2f}s >= {threshold:.2f}s)")
 
             if self._on_trigger:
                 try:

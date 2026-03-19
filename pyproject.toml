@@ -1,0 +1,28 @@
+# =============================================================================
+# Decky Cloud Reader — Python tooling configuration
+# =============================================================================
+# Black (formatter) + Ruff (linter) config. Both run inside Docker only —
+# no Python tooling is installed on the Mac host.
+
+[tool.black]
+line-length = 120
+target-version = ["py312", "py313"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# E = pycodestyle errors, F = pyflakes, W = pycodestyle warnings, I = isort
+select = ["E", "F", "W", "I"]
+# E501 = line too long (handled by Black)
+# E402 = module-level import not at top — main.py requires sys.path manipulation
+#        before importing local modules (Decky sandbox doesn't add plugin dir)
+ignore = ["E501", "E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["hidraw_monitor", "touchscreen_monitor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

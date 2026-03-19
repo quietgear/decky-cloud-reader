@@ -1,0 +1,98 @@
+# =============================================================================
+# Decky Cloud Reader — Development tools image
+# =============================================================================
+# Multi-stage Dockerfile for linting, formatting, and testing.
+# Each stage is a self-contained tool environment.
+# Usage: docker compose -f docker/docker-compose.dev.yml run <service>
+
+# =============================================================================
+# Stage: lint-python — Black formatter + Ruff linter
+# =============================================================================
+FROM python:3.13-slim AS lint-python
+
+RUN pip install --no-cache-dir black ruff
+
+WORKDIR /app
+
+# Copy only Python files and config needed for linting
+COPY pyproject.toml ./
+COPY main.py gcp_worker.py local_worker.py hidraw_monitor.py touchscreen_monitor.py ./
+COPY tests/ ./tests/
+
+# Default: check mode (read-only)
+CMD ["sh", "-c", "echo '--- Ruff ---' && ruff check . && echo '--- Black ---' && black --check ."]
+
+
+# =============================================================================
+# Stage: lint-python-fix — auto-format + auto-fix
+# =============================================================================
+FROM lint-python AS lint-python-fix
+
+# Fix mode: modifies files in-place (mount read-write)
+CMD ["sh", "-c", "echo '--- Ruff fix ---' && ruff check --fix . && echo '--- Black format ---' && black ."]
+
+
+# =============================================================================
+# Stage: lint-ts — ESLint + Prettier for TypeScript
+# =============================================================================
+FROM node:20-slim AS lint-ts
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Install dependencies first (layer caching)
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# Copy source and config files
+COPY tsconfig.json eslint.config.js ./
+COPY src/ ./src/
+
+# Default: check mode
+CMD ["sh", "-c", "echo '--- ESLint ---' && pnpm exec eslint . && echo '--- Prettier ---' && pnpm exec prettier --check 'src/**/*.{ts,tsx}'"]
+
+
+# =============================================================================
+# Stage: lint-ts-fix — auto-format + auto-fix TypeScript
+# =============================================================================
+FROM lint-ts AS lint-ts-fix
+
+CMD ["sh", "-c", "echo '--- ESLint fix ---' && pnpm exec eslint --fix . && echo '--- Prettier format ---' && pnpm exec prettier --write 'src/**/*.{ts,tsx}'"]
+
+
+# =============================================================================
+# Stage: test-python — pytest + coverage
+# =============================================================================
+FROM python:3.13-slim AS test-python
+
+RUN pip install --no-cache-dir pytest pytest-cov Pillow
+
+WORKDIR /app
+
+# Copy Python source and test files
+COPY pyproject.toml ./
+COPY main.py gcp_worker.py local_worker.py hidraw_monitor.py touchscreen_monitor.py ./
+COPY tests/ ./tests/
+
+CMD ["pytest", "tests/", "-v", "--tb=short"]
+
+
+# =============================================================================
+# Stage: test-ts — Vitest for TypeScript
+# =============================================================================
+FROM node:20-slim AS test-ts
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Install dependencies
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# Copy source, tests, and config
+COPY tsconfig.json vitest.config.ts ./
+COPY src/ ./src/
+
+CMD ["pnpm", "exec", "vitest", "run"]

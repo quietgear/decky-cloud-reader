@@ -31,14 +31,12 @@
 # IMPORTANT: This file must NOT import `decky` — it doesn't exist in bundled Python.
 # =============================================================================
 
-import sys
-import os
 import json
+import os
+import sys
 import time
 import traceback
 import wave
-import struct
-from io import BytesIO
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -69,6 +67,7 @@ DEFAULT_PIPER_VOICE = "en_US-amy-medium"
 # stdout is reserved for the JSON result. Any print() to stdout would corrupt
 # the JSON parsing in the parent process.
 
+
 def log_info(msg):
     """Log an informational message to stderr."""
     print(f"{WORKER_LOG} {msg}", file=sys.stderr, flush=True)
@@ -92,13 +91,17 @@ def log_debug(msg):
 # same do_* functions to work in both one-shot CLI mode and long-running
 # serve mode.
 
+
 class WorkerResult(Exception):
     """Raised to deliver a successful result from a do_* function."""
+
     def __init__(self, data):
         self.data = data
 
+
 class WorkerError(Exception):
     """Raised to deliver an error result from a do_* function."""
+
     def __init__(self, message):
         self.data = {"success": False, "message": message}
 
@@ -126,6 +129,7 @@ def output_error(message):
 # ---------------------------------------------------------------------------
 # Image cropping helper (Phase 12 capture modes)
 # ---------------------------------------------------------------------------
+
 
 def _crop_image(img, crop_region):
     """
@@ -166,6 +170,7 @@ def _crop_image(img, crop_region):
 # ---------------------------------------------------------------------------
 # OCR action — text detection using RapidOCR (offline)
 # ---------------------------------------------------------------------------
+
 
 def do_ocr(image_path, ocr_engine=None, crop_region=None, ocr_language=None):
     """
@@ -226,6 +231,7 @@ def do_ocr(image_path, ocr_engine=None, crop_region=None, ocr_language=None):
     # result[0] is a list of [bounding_box, text, confidence] items (or None).
     # result[1] is timing info.
     import numpy as np
+
     img_array = np.array(img)
 
     log_info(f"Running OCR on {img.size[0]}x{img.size[1]} image...")
@@ -239,13 +245,15 @@ def do_ocr(image_path, ocr_engine=None, crop_region=None, ocr_language=None):
     # Step 4: Handle case where no text is detected
     if not result or not result[0]:
         log_info("No text detected in image")
-        output_result({
-            "success": True,
-            "text": "",
-            "char_count": 0,
-            "line_count": 0,
-            "message": "No text detected in image",
-        })
+        output_result(
+            {
+                "success": True,
+                "text": "",
+                "char_count": 0,
+                "line_count": 0,
+                "message": "No text detected in image",
+            }
+        )
 
     # Step 5: Sort results top-to-bottom by the Y coordinate of the first
     # point of each bounding box. This gives a natural reading order.
@@ -261,18 +269,21 @@ def do_ocr(image_path, ocr_engine=None, crop_region=None, ocr_language=None):
     log_info(f"Detected {char_count:,} chars, {line_count} lines")
     log_debug(f"Text preview: {detected_text[:200]}...")
 
-    output_result({
-        "success": True,
-        "text": detected_text,
-        "char_count": char_count,
-        "line_count": line_count,
-        "message": f"OCR complete: {char_count:,} chars, {line_count} lines",
-    })
+    output_result(
+        {
+            "success": True,
+            "text": detected_text,
+            "char_count": char_count,
+            "line_count": line_count,
+            "message": f"OCR complete: {char_count:,} chars, {line_count} lines",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # TTS action — synthesize speech using Piper TTS (offline)
 # ---------------------------------------------------------------------------
+
 
 def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, speaker_id=None):
     """
@@ -325,13 +336,16 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, spea
     # Step 4: Synthesize audio using piper-tts v1.3+ API.
     # synthesize_wav() writes a complete WAV file directly — simpler than
     # collecting raw PCM chunks manually. SynthesisConfig controls speech rate.
-    log_info(f"Synthesizing speech with '{resolved_voice_id}' (length_scale={length_scale}, speaker_id={speaker_id})...")
+    log_info(
+        f"Synthesizing speech with '{resolved_voice_id}' (length_scale={length_scale}, speaker_id={speaker_id})..."
+    )
     t_start = time.monotonic()
 
     try:
         # SynthesisConfig accepts both length_scale and speaker_id (for
         # multi-speaker voices). speaker_id is None for single-speaker voices.
         from piper.voice import SynthesisConfig
+
         syn_config = SynthesisConfig(length_scale=length_scale, speaker_id=speaker_id)
 
         with wave.open(output_path, "wb") as wav_file:
@@ -341,14 +355,16 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, spea
         audio_size = os.path.getsize(output_path)
         log_info(f"Synthesis completed in {t_elapsed:.2f}s, WAV: {audio_size:,} bytes")
 
-        output_result({
-            "success": True,
-            "audio_size": audio_size,
-            "output_path": output_path,
-            "text_length": len(text),
-            "voice_id": resolved_voice_id,
-            "message": f"TTS complete: {audio_size:,} bytes, piper/{resolved_voice_id}",
-        })
+        output_result(
+            {
+                "success": True,
+                "audio_size": audio_size,
+                "output_path": output_path,
+                "text_length": len(text),
+                "voice_id": resolved_voice_id,
+                "message": f"TTS complete: {audio_size:,} bytes, piper/{resolved_voice_id}",
+            }
+        )
 
     except (WorkerResult, WorkerError):
         # Re-raise flow-control exceptions so the serve loop can handle them
@@ -363,9 +379,18 @@ def do_tts(text, output_path, speech_rate, voice_id=None, voice_cache=None, spea
 # Combined OCR+TTS action — single invocation for the pipeline
 # ---------------------------------------------------------------------------
 
-def do_ocr_tts(image_path, output_audio_path, speech_rate,
-               ocr_engine=None, voice_id=None, voice_cache=None, speaker_id=None,
-               crop_region=None, ocr_language=None):
+
+def do_ocr_tts(
+    image_path,
+    output_audio_path,
+    speech_rate,
+    ocr_engine=None,
+    voice_id=None,
+    voice_cache=None,
+    speaker_id=None,
+    crop_region=None,
+    ocr_language=None,
+):
     """
     Perform OCR and TTS in a single invocation (same as GCP's combined action).
 
@@ -398,8 +423,8 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
     if not os.path.exists(image_path):
         output_error(f"Image file not found: {image_path}")
 
-    from PIL import Image
     import numpy as np
+    from PIL import Image
 
     try:
         img = Image.open(image_path)
@@ -438,16 +463,18 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
 
     if not result or not result[0]:
         log_info("No text detected in image")
-        output_result({
-            "success": True,
-            "text": "",
-            "char_count": 0,
-            "line_count": 0,
-            "audio_size": 0,
-            "output_path": "",
-            "voice_id": resolved_voice_id,
-            "message": "No text detected in image",
-        })
+        output_result(
+            {
+                "success": True,
+                "text": "",
+                "char_count": 0,
+                "line_count": 0,
+                "audio_size": 0,
+                "output_path": "",
+                "voice_id": resolved_voice_id,
+                "message": "No text detected in image",
+            }
+        )
 
     # ---- Step 5: Sort and concatenate text ----
     sorted_results = sorted(result[0], key=lambda item: item[0][0][1])
@@ -476,6 +503,7 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
 
     try:
         from piper.voice import SynthesisConfig
+
         syn_config = SynthesisConfig(length_scale=length_scale, speaker_id=speaker_id)
 
         with wave.open(output_audio_path, "wb") as wav_file:
@@ -491,21 +519,24 @@ def do_ocr_tts(image_path, output_audio_path, speech_rate,
         output_error(f"TTS synthesis error: {e}")
 
     # ---- Return combined result ----
-    output_result({
-        "success": True,
-        "text": detected_text,
-        "char_count": char_count,
-        "line_count": line_count,
-        "audio_size": audio_size,
-        "output_path": output_audio_path,
-        "voice_id": resolved_voice_id,
-        "message": f"OCR+TTS complete: {char_count:,} chars, {audio_size:,} bytes, piper/{resolved_voice_id}",
-    })
+    output_result(
+        {
+            "success": True,
+            "text": detected_text,
+            "char_count": char_count,
+            "line_count": line_count,
+            "audio_size": audio_size,
+            "output_path": output_audio_path,
+            "voice_id": resolved_voice_id,
+            "message": f"OCR+TTS complete: {char_count:,} chars, {audio_size:,} bytes, piper/{resolved_voice_id}",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Model initialization helpers
 # ---------------------------------------------------------------------------
+
 
 def _init_ocr_engine(language_id=None):
     """
@@ -555,8 +586,8 @@ def _init_ocr_engine(language_id=None):
     from rapidocr_onnxruntime import RapidOCR
 
     log_info(f"Initializing RapidOCR engine: language={language_id}")
-    log_info(f"  det: built-in (rapidocr-onnxruntime default)")
-    log_info(f"  cls: built-in (rapidocr-onnxruntime default)")
+    log_info("  det: built-in (rapidocr-onnxruntime default)")
+    log_info("  cls: built-in (rapidocr-onnxruntime default)")
     log_info(f"  rec: {rec_path}")
     log_info(f"  dict: {dict_path}")
 
@@ -659,6 +690,7 @@ def _get_or_load_voice(voice_id, voice_cache):
 #   Ready signal (first line): {"ready": true}\n
 #   Shutdown: {"action": "shutdown"}\n  or  close stdin (EOF)
 
+
 def serve():
     """
     Persistent worker mode — reads JSON commands from stdin, dispatches to
@@ -692,9 +724,9 @@ def serve():
     # Step 3: Initialize lazy caches. OCR engine is NOT initialized upfront
     # (Phase 25) — it's created on first OCR command with the requested language.
     # This avoids loading a model that may not match the user's language setting.
-    ocr_engine = None             # Lazily initialized RapidOCR engine
-    ocr_engine_language = None    # Language ID of the cached engine
-    voice_cache = {}              # Lazy voice cache: voice_id → PiperVoice
+    ocr_engine = None  # Lazily initialized RapidOCR engine
+    ocr_engine_language = None  # Language ID of the cached engine
+    voice_cache = {}  # Lazy voice cache: voice_id → PiperVoice
     log_info("serve: caches empty (lazy-load OCR engine + voices)")
 
     # Step 4: Signal to parent that we're ready to accept commands
@@ -757,27 +789,36 @@ def serve():
         try:
             if action == "ocr":
                 engine = _get_ocr_engine(cmd.get("ocr_language"))
-                do_ocr(cmd.get("image_path", ""), ocr_engine=engine,
-                       crop_region=cmd.get("crop_region"),
-                       ocr_language=cmd.get("ocr_language"))
+                do_ocr(
+                    cmd.get("image_path", ""),
+                    ocr_engine=engine,
+                    crop_region=cmd.get("crop_region"),
+                    ocr_language=cmd.get("ocr_language"),
+                )
 
             elif action == "tts":
-                do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
-                       cmd.get("speech_rate", "medium"),
-                       voice_id=cmd.get("voice_id"),
-                       voice_cache=voice_cache,
-                       speaker_id=cmd.get("speaker_id"))
+                do_tts(
+                    cmd.get("text", ""),
+                    cmd.get("output_path", ""),
+                    cmd.get("speech_rate", "medium"),
+                    voice_id=cmd.get("voice_id"),
+                    voice_cache=voice_cache,
+                    speaker_id=cmd.get("speaker_id"),
+                )
 
             elif action == "ocr_tts":
                 engine = _get_ocr_engine(cmd.get("ocr_language"))
-                do_ocr_tts(cmd.get("image_path", ""), cmd.get("output_path", ""),
-                           cmd.get("speech_rate", "medium"),
-                           ocr_engine=engine,
-                           voice_id=cmd.get("voice_id"),
-                           voice_cache=voice_cache,
-                           speaker_id=cmd.get("speaker_id"),
-                           crop_region=cmd.get("crop_region"),
-                           ocr_language=cmd.get("ocr_language"))
+                do_ocr_tts(
+                    cmd.get("image_path", ""),
+                    cmd.get("output_path", ""),
+                    cmd.get("speech_rate", "medium"),
+                    ocr_engine=engine,
+                    voice_id=cmd.get("voice_id"),
+                    voice_cache=voice_cache,
+                    speaker_id=cmd.get("speaker_id"),
+                    crop_region=cmd.get("crop_region"),
+                    ocr_language=cmd.get("ocr_language"),
+                )
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)
@@ -799,6 +840,7 @@ def serve():
 # ---------------------------------------------------------------------------
 # Entry point — CLI mode (one-shot) dispatcher
 # ---------------------------------------------------------------------------
+
 
 def main():
     """
@@ -842,7 +884,9 @@ def main():
 
         elif action == "ocr_tts":
             if len(sys.argv) < 4:
-                raise WorkerError("Usage: local_worker.py ocr_tts <image_path> <output_audio_path> [speech_rate] [voice_id]")
+                raise WorkerError(
+                    "Usage: local_worker.py ocr_tts <image_path> <output_audio_path> [speech_rate] [voice_id]"
+                )
             speech_rate = sys.argv[4] if len(sys.argv) > 4 else "medium"
             voice_id = sys.argv[5] if len(sys.argv) > 5 else None
             do_ocr_tts(sys.argv[2], sys.argv[3], speech_rate, voice_id=voice_id)

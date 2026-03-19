@@ -1,0 +1,71 @@
+# =============================================================================
+# Decky Cloud Reader — Development services
+# =============================================================================
+# Linting, formatting, and testing — all run inside Docker.
+# Usage: docker compose -f docker/docker-compose.dev.yml run <service>
+
+services:
+  # ---------------------------------------------------------------------------
+  # Python linting (check only)
+  # ---------------------------------------------------------------------------
+  lint-python:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      target: lint-python
+    environment:
+      # Ruff cache needs a writable dir when /app is read-only
+      RUFF_CACHE_DIR: /tmp/ruff-cache
+    volumes:
+      # Read-only mount for checking
+      - ..:/app:ro
+
+  # ---------------------------------------------------------------------------
+  # Python linting (auto-fix)
+  # ---------------------------------------------------------------------------
+  lint-python-fix:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      target: lint-python-fix
+    volumes:
+      # Read-write mount for fixing files in place
+      - ..:/app
+
+  # ---------------------------------------------------------------------------
+  # TypeScript linting (check only)
+  # ---------------------------------------------------------------------------
+  lint-ts:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      target: lint-ts
+
+  # ---------------------------------------------------------------------------
+  # TypeScript linting (auto-fix)
+  # ---------------------------------------------------------------------------
+  lint-ts-fix:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      target: lint-ts-fix
+    volumes:
+      - ..:/app
+
+  # ---------------------------------------------------------------------------
+  # Python tests
+  # ---------------------------------------------------------------------------
+  test-python:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      target: test-python
+
+  # ---------------------------------------------------------------------------
+  # TypeScript tests
+  # ---------------------------------------------------------------------------
+  test-ts:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      target: test-ts

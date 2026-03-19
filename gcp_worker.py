@@ -23,10 +23,10 @@
 # IMPORTANT: This file must NOT import `decky` — it doesn't exist in system Python.
 # =============================================================================
 
-import sys
-import os
-import json
 import base64
+import json
+import os
+import sys
 import time
 import traceback
 from io import BytesIO
@@ -71,7 +71,7 @@ VOICE_REGISTRY = {
     "en-GB-Neural2-C": "en-GB",  # Female
     "en-GB-Neural2-D": "en-GB",  # Male
     # Ukrainian voices (uk-UA)
-    "uk-UA-Wavenet-A": "uk-UA",   # Female (Wavenet)
+    "uk-UA-Wavenet-A": "uk-UA",  # Female (Wavenet)
     "uk-UA-Standard-A": "uk-UA",  # Female (Standard)
     # German Neural2 voices (de-DE)
     "de-DE-Neural2-A": "de-DE",  # Female
@@ -95,8 +95,8 @@ VOICE_REGISTRY = {
     "pt-BR-Neural2-B": "pt-BR",  # Male
     "pt-BR-Neural2-C": "pt-BR",  # Female
     # Russian voices (ru-RU)
-    "ru-RU-Wavenet-A": "ru-RU",   # Female (Wavenet)
-    "ru-RU-Wavenet-B": "ru-RU",   # Male (Wavenet)
+    "ru-RU-Wavenet-A": "ru-RU",  # Female (Wavenet)
+    "ru-RU-Wavenet-B": "ru-RU",  # Male (Wavenet)
     "ru-RU-Standard-A": "ru-RU",  # Female (Standard)
     "ru-RU-Standard-B": "ru-RU",  # Male (Standard)
 }
@@ -118,10 +118,10 @@ SPEECH_RATE_MAP = {
 # See: https://cloud.google.com/vision/docs/languages
 OCR_LANGUAGE_HINTS = {
     "english": ["en"],
-    "chinese": ["zh", "ja"],         # Chinese + Japanese share CJK characters
+    "chinese": ["zh", "ja"],  # Chinese + Japanese share CJK characters
     "korean": ["ko"],
     "latin": ["fr", "de", "es", "it", "pt"],  # Major Latin-script languages
-    "eslav": ["ru", "uk", "bg", "be"],         # Cyrillic-script languages
+    "eslav": ["ru", "uk", "bg", "be"],  # Cyrillic-script languages
     "thai": ["th"],
     "greek": ["el"],
 }
@@ -132,6 +132,7 @@ OCR_LANGUAGE_HINTS = {
 # ---------------------------------------------------------------------------
 # stdout is reserved for the JSON result. Any print() to stdout would corrupt
 # the JSON parsing in the parent process.
+
 
 def log_info(msg):
     """Log an informational message to stderr."""
@@ -159,13 +160,17 @@ def log_debug(msg):
 # Flow: do_ocr() → output_result(data) → raises WorkerResult → caught by
 #       main() or serve(), which writes JSON to stdout.
 
+
 class WorkerResult(Exception):
     """Raised to deliver a successful result from a do_* function."""
+
     def __init__(self, data):
         self.data = data
 
+
 class WorkerError(Exception):
     """Raised to deliver an error result from a do_* function."""
+
     def __init__(self, message):
         self.data = {"success": False, "message": message}
 
@@ -206,6 +211,7 @@ def output_error(message):
 # ONCE and pass the resulting dict to both Vision and TTS client init. This
 # avoids paying the JSON parse + base64 decode cost twice.
 
+
 def _decode_credentials(creds_b64):
     """
     Decode base64-encoded GCP service account credentials to a Python dict.
@@ -230,12 +236,14 @@ def _make_oauth_credentials(creds_json):
         A google.oauth2.service_account.Credentials object.
     """
     from google.oauth2 import service_account
+
     return service_account.Credentials.from_service_account_info(creds_json)
 
 
 # ---------------------------------------------------------------------------
 # Vision client initialization
 # ---------------------------------------------------------------------------
+
 
 def init_vision_client(creds_b64, creds_json=None):
     """
@@ -265,6 +273,7 @@ def init_vision_client(creds_b64, creds_json=None):
     credentials = _make_oauth_credentials(creds_json)
 
     from google.cloud import vision
+
     client = vision.ImageAnnotatorClient(credentials=credentials)
 
     log_info("Vision client initialized")
@@ -274,6 +283,7 @@ def init_vision_client(creds_b64, creds_json=None):
 # ---------------------------------------------------------------------------
 # TTS client initialization
 # ---------------------------------------------------------------------------
+
 
 def init_tts_client(creds_b64, creds_json=None):
     """
@@ -302,6 +312,7 @@ def init_tts_client(creds_b64, creds_json=None):
     credentials = _make_oauth_credentials(creds_json)
 
     from google.cloud import texttospeech
+
     client = texttospeech.TextToSpeechClient(credentials=credentials)
 
     log_info("TTS client initialized")
@@ -311,6 +322,7 @@ def init_tts_client(creds_b64, creds_json=None):
 # ---------------------------------------------------------------------------
 # Image cropping helper (Phase 12 capture modes)
 # ---------------------------------------------------------------------------
+
 
 def _crop_image_bytes(image_bytes, crop_region):
     """
@@ -360,6 +372,7 @@ def _crop_image_bytes(image_bytes, crop_region):
 # ---------------------------------------------------------------------------
 # Image resizing (two-stage: quality reduction, then dimension scaling)
 # ---------------------------------------------------------------------------
+
 
 def resize_image_if_needed(image_bytes):
     """
@@ -439,6 +452,7 @@ def resize_image_if_needed(image_bytes):
 # OCR action — the main text detection pipeline
 # ---------------------------------------------------------------------------
 
+
 def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None, ocr_language=None):
     """
     Perform OCR on an image file using Google Cloud Vision API.
@@ -496,8 +510,8 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None, ocr_lang
             output_error(f"Failed to initialize GCP credentials: {e}")
 
     # Step 4: Call the Vision API with retry logic
-    from google.cloud import vision
     from google.api_core import exceptions as google_exceptions
+    from google.cloud import vision
 
     image = vision.Image(content=image_bytes)
 
@@ -520,9 +534,9 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None, ocr_lang
             response = client.text_detection(image=image, image_context=image_context)
             break  # Success — exit the retry loop
         except (
-            google_exceptions.ServiceUnavailable,    # 503
-            google_exceptions.ResourceExhausted,     # 429 (rate limit)
-            google_exceptions.DeadlineExceeded,      # 504 (timeout)
+            google_exceptions.ServiceUnavailable,  # 503
+            google_exceptions.ResourceExhausted,  # 429 (rate limit)
+            google_exceptions.DeadlineExceeded,  # 504 (timeout)
             ConnectionError,
             ConnectionResetError,
         ) as e:
@@ -530,10 +544,7 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None, ocr_lang
             if attempt < MAX_RETRIES - 1:
                 # Calculate delay: use the delays list, clamping to last value
                 delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
-                log_info(
-                    f"Transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
-                    f"Retrying in {delay}s..."
-                )
+                log_info(f"Transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. " f"Retrying in {delay}s...")
                 time.sleep(delay)
             else:
                 log_error(f"Failed after {MAX_RETRIES} attempts: {e}")
@@ -555,13 +566,15 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None, ocr_lang
     # Step 6: Extract the detected text
     if not response.text_annotations:
         log_info("No text detected in image")
-        output_result({
-            "success": True,
-            "text": "",
-            "char_count": 0,
-            "line_count": 0,
-            "message": "No text detected in image",
-        })
+        output_result(
+            {
+                "success": True,
+                "text": "",
+                "char_count": 0,
+                "line_count": 0,
+                "message": "No text detected in image",
+            }
+        )
 
     # The first annotation contains the full concatenated text from all
     # detected text blocks. Subsequent annotations are individual words/blocks.
@@ -573,18 +586,21 @@ def do_ocr(image_path, creds_b64, vision_client=None, crop_region=None, ocr_lang
     log_info(f"Detected {char_count:,} chars, {line_count} lines")
     log_debug(f"Text preview: {detected_text[:200]}...")
 
-    output_result({
-        "success": True,
-        "text": detected_text,
-        "char_count": char_count,
-        "line_count": line_count,
-        "message": f"OCR complete: {char_count:,} chars, {line_count} lines",
-    })
+    output_result(
+        {
+            "success": True,
+            "text": detected_text,
+            "char_count": char_count,
+            "line_count": line_count,
+            "message": f"OCR complete: {char_count:,} chars, {line_count} lines",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # TTS action — synthesize speech from text
 # ---------------------------------------------------------------------------
+
 
 def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None):
     """
@@ -618,7 +634,7 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None)
     # knows the audio doesn't cover the full text.
     original_length = len(text)
     if len(text) > MAX_TEXT_LENGTH:
-        text = text[:MAX_TEXT_LENGTH - 30] + "\n... (text truncated)"
+        text = text[: MAX_TEXT_LENGTH - 30] + "\n... (text truncated)"
         log_info(f"Text truncated from {original_length:,} to {len(text):,} chars")
 
     log_info(f"TTS input: {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
@@ -683,19 +699,16 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None)
             )
             break  # Success — exit the retry loop
         except (
-            google_exceptions.ServiceUnavailable,    # 503
-            google_exceptions.ResourceExhausted,     # 429 (rate limit)
-            google_exceptions.DeadlineExceeded,      # 504 (timeout)
+            google_exceptions.ServiceUnavailable,  # 503
+            google_exceptions.ResourceExhausted,  # 429 (rate limit)
+            google_exceptions.DeadlineExceeded,  # 504 (timeout)
             ConnectionError,
             ConnectionResetError,
         ) as e:
             last_error = e
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
-                log_info(
-                    f"Transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
-                    f"Retrying in {delay}s..."
-                )
+                log_info(f"Transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. " f"Retrying in {delay}s...")
                 time.sleep(delay)
             else:
                 log_error(f"TTS failed after {MAX_RETRIES} attempts: {e}")
@@ -721,22 +734,34 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None)
         log_error(f"Failed to write audio file: {e}")
         output_error(f"Failed to write audio file: {e}")
 
-    output_result({
-        "success": True,
-        "audio_size": audio_size,
-        "output_path": output_path,
-        "text_length": len(text),
-        "voice_id": voice_id,
-        "message": f"TTS complete: {audio_size:,} bytes, voice={voice_id}",
-    })
+    output_result(
+        {
+            "success": True,
+            "audio_size": audio_size,
+            "output_path": output_path,
+            "text_length": len(text),
+            "voice_id": voice_id,
+            "message": f"TTS complete: {audio_size:,} bytes, voice={voice_id}",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Combined OCR+TTS action — single subprocess for the pipeline
 # ---------------------------------------------------------------------------
 
-def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
-               vision_client=None, tts_client=None, crop_region=None, ocr_language=None):
+
+def do_ocr_tts(
+    image_path,
+    output_mp3_path,
+    voice_id,
+    speech_rate,
+    creds_b64,
+    vision_client=None,
+    tts_client=None,
+    crop_region=None,
+    ocr_language=None,
+):
     """
     Perform OCR and TTS in a single invocation.
 
@@ -808,8 +833,8 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
             log_error(f"Failed to init Vision client: {e}")
             output_error(f"Failed to initialize Vision credentials: {e}")
 
-    from google.cloud import vision
     from google.api_core import exceptions as google_exceptions
+    from google.cloud import vision
 
     image = vision.Image(content=image_bytes)
 
@@ -838,10 +863,7 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
             last_error = e
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
-                log_info(
-                    f"OCR transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
-                    f"Retrying in {delay}s..."
-                )
+                log_info(f"OCR transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. " f"Retrying in {delay}s...")
                 time.sleep(delay)
             else:
                 log_error(f"OCR failed after {MAX_RETRIES} attempts: {e}")
@@ -861,16 +883,18 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
     # ---- Step 4: Extract text — return early if none detected ----
     if not response.text_annotations:
         log_info("No text detected in image")
-        output_result({
-            "success": True,
-            "text": "",
-            "char_count": 0,
-            "line_count": 0,
-            "audio_size": 0,
-            "output_path": "",
-            "voice_id": voice_id,
-            "message": "No text detected in image",
-        })
+        output_result(
+            {
+                "success": True,
+                "text": "",
+                "char_count": 0,
+                "line_count": 0,
+                "audio_size": 0,
+                "output_path": "",
+                "voice_id": voice_id,
+                "message": "No text detected in image",
+            }
+        )
 
     detected_text = response.text_annotations[0].description
     char_count = len(detected_text)
@@ -881,7 +905,7 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
     # Truncate text if over the API limit
     tts_text = detected_text
     if len(tts_text) > MAX_TEXT_LENGTH:
-        tts_text = tts_text[:MAX_TEXT_LENGTH - 30] + "\n... (text truncated)"
+        tts_text = tts_text[: MAX_TEXT_LENGTH - 30] + "\n... (text truncated)"
         log_info(f"Text truncated from {len(detected_text):,} to {len(tts_text):,} chars")
 
     # Look up voice language code and speaking rate
@@ -936,10 +960,7 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
             last_error = e
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
-                log_info(
-                    f"TTS transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
-                    f"Retrying in {delay}s..."
-                )
+                log_info(f"TTS transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. " f"Retrying in {delay}s...")
                 time.sleep(delay)
             else:
                 log_error(f"TTS failed after {MAX_RETRIES} attempts: {e}")
@@ -964,16 +985,18 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
         output_error(f"Failed to write audio file: {e}")
 
     # ---- Return combined result ----
-    output_result({
-        "success": True,
-        "text": detected_text,
-        "char_count": char_count,
-        "line_count": line_count,
-        "audio_size": audio_size,
-        "output_path": output_mp3_path,
-        "voice_id": voice_id,
-        "message": f"OCR+TTS complete: {char_count:,} chars, {audio_size:,} bytes",
-    })
+    output_result(
+        {
+            "success": True,
+            "text": detected_text,
+            "char_count": char_count,
+            "line_count": line_count,
+            "audio_size": audio_size,
+            "output_path": output_mp3_path,
+            "voice_id": voice_id,
+            "message": f"OCR+TTS complete: {char_count:,} chars, {audio_size:,} bytes",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1013,7 @@ def do_ocr_tts(image_path, output_mp3_path, voice_id, speech_rate, creds_b64,
 #   Worker → Parent (stdout): {"success": true, "text": "...", ...}\n
 #   Ready signal (first line): {"ready": true}\n
 #   Shutdown: {"action": "shutdown"}\n  or  close stdin (EOF)
+
 
 def serve():
     """
@@ -1072,24 +1096,36 @@ def serve():
         # and write as JSON to stdout, then continue to the next command.
         try:
             if action == "ocr":
-                do_ocr(cmd.get("image_path", ""), creds_b64,
-                       vision_client=vision_client,
-                       crop_region=cmd.get("crop_region"),
-                       ocr_language=cmd.get("ocr_language"))
+                do_ocr(
+                    cmd.get("image_path", ""),
+                    creds_b64,
+                    vision_client=vision_client,
+                    crop_region=cmd.get("crop_region"),
+                    ocr_language=cmd.get("ocr_language"),
+                )
 
             elif action == "tts":
-                do_tts(cmd.get("text", ""), cmd.get("output_path", ""),
-                       cmd.get("voice_id", "en-US-Neural2-C"),
-                       cmd.get("speech_rate", "medium"), creds_b64,
-                       tts_client=tts_client)
+                do_tts(
+                    cmd.get("text", ""),
+                    cmd.get("output_path", ""),
+                    cmd.get("voice_id", "en-US-Neural2-C"),
+                    cmd.get("speech_rate", "medium"),
+                    creds_b64,
+                    tts_client=tts_client,
+                )
 
             elif action == "ocr_tts":
-                do_ocr_tts(cmd.get("image_path", ""), cmd.get("output_path", ""),
-                           cmd.get("voice_id", "en-US-Neural2-C"),
-                           cmd.get("speech_rate", "medium"), creds_b64,
-                           vision_client=vision_client, tts_client=tts_client,
-                           crop_region=cmd.get("crop_region"),
-                           ocr_language=cmd.get("ocr_language"))
+                do_ocr_tts(
+                    cmd.get("image_path", ""),
+                    cmd.get("output_path", ""),
+                    cmd.get("voice_id", "en-US-Neural2-C"),
+                    cmd.get("speech_rate", "medium"),
+                    creds_b64,
+                    vision_client=vision_client,
+                    tts_client=tts_client,
+                    crop_region=cmd.get("crop_region"),
+                    ocr_language=cmd.get("ocr_language"),
+                )
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)
@@ -1115,6 +1151,7 @@ def serve():
 # ---------------------------------------------------------------------------
 # Entry point — CLI mode (one-shot) dispatcher
 # ---------------------------------------------------------------------------
+
 
 def main():
     """
@@ -1148,7 +1185,9 @@ def main():
     # Read credentials from environment (not CLI args — avoids ps exposure)
     creds_b64 = os.environ.get("GCP_CREDENTIALS_BASE64", "")
     if not creds_b64:
-        print(json.dumps({"success": False, "message": "GCP_CREDENTIALS_BASE64 environment variable not set"}), flush=True)
+        print(
+            json.dumps({"success": False, "message": "GCP_CREDENTIALS_BASE64 environment variable not set"}), flush=True
+        )
         sys.exit(1)
 
     # Dispatch to the appropriate action handler.
@@ -1167,7 +1206,9 @@ def main():
 
         elif action == "ocr_tts":
             if len(sys.argv) < 6:
-                raise WorkerError("Usage: gcp_worker.py ocr_tts <image_path> <output_mp3_path> <voice_id> <speech_rate>")
+                raise WorkerError(
+                    "Usage: gcp_worker.py ocr_tts <image_path> <output_mp3_path> <voice_id> <speech_rate>"
+                )
             do_ocr_tts(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], creds_b64)
 
         else:

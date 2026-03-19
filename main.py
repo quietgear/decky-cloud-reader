@@ -19,30 +19,31 @@
 # logging, path constants, and event helpers. See decky.pyi for type stubs.
 # =============================================================================
 
-import os
-import json
-import base64
-import logging
-import glob
-import traceback
-import subprocess
-import signal
-import shutil
-import urllib.parse
-import string
-import re
-import tempfile
 import asyncio
-import time
-import threading
-from concurrent.futures import ThreadPoolExecutor
-
-import decky
+import base64
+import glob
+import json
+import logging
+import os
+import re
+import shutil
+import signal
+import string
+import subprocess
 
 # Decky Loader runs main.py in a sandbox that doesn't add the plugin directory
 # to sys.path. We need to add it manually so we can import hidraw_monitor.py
 # which lives alongside main.py in the plugin directory.
 import sys
+import tempfile
+import threading
+import time
+import traceback
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+
+import decky
+
 _plugin_dir = os.path.dirname(os.path.realpath(__file__))
 if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)
@@ -50,7 +51,7 @@ if _plugin_dir not in sys.path:
 # Import the hidraw button monitor for hardware button trigger support.
 # This module handles all low-level HID communication with the Steam Deck
 # controller. It's in a separate file to keep main.py focused on plugin logic.
-from hidraw_monitor import HidrawButtonMonitor, TRIGGER_BUTTONS
+from hidraw_monitor import HidrawButtonMonitor
 
 # Import the touchscreen monitor for capacitive touch input support (Phase 9).
 # This module reads raw input events from /dev/input/eventN to detect taps
@@ -132,22 +133,27 @@ _capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dcr_ca
 PIPER_VOICE_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
 
 PIPER_VOICES = {
-    "en_US-amy-medium":       {"label": "US English - Amy (Female)",            "language": "English (US)",       "speakers": 1},
-    "en_US-ryan-medium":      {"label": "US English - Ryan (Male)",             "language": "English (US)",       "speakers": 1},
-    "en_GB-cori-medium":      {"label": "UK English - Cori (Female)",           "language": "English (UK)",       "speakers": 1},
-    "en_GB-alan-medium":      {"label": "UK English - Alan (Male)",             "language": "English (UK)",       "speakers": 1},
-    "de_DE-thorsten-medium":  {"label": "German - Thorsten (Male)",             "language": "German",             "speakers": 1},
-    "es_ES-davefx-medium":    {"label": "Spanish (Spain) - Davefx",             "language": "Spanish (Spain)",    "speakers": 1},
-    "es_MX-claude-high":      {"label": "Spanish (Mexico) - Claude",            "language": "Spanish (Mexico)",   "speakers": 1},
-    "fr_FR-gilles-medium":    {"label": "French - Gilles (Male)",               "language": "French",             "speakers": 1},
-    "it_IT-paola-medium":     {"label": "Italian - Paola (Female)",              "language": "Italian",            "speakers": 1},
-    "ja_JP-kokoro-medium":    {"label": "Japanese - Kokoro",                    "language": "Japanese",           "speakers": 1},
-    "ko_KR-kss-medium":       {"label": "Korean - KSS",                        "language": "Korean",             "speakers": 1},
-    "pl_PL-gosia-medium":     {"label": "Polish - Gosia (Female)",              "language": "Polish",             "speakers": 1},
-    "pt_BR-edresson-medium":  {"label": "Portuguese (Brazil) - Edresson",       "language": "Portuguese (BR)",    "speakers": 1},
-    "ru_RU-irina-medium":     {"label": "Russian - Irina (Female)",             "language": "Russian",            "speakers": 1},
-    "uk_UA-ukrainian_tts-medium": {"label": "Ukrainian - Ukrainian TTS",        "language": "Ukrainian",          "speakers": 3, "speaker_id": 1},
-    "zh_CN-huayan-medium":    {"label": "Chinese - Huayan",                     "language": "Chinese",            "speakers": 1},
+    "en_US-amy-medium": {"label": "US English - Amy (Female)", "language": "English (US)", "speakers": 1},
+    "en_US-ryan-medium": {"label": "US English - Ryan (Male)", "language": "English (US)", "speakers": 1},
+    "en_GB-cori-medium": {"label": "UK English - Cori (Female)", "language": "English (UK)", "speakers": 1},
+    "en_GB-alan-medium": {"label": "UK English - Alan (Male)", "language": "English (UK)", "speakers": 1},
+    "de_DE-thorsten-medium": {"label": "German - Thorsten (Male)", "language": "German", "speakers": 1},
+    "es_ES-davefx-medium": {"label": "Spanish (Spain) - Davefx", "language": "Spanish (Spain)", "speakers": 1},
+    "es_MX-claude-high": {"label": "Spanish (Mexico) - Claude", "language": "Spanish (Mexico)", "speakers": 1},
+    "fr_FR-gilles-medium": {"label": "French - Gilles (Male)", "language": "French", "speakers": 1},
+    "it_IT-paola-medium": {"label": "Italian - Paola (Female)", "language": "Italian", "speakers": 1},
+    "ja_JP-kokoro-medium": {"label": "Japanese - Kokoro", "language": "Japanese", "speakers": 1},
+    "ko_KR-kss-medium": {"label": "Korean - KSS", "language": "Korean", "speakers": 1},
+    "pl_PL-gosia-medium": {"label": "Polish - Gosia (Female)", "language": "Polish", "speakers": 1},
+    "pt_BR-edresson-medium": {"label": "Portuguese (Brazil) - Edresson", "language": "Portuguese (BR)", "speakers": 1},
+    "ru_RU-irina-medium": {"label": "Russian - Irina (Female)", "language": "Russian", "speakers": 1},
+    "uk_UA-ukrainian_tts-medium": {
+        "label": "Ukrainian - Ukrainian TTS",
+        "language": "Ukrainian",
+        "speakers": 3,
+        "speaker_id": 1,
+    },
+    "zh_CN-huayan-medium": {"label": "Chinese - Huayan", "language": "Chinese", "speakers": 1},
 }
 
 # Default voice — auto-downloaded on first TTS use if not yet present.
@@ -211,10 +217,10 @@ DEFAULT_OCR_LANGUAGE = "english"
 # None = auto-detect (for groups covering multiple languages).
 TRANSLATION_SOURCE_LANGUAGE = {
     "english": "en",
-    "chinese": None,   # zh or ja — auto-detect
+    "chinese": None,  # zh or ja — auto-detect
     "korean": "ko",
-    "latin": None,     # fr/de/es/it/pt — auto-detect
-    "eslav": None,     # ru/uk/bg/be — auto-detect
+    "latin": None,  # fr/de/es/it/pt — auto-detect
+    "eslav": None,  # ru/uk/bg/be — auto-detect
     "thai": "th",
     "greek": "el",
 }
@@ -243,9 +249,9 @@ def _piper_voice_url(voice_id, ext=".onnx"):
     """
     # Parse voice_id parts: "en_US-amy-medium" → lang_code="en_US", speaker="amy", quality="medium"
     parts = voice_id.split("-")
-    lang_code = parts[0]              # "en_US"
-    quality = parts[-1]               # "medium"
-    speaker = "-".join(parts[1:-1])   # "amy" (handles multi-part names like "davefx")
+    lang_code = parts[0]  # "en_US"
+    quality = parts[-1]  # "medium"
+    speaker = "-".join(parts[1:-1])  # "amy" (handles multi-part names like "davefx")
     lang_family = lang_code.split("_")[0]  # "en"
     return f"{PIPER_VOICE_BASE_URL}/{lang_family}/{lang_code}/{speaker}/{quality}/{voice_id}{ext}"
 
@@ -260,61 +266,45 @@ DEFAULT_SETTINGS = {
     # Base64-encoded GCP service account JSON. Stored internally after the user
     # selects a JSON file via the file browser. Never shown to the user directly.
     "gcp_credentials_base64": "",
-
     # Provider selection: "gcp" (Google Cloud, online) or "local" (offline).
     # Default to local — works out of the box without setup.
     "ocr_provider": "local",
     "tts_provider": "local",
-
     # GCP Text-to-Speech voice ID. Format: "languageCode-Name".
     "voice_id": "en-US-Neural2-C",
-
     # GCP TTS speech rate preset. One of: x-slow, slow, medium, fast, x-fast.
     "speech_rate": "medium",
-
     # Local (Piper) TTS voice. Downloaded on demand from HuggingFace.
     "local_voice_id": "en_US-amy-medium",
-
     # Local (Piper) TTS speech rate preset. Same keys as GCP but maps to
     # Piper's length_scale (inverse: lower = faster).
     "local_speech_rate": "medium",
-
     # OCR recognition language (Phase 25). Determines which rec model is used
     # for text recognition. Applies to both local and GCP providers.
     "ocr_language": "english",
-
     # TTS volume level 0-100.
     "volume": 100,
-
     # Master on/off switch. When False: stops both workers + playback,
     # grays out OCR/TTS buttons, ignores background triggers (button hold).
     "enabled": True,
-
     # When True, extra diagnostic info is logged (useful for troubleshooting).
     "debug": False,
-
     # Which back button triggers the Read Screen pipeline without opening the UI.
     # Options: "disabled" (no button trigger), "L4", "R4", "L5", "R5".
     "trigger_button": "L4",
-
     # How long the trigger button must be held before the pipeline fires (ms).
     # Range: 300-1500ms. Higher values prevent accidental triggers.
     "hold_time_ms": 500,
-
     # Phase 29 — Touch input toggle. When True, the touchscreen monitor is
     # started and touch gestures (swipe or two-tap) can trigger OCR capture.
     "touch_input_enabled": False,
-
     # Phase 29 — Touch input gesture style: "two_tap" (tap two corners) or
     # "swipe" (drag to select region). Only used when touch_input_enabled is True.
     "touch_input_style": "two_tap",
-
     # Phase 10 — When True, skip playing UI feedback sounds (Phase 11).
     "mute_interface_sounds": False,
-
     # Phase 23 — When True, hide on-screen toast overlay with pipeline status.
     "hide_pipeline_toast": False,
-
     # Phase 10 — Fixed region coordinates for Phase 12 Fixed Region mode.
     # Defines a persistent bounding box the user can configure manually.
     # Defaults to full screen (0,0)-(1280,800).
@@ -322,7 +312,6 @@ DEFAULT_SETTINGS = {
     "fixed_region_y1": 0,
     "fixed_region_x2": 1280,
     "fixed_region_y2": 800,
-
     # Phase 10 — Last selection coordinates, auto-saved by swipe/two-tap
     # modes in Phase 12. Can be applied to fixed_region via a UI button.
     # Defaults to full screen (0,0)-(1280,800).
@@ -330,7 +319,6 @@ DEFAULT_SETTINGS = {
     "last_selection_y1": 0,
     "last_selection_x2": 1280,
     "last_selection_y2": 800,
-
     # Phase 10 — Text filtering for Phase 13. Comma-separated word lists
     # that are stripped from OCR output before TTS.
     "ignored_words_always": "",
@@ -338,13 +326,11 @@ DEFAULT_SETTINGS = {
     "ignored_words_beginning": "",
     "ignored_words_beginning_enabled": False,
     "ignored_words_count": 3,
-
     # Phase 26/32 — Translation pipeline. When enabled, OCR text is translated
     # to the target language before text filtering and TTS via free Google
     # Translate (unofficial translate.googleapis.com endpoint, no credentials).
     "translation_enabled": False,
     "translation_target_language": "en",
-
     # Phase 27 — When True, replace the "N words read" pill toast with a
     # full-text overlay showing the spoken text and scanned region border.
     # Only affects "success" status — other statuses use the standard pill toast.
@@ -373,6 +359,7 @@ REQUIRED_GCP_FIELDS = [
 #
 # Pattern borrowed from Decky-Translator's SettingsManager (main.py:519-555).
 # =============================================================================
+
 
 class SettingsManager:
     def __init__(self, name, settings_directory):
@@ -442,6 +429,7 @@ class SettingsManager:
 # Plugin class — the main Decky plugin backend
 # =============================================================================
 
+
 class Plugin:
 
     # =========================================================================
@@ -476,22 +464,22 @@ class Plugin:
         # path to the temp MP3 file it's playing. Used by _start_playback()
         # and _stop_playback() to manage audio lifecycle.
         self._playback_process = None  # subprocess.Popen object or None
-        self._tts_temp_path = None     # path to current MP3 temp file
+        self._tts_temp_path = None  # path to current MP3 temp file
 
         # Pipeline state: tracks the end-to-end Read Screen pipeline
         # (capture → OCR → TTS → playback). These fields let the frontend
         # poll progress and let stop_pipeline() cancel between steps.
-        self._pipeline_step = "idle"              # Current step: idle/capturing/ocr/tts/playing/cancelled
+        self._pipeline_step = "idle"  # Current step: idle/capturing/ocr/tts/playing/cancelled
         self._pipeline_cancel = threading.Event()  # Thread-safe cancellation flag
-        self._pipeline_running = False             # Prevents concurrent pipelines
+        self._pipeline_running = False  # Prevents concurrent pipelines
 
         # Phase 12: Capture mode state machine. All capture state is accessed
         # only from the event loop thread (via run_coroutine_threadsafe and
         # call_later) — no lock needed.
-        self._capture_state = "idle"              # "idle" | "waiting_second_tap"
-        self._first_tap_x = 0                     # First tap X for two-tap mode
-        self._first_tap_y = 0                     # First tap Y for two-tap mode
-        self._two_tap_timer = None                # asyncio TimerHandle for 5s timeout
+        self._capture_state = "idle"  # "idle" | "waiting_second_tap"
+        self._first_tap_x = 0  # First tap X for two-tap mode
+        self._first_tap_y = 0  # First tap Y for two-tap mode
+        self._two_tap_timer = None  # asyncio TimerHandle for 5s timeout
         self._touch_started_during_playback = False  # Prevents post-stop capture
 
         # Phase 27: Trigger cooldown — prevents accidental double-taps from
@@ -519,11 +507,11 @@ class Plugin:
         # Phase 23: Pipeline toast state — lightweight status read by the frontend
         # toast overlay. Seq increments each pipeline run so the frontend can detect
         # new runs. Status tracks the outcome for display and auto-dismiss timing.
-        self._pipeline_toast_seq = 0          # Increments each pipeline run
+        self._pipeline_toast_seq = 0  # Increments each pipeline run
         self._pipeline_toast_status = "idle"  # idle|running|success|no_text|error|cancelled
-        self._pipeline_toast_message = ""     # Short human-readable message
-        self._pipeline_toast_word_count = 0   # Words detected by OCR
-        self._pipeline_toast_text = ""           # Phase 27: final OCR/translated text for overlay
+        self._pipeline_toast_message = ""  # Short human-readable message
+        self._pipeline_toast_word_count = 0  # Words detected by OCR
+        self._pipeline_toast_text = ""  # Phase 27: final OCR/translated text for overlay
         self._pipeline_toast_crop_region = None  # Phase 27: crop region dict or None (full screen)
 
         # Persistent GCP worker subprocess state.
@@ -532,14 +520,14 @@ class Plugin:
         # a single gcp_worker.py process alive in "serve" mode. It initializes
         # GCP clients once at startup and reuses them for every request.
         # Communication is via stdin/stdout JSON lines.
-        self._worker_process = None              # subprocess.Popen or None
-        self._worker_lock = threading.Lock()     # Serializes stdin/stdout access
-        self._worker_stderr_thread = None        # Daemon thread draining stderr
+        self._worker_process = None  # subprocess.Popen or None
+        self._worker_lock = threading.Lock()  # Serializes stdin/stdout access
+        self._worker_stderr_thread = None  # Daemon thread draining stderr
 
         # Persistent LOCAL worker subprocess state (mirrors GCP worker above).
         # Runs local_worker.py under the bundled Python 3.12 interpreter.
         # Uses RapidOCR + Piper TTS for offline inference.
-        self._local_worker_process = None        # subprocess.Popen or None
+        self._local_worker_process = None  # subprocess.Popen or None
         self._local_worker_lock = threading.Lock()
         self._local_worker_stderr_thread = None
 
@@ -703,7 +691,9 @@ class Plugin:
                 break
 
         if not self._audio_player_path:
-            decky.logger.warning(f"{LOG} no audio player found (tried mpv, ffplay, pw-play) — TTS playback will not work")
+            decky.logger.warning(
+                f"{LOG} no audio player found (tried mpv, ffplay, pw-play) — TTS playback will not work"
+            )
 
         # -----------------------------------------------------------------
         # Capture the event loop for cross-thread async dispatch
@@ -751,7 +741,9 @@ class Plugin:
         # the trigger button.
         self._touchscreen_monitor = None
         self._sync_touchscreen()
-        decky.logger.info(f"{LOG} touchscreen monitor synced for touch_input_enabled={self.settings.get('touch_input_enabled', False)}")
+        decky.logger.info(
+            f"{LOG} touchscreen monitor synced for touch_input_enabled={self.settings.get('touch_input_enabled', False)}"
+        )
 
     # =========================================================================
     # Button trigger: _on_button_trigger() / _handle_button_trigger()
@@ -769,9 +761,7 @@ class Plugin:
         run_coroutine_threadsafe() which is the standard way to call async
         code from a non-async thread.
         """
-        asyncio.run_coroutine_threadsafe(
-            self._handle_button_trigger(), self._event_loop
-        )
+        asyncio.run_coroutine_threadsafe(self._handle_button_trigger(), self._event_loop)
 
     @property
     def _is_enabled(self):
@@ -824,7 +814,7 @@ class Plugin:
         ocr_provider = self.settings.get("ocr_provider", DEFAULT_SETTINGS["ocr_provider"])
         tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
 
-        needs_gcp_creds = (ocr_provider == "gcp" or tts_provider == "gcp")
+        needs_gcp_creds = ocr_provider == "gcp" or tts_provider == "gcp"
         if needs_gcp_creds:
             creds_b64 = self.settings.get("gcp_credentials_base64", "")
             if not creds_b64:
@@ -833,7 +823,9 @@ class Plugin:
 
         if ocr_provider == "local" or tts_provider == "local":
             if not self._local_python_path:
-                decky.logger.debug(f"{LOG} button trigger: local provider selected but bundled Python unavailable, ignoring")
+                decky.logger.debug(
+                    f"{LOG} button trigger: local provider selected but bundled Python unavailable, ignoring"
+                )
                 return
 
         # Always capture fixed region (defaults to full screen 0,0,1280,800)
@@ -857,9 +849,7 @@ class Plugin:
         # Suppress touch gestures while keyboard, modal, or QAM is open
         if self._keyboard_visible or self._modal_visible or self._qam_visible:
             return
-        asyncio.run_coroutine_threadsafe(
-            self._handle_touch_down(x, y), self._event_loop
-        )
+        asyncio.run_coroutine_threadsafe(self._handle_touch_down(x, y), self._event_loop)
 
     def _on_touch_up(self, end_x, end_y, start_x, start_y, duration):
         """From monitor thread: finger lifted. Provides start/end coords + duration."""
@@ -880,9 +870,7 @@ class Plugin:
         # Suppress touch gestures while keyboard, modal, or QAM is open
         if self._keyboard_visible or self._modal_visible or self._qam_visible:
             return
-        asyncio.run_coroutine_threadsafe(
-            self._handle_touch_tap(x, y), self._event_loop
-        )
+        asyncio.run_coroutine_threadsafe(self._handle_touch_tap(x, y), self._event_loop)
 
     # =========================================================================
     # Phase 12: Async touch handlers (run on event loop)
@@ -926,8 +914,7 @@ class Plugin:
         """
         style = self.settings.get("touch_input_style", "two_tap")
         decky.logger.debug(
-            f"{LOG} touch_up: start=({start_x},{start_y}) end=({end_x},{end_y}) "
-            f"dur={duration:.2f}s style={style}"
+            f"{LOG} touch_up: start=({start_x},{start_y}) end=({end_x},{end_y}) " f"dur={duration:.2f}s style={style}"
         )
 
         # Guard: trigger cooldown — if touch_down was ignored by cooldown,
@@ -955,9 +942,7 @@ class Plugin:
 
             # Check minimum selection size (50x50 pixels)
             if (x2 - x1) < 50 or (y2 - y1) < 50:
-                decky.logger.debug(
-                    f"{LOG} swipe too small: {x2 - x1}x{y2 - y1}, ignoring"
-                )
+                decky.logger.debug(f"{LOG} swipe too small: {x2 - x1}x{y2 - y1}, ignoring")
                 return
 
             # Save selection coordinates for Fixed Region / Hybrid modes
@@ -1007,9 +992,7 @@ class Plugin:
                 self._first_tap_y = y
                 self._capture_state = "waiting_second_tap"
                 # Start 5-second timeout via event loop
-                self._two_tap_timer = self._event_loop.call_later(
-                    5.0, self._two_tap_timeout
-                )
+                self._two_tap_timer = self._event_loop.call_later(5.0, self._two_tap_timeout)
                 decky.logger.info(f"{LOG} two-tap: first tap at ({x},{y}), waiting for second...")
 
             elif self._capture_state == "waiting_second_tap":
@@ -1027,9 +1010,7 @@ class Plugin:
 
                 # Check minimum selection size (50x50 pixels) — same as swipe
                 if (x2 - x1) < 50 or (y2 - y1) < 50:
-                    decky.logger.debug(
-                        f"{LOG} two-tap too small: {x2 - x1}x{y2 - y1}, ignoring"
-                    )
+                    decky.logger.debug(f"{LOG} two-tap too small: {x2 - x1}x{y2 - y1}, ignoring")
                     self._play_interface_sound("stop")
                     return
 
@@ -1076,9 +1057,9 @@ class Plugin:
         self._pipeline_toast_text = ""
         hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
         show_overlay = self.settings.get("show_text_overlay", DEFAULT_SETTINGS["show_text_overlay"])
-        await decky.emit("pipeline_toast",
-            self._pipeline_toast_seq, "cancelled", "Stopped", 0, hide_toast,
-            "", None, show_overlay)
+        await decky.emit(
+            "pipeline_toast", self._pipeline_toast_seq, "cancelled", "Stopped", 0, hide_toast, "", None, show_overlay
+        )
 
     def _get_fixed_region_crop(self):
         """
@@ -1273,9 +1254,7 @@ class Plugin:
         full_cmd = cmd + [f"location={tmp_path}"]
 
         try:
-            decky.logger.info(
-                f"{LOG} capturing screenshot via {capture_method} to {tmp_path}"
-            )
+            decky.logger.info(f"{LOG} capturing screenshot via {capture_method} to {tmp_path}")
             decky.logger.debug(f"{LOG} capture command: {' '.join(full_cmd)}")
 
             result = subprocess.run(
@@ -1288,8 +1267,7 @@ class Plugin:
             if result.returncode != 0:
                 stderr = result.stderr.decode("utf-8", errors="replace").strip()
                 decky.logger.error(
-                    f"{LOG} gst-launch ({capture_method}) failed "
-                    f"(code {result.returncode}): {stderr}"
+                    f"{LOG} gst-launch ({capture_method}) failed " f"(code {result.returncode}): {stderr}"
                 )
                 return {
                     "success": False,
@@ -1318,9 +1296,7 @@ class Plugin:
             with open(tmp_path, "rb") as f:
                 image_bytes = f.read()
 
-            decky.logger.info(
-                f"{LOG} screenshot captured via {capture_method}: {file_size} bytes"
-            )
+            decky.logger.info(f"{LOG} screenshot captured via {capture_method}: {file_size} bytes")
             return {
                 "success": True,
                 "image_bytes": image_bytes,
@@ -1386,44 +1362,50 @@ class Plugin:
             # use-damage=false  — capture full frame, not just changed regions
             # num-buffers=1     — single frame, instant capture
             cmd = [
-                gst_path, "-e",
+                gst_path,
+                "-e",
                 "ximagesrc",
-                f"display-name=:1",
+                "display-name=:1",
                 f"xid={game_xid}",
                 "show-pointer=false",
                 "use-damage=false",
                 "num-buffers=1",
-                "!", "videoconvert",
-                "!", "pngenc", "snapshot=true",
-                "!", "filesink",
+                "!",
+                "videoconvert",
+                "!",
+                "pngenc",
+                "snapshot=true",
+                "!",
+                "filesink",
             ]
             env = os.environ.copy()
             env["DISPLAY"] = ":1"
 
-            capture_result = self._run_gst_capture(
-                gst_path, cmd, env, "ximagesrc"
-            )
+            capture_result = self._run_gst_capture(gst_path, cmd, env, "ximagesrc")
             if capture_result["success"]:
                 return capture_result
 
             # ximagesrc failed — the XID may belong to Steam UI on :0
             # (e.g. when on the Game Mode home screen, not inside a game).
-            decky.logger.warning(
-                f"{LOG} ximagesrc failed, falling back to pipewiresrc"
-            )
+            decky.logger.warning(f"{LOG} ximagesrc failed, falling back to pipewiresrc")
 
         # FALLBACK: pipewiresrc — composited output (may include overlay).
         # Used when: no game XID found, or ximagesrc failed (BadWindow, etc.).
         if game_xid is None:
-            decky.logger.warning(
-                f"{LOG} no game window XID found, using pipewiresrc"
-            )
+            decky.logger.warning(f"{LOG} no game window XID found, using pipewiresrc")
         cmd = [
-            gst_path, "-e",
-            "pipewiresrc", "do-timestamp=true", "num-buffers=5",
-            "!", "videoconvert",
-            "!", "pngenc", "snapshot=true",
-            "!", "filesink",
+            gst_path,
+            "-e",
+            "pipewiresrc",
+            "do-timestamp=true",
+            "num-buffers=5",
+            "!",
+            "videoconvert",
+            "!",
+            "pngenc",
+            "snapshot=true",
+            "!",
+            "filesink",
         ]
         # PipeWire needs XDG_RUNTIME_DIR for its socket and
         # XDG_SESSION_TYPE=wayland for Gamescope's composited output.
@@ -1910,7 +1892,11 @@ class Plugin:
         except Exception as e:
             decky.logger.error(f"{LOG} local worker: error stopping: {e}")
         finally:
-            for pipe in (self._local_worker_process.stdin, self._local_worker_process.stdout, self._local_worker_process.stderr):
+            for pipe in (
+                self._local_worker_process.stdin,
+                self._local_worker_process.stdout,
+                self._local_worker_process.stderr,
+            ):
                 try:
                     if pipe:
                         pipe.close()
@@ -2045,13 +2031,15 @@ class Plugin:
         sl = source_language or "auto"
 
         # Build the URL with properly encoded query text
-        params = urllib.parse.urlencode({
-            "client": "gtx",
-            "sl": sl,
-            "tl": target_language,
-            "dt": "t",
-            "q": text,
-        })
+        params = urllib.parse.urlencode(
+            {
+                "client": "gtx",
+                "sl": sl,
+                "tl": target_language,
+                "dt": "t",
+                "q": text,
+            }
+        )
         url = f"https://translate.googleapis.com/translate_a/single?{params}"
 
         # Build a clean environment for curl — strip PyInstaller's LD_LIBRARY_PATH
@@ -2064,11 +2052,15 @@ class Plugin:
         try:
             result = subprocess.run(
                 [
-                    "curl", "-s", "-f",
-                    "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "curl",
+                    "-s",
+                    "-f",
+                    "-H",
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     url,
                 ],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 timeout=TRANSLATE_TIMEOUT,
                 env=curl_env,
             )
@@ -2130,8 +2122,8 @@ class Plugin:
                 ignore_words = [w.strip() for w in words_str.split(",") if w.strip()]
                 for word in ignore_words:
                     # \b = word boundary, re.escape handles special chars in the word
-                    pattern = re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE)
-                    text = pattern.sub('', text)
+                    pattern = re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE)
+                    text = pattern.sub("", text)
 
         # --- "Beginning" filter: remove words from first N tokens ---
         if self.settings.get("ignored_words_beginning_enabled", False):
@@ -2143,18 +2135,15 @@ class Plugin:
                 check_count = min(count, len(tokens))
                 # Strip trailing punctuation before comparison so "Chapter:" matches "Chapter"
                 filtered_start = [
-                    t for t in tokens[:check_count]
-                    if t.rstrip(string.punctuation).lower() not in ignore_set
+                    t for t in tokens[:check_count] if t.rstrip(string.punctuation).lower() not in ignore_set
                 ]
-                text = ' '.join(filtered_start + tokens[check_count:])
+                text = " ".join(filtered_start + tokens[check_count:])
 
         # Clean up multiple spaces left by word removals
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
 
         if text != original:
-            decky.logger.debug(
-                f"{LOG} text filter: {len(original)}→{len(text)} chars"
-            )
+            decky.logger.debug(f"{LOG} text filter: {len(original)}→{len(text)} chars")
 
         return text
 
@@ -2205,8 +2194,8 @@ class Plugin:
         if player == "mpv":
             cmd = [
                 self._audio_player_path,
-                "--no-video",          # Audio only, no video window
-                "--really-quiet",      # Suppress all output
+                "--no-video",  # Audio only, no video window
+                "--really-quiet",  # Suppress all output
                 f"--volume={volume}",  # Volume 0-100
                 audio_path,
             ]
@@ -2215,10 +2204,12 @@ class Plugin:
             # -autoexit makes ffplay quit when the file ends (otherwise it hangs).
             cmd = [
                 self._audio_player_path,
-                "-nodisp",             # No video display window
-                "-autoexit",           # Exit when playback finishes
-                "-loglevel", "quiet",  # Suppress all output
-                "-volume", str(volume),
+                "-nodisp",  # No video display window
+                "-autoexit",  # Exit when playback finishes
+                "-loglevel",
+                "quiet",  # Suppress all output
+                "-volume",
+                str(volume),
                 audio_path,
             ]
         elif player == "pw-play":
@@ -2311,9 +2302,7 @@ class Plugin:
             # case, so emitting here would race and wipe the "Stopped" pill.
             if proc.returncode == 0:
                 try:
-                    asyncio.run_coroutine_threadsafe(
-                        decky.emit("pipeline_toast_dismiss"), self._event_loop
-                    )
+                    asyncio.run_coroutine_threadsafe(decky.emit("pipeline_toast_dismiss"), self._event_loop)
                 except Exception:
                     pass  # best-effort — overlay has a safety-net timeout anyway
 
@@ -2445,8 +2434,10 @@ class Plugin:
                 self._audio_player_path,
                 "-nodisp",
                 "-autoexit",
-                "-loglevel", "quiet",
-                "-volume", str(volume),
+                "-loglevel",
+                "quiet",
+                "-volume",
+                str(volume),
                 audio_path,
             ]
         elif player == "pw-play":
@@ -2518,14 +2509,20 @@ class Plugin:
             creds_b64 = self.settings.get("gcp_credentials_base64", "")
             if not creds_b64:
                 return {
-                    "success": False, "text": "", "char_count": 0,
-                    "line_count": 0, "message": "GCP credentials not configured",
+                    "success": False,
+                    "text": "",
+                    "char_count": 0,
+                    "line_count": 0,
+                    "message": "GCP credentials not configured",
                 }
         else:
             if not self._local_python_path:
                 return {
-                    "success": False, "text": "", "char_count": 0,
-                    "line_count": 0, "message": "Local OCR unavailable (bundled Python not found)",
+                    "success": False,
+                    "text": "",
+                    "char_count": 0,
+                    "line_count": 0,
+                    "message": "Local OCR unavailable (bundled Python not found)",
                 }
 
         # Step 2: Capture a fresh screenshot
@@ -2651,7 +2648,11 @@ class Plugin:
                 return {"success": False, "message": "GCP credentials not configured", "audio_size": 0}
         else:
             if not self._local_python_path:
-                return {"success": False, "message": "Local TTS unavailable (bundled Python not found)", "audio_size": 0}
+                return {
+                    "success": False,
+                    "message": "Local TTS unavailable (bundled Python not found)",
+                    "audio_size": 0,
+                }
 
         # Step 2: Validate text
         if not text or not text.strip():
@@ -2670,9 +2671,15 @@ class Plugin:
                 decky.logger.info(f"{LOG} TTS pipeline: voice '{voice_id}' not downloaded, downloading...")
                 dl_result = self._download_voice_sync(voice_id)
                 if not dl_result["success"]:
-                    return {"success": False, "message": f"Voice download failed: {dl_result['message']}", "audio_size": 0}
+                    return {
+                        "success": False,
+                        "message": f"Voice download failed: {dl_result['message']}",
+                        "audio_size": 0,
+                    }
 
-        decky.logger.info(f"{LOG} TTS pipeline ({tts_provider}): {len(text):,} chars, voice={voice_id}, rate={speech_rate}")
+        decky.logger.info(
+            f"{LOG} TTS pipeline ({tts_provider}): {len(text):,} chars, voice={voice_id}, rate={speech_rate}"
+        )
 
         # Step 4: Create a temp file for the audio output.
         # GCP produces MP3, local (Piper) produces WAV.
@@ -2790,8 +2797,8 @@ class Plugin:
             The `text` field is populated even on TTS failure so the frontend
             can display OCR results regardless.
         """
-        ocr_tmp_path = None   # Temp file for the screenshot PNG
-        tts_tmp_path = None   # Temp file for the synthesized audio
+        ocr_tmp_path = None  # Temp file for the screenshot PNG
+        tts_tmp_path = None  # Temp file for the synthesized audio
         playback_started = False
 
         # Timing: track each step to identify bottlenecks
@@ -2803,14 +2810,16 @@ class Plugin:
             tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
 
             # Check GCP credentials if any provider needs them
-            needs_gcp_creds = (ocr_provider == "gcp" or tts_provider == "gcp")
+            needs_gcp_creds = ocr_provider == "gcp" or tts_provider == "gcp"
             if needs_gcp_creds:
                 creds_b64 = self.settings.get("gcp_credentials_base64", "")
                 if not creds_b64:
                     return {
                         "success": False,
                         "message": "GCP credentials not configured",
-                        "step": "idle", "text": "", "audio_size": 0,
+                        "step": "idle",
+                        "text": "",
+                        "audio_size": 0,
                     }
 
             # Check local availability if any provider needs it
@@ -2819,12 +2828,20 @@ class Plugin:
                     return {
                         "success": False,
                         "message": "Local inference unavailable (bundled Python not found)",
-                        "step": "idle", "text": "", "audio_size": 0,
+                        "step": "idle",
+                        "text": "",
+                        "audio_size": 0,
                     }
 
             # ----- Step 1: Capture screenshot -----
             if self._pipeline_cancel.is_set():
-                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+                return {
+                    "success": False,
+                    "message": "Pipeline cancelled",
+                    "step": "cancelled",
+                    "text": "",
+                    "audio_size": 0,
+                }
 
             self._pipeline_step = "capturing"
             t_step = time.monotonic()
@@ -2835,7 +2852,9 @@ class Plugin:
                 return {
                     "success": False,
                     "message": f"Capture failed: {capture_result['error']}",
-                    "step": "capturing", "text": "", "audio_size": 0,
+                    "step": "capturing",
+                    "text": "",
+                    "audio_size": 0,
                 }
 
             image_bytes = capture_result["image_bytes"]
@@ -2844,7 +2863,13 @@ class Plugin:
 
             # ----- Step 2: OCR + TTS -----
             if self._pipeline_cancel.is_set():
-                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+                return {
+                    "success": False,
+                    "message": "Pipeline cancelled",
+                    "step": "cancelled",
+                    "text": "",
+                    "audio_size": 0,
+                }
 
             self._pipeline_step = "ocr"
             t_step = time.monotonic()
@@ -2870,7 +2895,13 @@ class Plugin:
                 # Auto-download voice if not yet present (on-demand download)
                 if not self._is_voice_downloaded(voice_id):
                     if self._pipeline_cancel.is_set():
-                        return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+                        return {
+                            "success": False,
+                            "message": "Pipeline cancelled",
+                            "step": "cancelled",
+                            "text": "",
+                            "audio_size": 0,
+                        }
 
                     self._pipeline_step = "downloading"
                     decky.logger.info(f"{LOG} pipeline: voice '{voice_id}' not downloaded, downloading...")
@@ -2879,7 +2910,9 @@ class Plugin:
                         return {
                             "success": False,
                             "message": f"Voice download failed: {dl_result['message']}",
-                            "step": "downloading", "text": "", "audio_size": 0,
+                            "step": "downloading",
+                            "text": "",
+                            "audio_size": 0,
                         }
                     decky.logger.info(f"{LOG} pipeline: voice downloaded, continuing...")
 
@@ -2889,25 +2922,34 @@ class Plugin:
 
             if ocr_provider == "local" and not self._is_ocr_language_downloaded(ocr_language):
                 if self._pipeline_cancel.is_set():
-                    return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": "", "audio_size": 0}
+                    return {
+                        "success": False,
+                        "message": "Pipeline cancelled",
+                        "step": "cancelled",
+                        "text": "",
+                        "audio_size": 0,
+                    }
 
                 self._pipeline_step = "downloading"
-                decky.logger.info(f"{LOG} pipeline: OCR language '{ocr_language}' rec model not downloaded, downloading...")
+                decky.logger.info(
+                    f"{LOG} pipeline: OCR language '{ocr_language}' rec model not downloaded, downloading..."
+                )
                 dl_result = self._download_ocr_language_sync(ocr_language)
                 if not dl_result["success"]:
                     return {
                         "success": False,
                         "message": f"OCR model download failed: {dl_result['message']}",
-                        "step": "downloading", "text": "", "audio_size": 0,
+                        "step": "downloading",
+                        "text": "",
+                        "audio_size": 0,
                     }
                 decky.logger.info(f"{LOG} pipeline: OCR rec model downloaded, continuing...")
 
             # Phase 14: check if text filtering is active — when it is, we must
             # split OCR and TTS into separate steps even for the same provider,
             # because filtering needs to modify the text between OCR and TTS.
-            filtering_active = (
-                self.settings.get("ignored_words_always_enabled", False) or
-                self.settings.get("ignored_words_beginning_enabled", False)
+            filtering_active = self.settings.get("ignored_words_always_enabled", False) or self.settings.get(
+                "ignored_words_beginning_enabled", False
             )
 
             # Phase 26/32: check if translation is active. When active, we must
@@ -2940,7 +2982,9 @@ class Plugin:
                     return {
                         "success": False,
                         "message": f"OCR+TTS failed: {result.get('message', 'Unknown error')}",
-                        "step": "ocr", "text": "", "audio_size": 0,
+                        "step": "ocr",
+                        "text": "",
+                        "audio_size": 0,
                     }
 
                 ocr_text = result.get("text", "")
@@ -2956,8 +3000,10 @@ class Plugin:
                     split_reasons.append("filtering")
                 if translation_active:
                     split_reasons.append("translation")
-                decky.logger.info(f"{LOG} pipeline: running OCR ({ocr_provider}) then TTS ({tts_provider})"
-                                  f" [{', '.join(split_reasons)}]...")
+                decky.logger.info(
+                    f"{LOG} pipeline: running OCR ({ocr_provider}) then TTS ({tts_provider})"
+                    f" [{', '.join(split_reasons)}]..."
+                )
 
                 # OCR step — include crop_region if specified (Phase 12)
                 ocr_cmd = {"action": "ocr", "image_path": ocr_tmp_path, "ocr_language": ocr_language}
@@ -2965,14 +3011,17 @@ class Plugin:
                     ocr_cmd["crop_region"] = crop_region
                 ocr_result = self._send_command(
                     ocr_cmd,
-                    provider=ocr_provider, timeout=OCR_TIMEOUT,
+                    provider=ocr_provider,
+                    timeout=OCR_TIMEOUT,
                 )
 
                 if not ocr_result.get("success", False):
                     return {
                         "success": False,
                         "message": f"OCR failed: {ocr_result.get('message', 'Unknown error')}",
-                        "step": "ocr", "text": "", "audio_size": 0,
+                        "step": "ocr",
+                        "text": "",
+                        "audio_size": 0,
                     }
 
                 ocr_text = ocr_result.get("text", "")
@@ -2982,24 +3031,32 @@ class Plugin:
                 # Uses free Google Translate via curl subprocess (no credentials).
                 if translation_active and ocr_text.strip():
                     if self._pipeline_cancel.is_set():
-                        return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": 0}
+                        return {
+                            "success": False,
+                            "message": "Pipeline cancelled",
+                            "step": "cancelled",
+                            "text": ocr_text,
+                            "audio_size": 0,
+                        }
 
                     self._pipeline_step = "translating"
                     target_lang = self.settings.get("translation_target_language", "en")
                     source_lang = TRANSLATION_SOURCE_LANGUAGE.get(ocr_language)
 
-                    decky.logger.info(f"{LOG} pipeline: translating {len(ocr_text):,} chars "
-                                      f"({source_lang or 'auto'} → {target_lang})...")
-
-                    translate_result = self._free_translate(
-                        ocr_text, target_lang, source_lang
+                    decky.logger.info(
+                        f"{LOG} pipeline: translating {len(ocr_text):,} chars "
+                        f"({source_lang or 'auto'} → {target_lang})..."
                     )
+
+                    translate_result = self._free_translate(ocr_text, target_lang, source_lang)
 
                     if not translate_result.get("success", False):
                         return {
                             "success": False,
                             "message": f"Translation failed: {translate_result.get('message', 'Unknown error')}",
-                            "step": "translating", "text": ocr_text, "audio_size": 0,
+                            "step": "translating",
+                            "text": ocr_text,
+                            "audio_size": 0,
                         }
 
                     ocr_text = translate_result.get("text", ocr_text)
@@ -3012,13 +3069,22 @@ class Plugin:
                     t_ocr_tts = time.monotonic() - t_step
                     decky.logger.info(f"{LOG} pipeline: no text detected [{t_ocr_tts:.2f}s]")
                     return {
-                        "success": False, "message": "No text detected on screen",
-                        "step": "ocr", "text": "", "audio_size": 0,
+                        "success": False,
+                        "message": "No text detected on screen",
+                        "step": "ocr",
+                        "text": "",
+                        "audio_size": 0,
                     }
 
                 # Check cancellation before TTS
                 if self._pipeline_cancel.is_set():
-                    return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": 0}
+                    return {
+                        "success": False,
+                        "message": "Pipeline cancelled",
+                        "step": "cancelled",
+                        "text": ocr_text,
+                        "audio_size": 0,
+                    }
 
                 self._pipeline_step = "tts"
 
@@ -3041,7 +3107,9 @@ class Plugin:
                     return {
                         "success": False,
                         "message": f"TTS failed: {tts_result.get('message', 'Unknown error')}",
-                        "step": "tts", "text": ocr_text, "audio_size": 0,
+                        "step": "tts",
+                        "text": ocr_text,
+                        "audio_size": 0,
                     }
 
                 audio_size = tts_result.get("audio_size", 0)
@@ -3052,12 +3120,13 @@ class Plugin:
                 return {
                     "success": False,
                     "message": "No text detected on screen",
-                    "step": "ocr", "text": "", "audio_size": 0,
+                    "step": "ocr",
+                    "text": "",
+                    "audio_size": 0,
                 }
 
             decky.logger.info(
-                f"{LOG} pipeline: OCR+TTS complete: {char_count} chars, "
-                f"{audio_size:,} bytes [{t_ocr_tts:.2f}s]"
+                f"{LOG} pipeline: OCR+TTS complete: {char_count} chars, " f"{audio_size:,} bytes [{t_ocr_tts:.2f}s]"
             )
 
             # Verify audio file exists and is non-empty
@@ -3065,12 +3134,20 @@ class Plugin:
                 return {
                     "success": False,
                     "message": "TTS produced empty audio file",
-                    "step": "tts", "text": ocr_text, "audio_size": 0,
+                    "step": "tts",
+                    "text": ocr_text,
+                    "audio_size": 0,
                 }
 
             # ----- Step 3: Playback -----
             if self._pipeline_cancel.is_set():
-                return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": audio_size}
+                return {
+                    "success": False,
+                    "message": "Pipeline cancelled",
+                    "step": "cancelled",
+                    "text": ocr_text,
+                    "audio_size": audio_size,
+                }
 
             self._pipeline_step = "playing"
             playback_started = self._start_playback(tts_tmp_path)
@@ -3084,13 +3161,17 @@ class Plugin:
                 return {
                     "success": True,
                     "message": f"Playing: {char_count} chars, {audio_size:,} bytes ({t_total:.1f}s)",
-                    "step": "playing", "text": ocr_text, "audio_size": audio_size,
+                    "step": "playing",
+                    "text": ocr_text,
+                    "audio_size": audio_size,
                 }
             else:
                 return {
                     "success": False,
                     "message": "Audio playback failed to start (no audio player found?)",
-                    "step": "playing", "text": ocr_text, "audio_size": audio_size,
+                    "step": "playing",
+                    "text": ocr_text,
+                    "audio_size": audio_size,
                 }
 
         except Exception as e:
@@ -3173,9 +3254,17 @@ class Plugin:
         self._pipeline_toast_crop_region = crop_region
         hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
         show_overlay = self.settings.get("show_text_overlay", DEFAULT_SETTINGS["show_text_overlay"])
-        await decky.emit("pipeline_toast",
-            self._pipeline_toast_seq, "running", "Reading...", 0, hide_toast,
-            "", crop_region, show_overlay)
+        await decky.emit(
+            "pipeline_toast",
+            self._pipeline_toast_seq,
+            "running",
+            "Reading...",
+            0,
+            hide_toast,
+            "",
+            crop_region,
+            show_overlay,
+        )
 
         # Run the blocking pipeline in the thread pool executor
         loop = asyncio.get_event_loop()
@@ -3212,13 +3301,17 @@ class Plugin:
         # user toggled it during the pipeline run)
         hide_toast = self.settings.get("hide_pipeline_toast", DEFAULT_SETTINGS["hide_pipeline_toast"])
         show_overlay = self.settings.get("show_text_overlay", DEFAULT_SETTINGS["show_text_overlay"])
-        await decky.emit("pipeline_toast",
+        await decky.emit(
+            "pipeline_toast",
             self._pipeline_toast_seq,
             self._pipeline_toast_status,
             self._pipeline_toast_message,
             self._pipeline_toast_word_count,
             hide_toast,
-            final_text, crop_region, show_overlay)
+            final_text,
+            crop_region,
+            show_overlay,
+        )
 
         return result
 
@@ -3389,11 +3482,10 @@ class Plugin:
         # have everything they need to function
         ocr_provider = result.get("ocr_provider", "local")
         tts_provider = result.get("tts_provider", "local")
-        needs_gcp = (ocr_provider == "gcp" or tts_provider == "gcp")
+        needs_gcp = ocr_provider == "gcp" or tts_provider == "gcp"
         needs_local = ocr_provider == "local" or tts_provider == "local"
-        result["is_configured"] = (
-            (not needs_gcp or bool(creds_b64))
-            and (not needs_local or self._local_python_path is not None)
+        result["is_configured"] = (not needs_gcp or bool(creds_b64)) and (
+            not needs_local or self._local_python_path is not None
         )
 
         # If credentials are stored, decode them to extract the project_id
@@ -3581,11 +3673,13 @@ class Plugin:
                 except OSError:
                     size = 0
 
-                entries.append({
-                    "name": name,
-                    "is_dir": is_dir,
-                    "size": size,
-                })
+                entries.append(
+                    {
+                        "name": name,
+                        "is_dir": is_dir,
+                        "size": size,
+                    }
+                )
 
             # Sort: directories first (alphabetical), then files (alphabetical).
             # This makes the file browser easier to navigate.
@@ -3653,9 +3747,7 @@ class Plugin:
 
             # Step 3: Validate required GCP service account fields.
             # A valid service account JSON must have all of these fields.
-            missing_fields = [
-                field for field in REQUIRED_GCP_FIELDS if field not in creds
-            ]
+            missing_fields = [field for field in REQUIRED_GCP_FIELDS if field not in creds]
             if missing_fields:
                 return {
                     "valid": False,
@@ -3967,25 +4059,35 @@ class Plugin:
             decky.logger.info(f"{LOG} downloading voice config: {json_url}")
             result = subprocess.run(
                 ["curl", "-L", "-f", "-o", json_tmp, json_url],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 timeout=VOICE_DOWNLOAD_TIMEOUT,
                 env=curl_env,
             )
             if result.returncode != 0:
                 decky.logger.error(f"{LOG} voice config download failed: {result.stderr[:200]}")
-                return {"success": False, "message": "Voice config download failed — check internet connection", "file_size": 0}
+                return {
+                    "success": False,
+                    "message": "Voice config download failed — check internet connection",
+                    "file_size": 0,
+                }
 
             # Download .onnx model (large file, ~63MB)
             decky.logger.info(f"{LOG} downloading voice model: {onnx_url}")
             result = subprocess.run(
                 ["curl", "-L", "-f", "-o", onnx_tmp, onnx_url],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 timeout=VOICE_DOWNLOAD_TIMEOUT,
                 env=curl_env,
             )
             if result.returncode != 0:
                 decky.logger.error(f"{LOG} voice model download failed: {result.stderr[:200]}")
-                return {"success": False, "message": "Voice model download failed — check internet connection", "file_size": 0}
+                return {
+                    "success": False,
+                    "message": "Voice model download failed — check internet connection",
+                    "file_size": 0,
+                }
 
             # Validate downloaded files exist and aren't empty
             if not os.path.exists(onnx_tmp) or os.path.getsize(onnx_tmp) == 0:
@@ -4164,25 +4266,35 @@ class Plugin:
             decky.logger.info(f"{LOG} downloading OCR dict: {dict_url}")
             result = subprocess.run(
                 ["curl", "-L", "-f", "-o", dict_tmp, dict_url],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 timeout=OCR_MODEL_DOWNLOAD_TIMEOUT,
                 env=curl_env,
             )
             if result.returncode != 0:
                 decky.logger.error(f"{LOG} OCR dict download failed: {result.stderr[:200]}")
-                return {"success": False, "message": "OCR dict download failed — check internet connection", "file_size": 0}
+                return {
+                    "success": False,
+                    "message": "OCR dict download failed — check internet connection",
+                    "file_size": 0,
+                }
 
             # Download rec.onnx model (larger file, 8-85MB)
             decky.logger.info(f"{LOG} downloading OCR rec model: {rec_url}")
             result = subprocess.run(
                 ["curl", "-L", "-f", "-o", rec_tmp, rec_url],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 timeout=OCR_MODEL_DOWNLOAD_TIMEOUT,
                 env=curl_env,
             )
             if result.returncode != 0:
                 decky.logger.error(f"{LOG} OCR rec model download failed: {result.stderr[:200]}")
-                return {"success": False, "message": "OCR model download failed — check internet connection", "file_size": 0}
+                return {
+                    "success": False,
+                    "message": "OCR model download failed — check internet connection",
+                    "file_size": 0,
+                }
 
             # Validate downloaded files exist and aren't empty
             if not os.path.exists(rec_tmp) or os.path.getsize(rec_tmp) == 0:
@@ -4284,4 +4396,3 @@ class Plugin:
         lang_dir = os.path.join(self._ocr_models_dir, language_id)
         rec_path = os.path.join(lang_dir, "rec.onnx")
         return os.path.exists(rec_path)
-

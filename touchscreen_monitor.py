@@ -50,13 +50,12 @@
 # independently if needed.
 # =============================================================================
 
-import os
-import struct
 import fcntl
+import os
 import select
-import time
+import struct
 import threading
-
+import time
 
 # =============================================================================
 # Linux input event constants
@@ -67,14 +66,14 @@ import threading
 # evdev package installed.
 
 # Event types
-EV_SYN = 0x00   # Synchronization event (marks end of a group of events)
-EV_ABS = 0x03   # Absolute axis event (touch coordinates, tracking IDs)
+EV_SYN = 0x00  # Synchronization event (marks end of a group of events)
+EV_ABS = 0x03  # Absolute axis event (touch coordinates, tracking IDs)
 
 # Absolute axis codes for multitouch (MT) protocol B
-ABS_MT_SLOT = 0x2F           # MT slot index (which finger)
-ABS_MT_TRACKING_ID = 0x39    # Unique tracking ID per finger (>=0 = touch, -1 = lift)
-ABS_MT_POSITION_X = 0x35     # X coordinate of touch point
-ABS_MT_POSITION_Y = 0x36     # Y coordinate of touch point
+ABS_MT_SLOT = 0x2F  # MT slot index (which finger)
+ABS_MT_TRACKING_ID = 0x39  # Unique tracking ID per finger (>=0 = touch, -1 = lift)
+ABS_MT_POSITION_X = 0x35  # X coordinate of touch point
+ABS_MT_POSITION_Y = 0x36  # Y coordinate of touch point
 
 # Size of struct input_event on x86_64 Linux.
 # Layout: struct timeval (16 bytes) + __u16 type + __u16 code + __s32 value = 24 bytes.
@@ -85,6 +84,7 @@ INPUT_EVENT_FORMAT = "llHHi"  # two longs + unsigned short + unsigned short + si
 # Steam Deck touchscreen device name (as reported in /sys/class/input/*/device/name)
 TOUCHSCREEN_DEVICE_NAME = "FTS3528:00 2808:1015"
 
+
 # EVIOCGABS ioctl — reads struct input_absinfo for an axis.
 # Formula: _IOR('E', 0x40 + axis, struct input_absinfo)
 # struct input_absinfo has 6 x int32 fields = 24 bytes.
@@ -93,19 +93,21 @@ TOUCHSCREEN_DEVICE_NAME = "FTS3528:00 2808:1015"
 # Type field: ord('E') << 8 = 0x4500
 def _eviocgabs(axis):
     """Build the EVIOCGABS ioctl number for a given axis code."""
-    return 0x80000000 | (24 << 16) | (ord('E') << 8) | (0x40 + axis)
+    return 0x80000000 | (24 << 16) | (ord("E") << 8) | (0x40 + axis)
+
 
 # struct input_absinfo format: 6 x signed int32
 ABSINFO_FORMAT = "iiiiii"  # value, min, max, fuzz, flat, resolution
 
 # Steam Deck screen dimensions in landscape mode (logical pixels)
-LOGICAL_WIDTH = 1280   # Horizontal (physical Y axis, the long one)
-LOGICAL_HEIGHT = 800   # Vertical (physical X axis, the short one)
+LOGICAL_WIDTH = 1280  # Horizontal (physical Y axis, the long one)
+LOGICAL_HEIGHT = 800  # Vertical (physical X axis, the short one)
 
 
 # =============================================================================
 # TouchscreenMonitor class
 # =============================================================================
+
 
 class TouchscreenMonitor:
     """
@@ -126,8 +128,7 @@ class TouchscreenMonitor:
     to run async code, use asyncio.run_coroutine_threadsafe() in the callback.
     """
 
-    def __init__(self, on_touch=None, on_touch_down=None, on_touch_up=None,
-                 logger=None, log_prefix="[DCR]"):
+    def __init__(self, on_touch=None, on_touch_down=None, on_touch_up=None, logger=None, log_prefix="[DCR]"):
         """
         Initialize the touchscreen monitor.
 
@@ -148,9 +149,9 @@ class TouchscreenMonitor:
             log_prefix: String prefix for log messages (e.g., "[DCR]").
         """
         # Callbacks
-        self._on_touch = on_touch              # Legacy: short taps only
-        self._on_touch_down = on_touch_down    # Phase 12: finger contact
-        self._on_touch_up = on_touch_up        # Phase 12: finger lift (always)
+        self._on_touch = on_touch  # Legacy: short taps only
+        self._on_touch_down = on_touch_down  # Phase 12: finger contact
+        self._on_touch_up = on_touch_up  # Phase 12: finger lift (always)
 
         # Logging
         self._logger = logger
@@ -162,8 +163,8 @@ class TouchscreenMonitor:
         self._initialized = False
 
         # Physical axis ranges (read from device via ioctl)
-        self._physical_max_x = 0   # Max value for physical X axis (short axis)
-        self._physical_max_y = 0   # Max value for physical Y axis (long axis)
+        self._physical_max_x = 0  # Max value for physical X axis (short axis)
+        self._physical_max_y = 0  # Max value for physical Y axis (long axis)
 
         # Thread state
         self._running = False
@@ -172,18 +173,18 @@ class TouchscreenMonitor:
 
         # Touch tracking state (only accessed from monitor thread, no lock needed)
         # We track slot 0 only (first finger) for Phase 9 simplicity.
-        self._current_slot = 0        # Current MT slot being updated
-        self._touch_active = False    # Whether slot 0 has an active touch
-        self._touch_x = 0             # Current physical X of slot 0
-        self._touch_y = 0             # Current physical Y of slot 0
+        self._current_slot = 0  # Current MT slot being updated
+        self._touch_active = False  # Whether slot 0 has an active touch
+        self._touch_x = 0  # Current physical X of slot 0
+        self._touch_y = 0  # Current physical Y of slot 0
         self._touch_start_time = 0.0  # monotonic timestamp when touch started
 
         # Phase 12: Deferred touch-down state. ABS_MT_TRACKING_ID may arrive
         # before position events in the same SYN_REPORT frame, so we defer
         # firing on_touch_down until SYN_REPORT ensures coordinates are fresh.
         self._touch_down_pending = False  # True = fire on_touch_down at next SYN_REPORT
-        self._touch_start_x = 0          # Physical X at finger contact
-        self._touch_start_y = 0          # Physical Y at finger contact
+        self._touch_start_x = 0  # Physical X at finger contact
+        self._touch_start_y = 0  # Physical Y at finger contact
 
         # Last detected tap in logical coordinates (protected by _lock)
         self._last_touch_logical = None  # dict {x, y} or None
@@ -192,9 +193,9 @@ class TouchscreenMonitor:
         self._error_count = 0
 
         # Timing parameters
-        self._tap_timeout = 0.5        # Max seconds for a touch to count as a tap
+        self._tap_timeout = 0.5  # Max seconds for a touch to count as a tap
         self._cooldown_duration = 0.3  # Seconds to ignore taps after one fires
-        self._cooldown_until = 0.0     # monotonic timestamp — ignore taps until this
+        self._cooldown_until = 0.0  # monotonic timestamp — ignore taps until this
 
     # -------------------------------------------------------------------------
     # Logging helpers
@@ -298,20 +299,21 @@ class TouchscreenMonitor:
             # We need the 'max' field (index 2) for coordinate scaling.
 
             # Read X axis info (ABS_MT_POSITION_X)
-            buf_x = fcntl.ioctl(self._device_fd, _eviocgabs(ABS_MT_POSITION_X),
-                                b'\x00' * struct.calcsize(ABSINFO_FORMAT))
+            buf_x = fcntl.ioctl(
+                self._device_fd, _eviocgabs(ABS_MT_POSITION_X), b"\x00" * struct.calcsize(ABSINFO_FORMAT)
+            )
             absinfo_x = struct.unpack(ABSINFO_FORMAT, buf_x)
             self._physical_max_x = absinfo_x[2]  # max field
 
             # Read Y axis info (ABS_MT_POSITION_Y)
-            buf_y = fcntl.ioctl(self._device_fd, _eviocgabs(ABS_MT_POSITION_Y),
-                                b'\x00' * struct.calcsize(ABSINFO_FORMAT))
+            buf_y = fcntl.ioctl(
+                self._device_fd, _eviocgabs(ABS_MT_POSITION_Y), b"\x00" * struct.calcsize(ABSINFO_FORMAT)
+            )
             absinfo_y = struct.unpack(ABSINFO_FORMAT, buf_y)
             self._physical_max_y = absinfo_y[2]  # max field
 
             self._log_info(
-                f"touch: axis ranges — physical X: 0-{self._physical_max_x}, "
-                f"physical Y: 0-{self._physical_max_y}"
+                f"touch: axis ranges — physical X: 0-{self._physical_max_x}, " f"physical Y: 0-{self._physical_max_y}"
             )
 
             # Sanity check — these should be non-zero
@@ -501,14 +503,12 @@ class TouchscreenMonitor:
                 # Process events in 24-byte chunks
                 offset = 0
                 while offset + INPUT_EVENT_SIZE <= len(data):
-                    chunk = data[offset:offset + INPUT_EVENT_SIZE]
+                    chunk = data[offset : offset + INPUT_EVENT_SIZE]
                     offset += INPUT_EVENT_SIZE
 
                     # Unpack: two longs (timeval) + unsigned short (type) +
                     #          unsigned short (code) + signed int (value)
-                    _tv_sec, _tv_usec, ev_type, ev_code, ev_value = struct.unpack(
-                        INPUT_EVENT_FORMAT, chunk
-                    )
+                    _tv_sec, _tv_usec, ev_type, ev_code, ev_value = struct.unpack(INPUT_EVENT_FORMAT, chunk)
 
                     self._process_event(ev_type, ev_code, ev_value)
 
@@ -616,9 +616,7 @@ class TouchscreenMonitor:
 
             # Fire on_touch_down callback with logical coordinates
             if self._on_touch_down:
-                logical_x, logical_y = self._physical_to_logical(
-                    self._touch_start_x, self._touch_start_y
-                )
+                logical_x, logical_y = self._physical_to_logical(self._touch_start_x, self._touch_start_y)
                 self._log_debug(f"touch: on_touch_down ({logical_x}, {logical_y})")
                 try:
                     self._on_touch_down(logical_x, logical_y)
@@ -638,16 +636,11 @@ class TouchscreenMonitor:
         duration = now - self._touch_start_time
 
         # Compute start position in logical coordinates (recorded at touch-down)
-        start_x, start_y = self._physical_to_logical(
-            self._touch_start_x, self._touch_start_y
-        )
+        start_x, start_y = self._physical_to_logical(self._touch_start_x, self._touch_start_y)
         # Compute end position in logical coordinates (current finger position)
         end_x, end_y = self._physical_to_logical(self._touch_x, self._touch_y)
 
-        self._log_info(
-            f"touch: finger up — start=({start_x},{start_y}) end=({end_x},{end_y}) "
-            f"held={duration:.2f}s"
-        )
+        self._log_info(f"touch: finger up — start=({start_x},{start_y}) end=({end_x},{end_y}) " f"held={duration:.2f}s")
 
         # Phase 12: ALWAYS fire on_touch_up — no duration or cooldown filter.
         # This provides raw touch-up data for swipe detection, two-tap mode, etc.

@@ -15,29 +15,29 @@
 // =============================================================================
 
 import {
-  ButtonItem,       // A clickable button styled for the Steam UI
-  PanelSection,     // A collapsible section in the plugin sidebar panel
-  PanelSectionRow,  // A row within a PanelSection
-  ToggleField,      // A toggle switch with label and description
-  Field,            // Generic field container with label support
-  DropdownItem,     // A dropdown selector for picking from a list of options
-  SliderField,      // A slider for numeric values with min/max/step
-  TextField,        // Text input field — triggers Steam on-screen keyboard on focus
-  showModal,        // Opens a full-screen modal dialog (needed for keyboard focus in QAM)
-  ModalRoot,        // Container for modal content with onCancel/onEscKeypress handlers
-  DialogButton,     // Button styled for modal dialogs (Save/Cancel)
-  Focusable,        // Makes elements gamepad-focusable, supports flow-children layout
-  staticClasses,    // CSS class names for standard Steam UI styling
-  findModuleChild,  // Searches Steam's internal modules for hidden hooks/utilities
-  useQuickAccessVisible // Returns true/false when QAM ("..." menu) opens/closes
+  ButtonItem, // A clickable button styled for the Steam UI
+  PanelSection, // A collapsible section in the plugin sidebar panel
+  PanelSectionRow, // A row within a PanelSection
+  ToggleField, // A toggle switch with label and description
+  Field, // Generic field container with label support
+  DropdownItem, // A dropdown selector for picking from a list of options
+  SliderField, // A slider for numeric values with min/max/step
+  TextField, // Text input field — triggers Steam on-screen keyboard on focus
+  showModal, // Opens a full-screen modal dialog (needed for keyboard focus in QAM)
+  ModalRoot, // Container for modal content with onCancel/onEscKeypress handlers
+  DialogButton, // Button styled for modal dialogs (Save/Cancel)
+  Focusable, // Makes elements gamepad-focusable, supports flow-children layout
+  staticClasses, // CSS class names for standard Steam UI styling
+  findModuleChild, // Searches Steam's internal modules for hidden hooks/utilities
+  useQuickAccessVisible, // Returns true/false when QAM ("..." menu) opens/closes
 } from "@decky/ui";
 
 import {
-  callable,              // Creates a typed function that calls a Python backend method
-  definePlugin,          // Registers this module as a Decky plugin
-  routerHook,            // Global component registration for overlays outside the QAM panel
-  addEventListener,      // Listen for events emitted by the Python backend via decky.emit()
-  removeEventListener    // Unregister an event listener (cleanup on plugin unload)
+  callable, // Creates a typed function that calls a Python backend method
+  definePlugin, // Registers this module as a Decky plugin
+  routerHook, // Global component registration for overlays outside the QAM panel
+  addEventListener, // Listen for events emitted by the Python backend via decky.emit()
+  removeEventListener, // Unregister an event listener (cleanup on plugin unload)
 } from "@decky/api";
 
 import { useState, useEffect, useRef } from "react";
@@ -49,7 +49,6 @@ import { FaBook, FaFolder, FaFileAlt, FaArrowLeft } from "react-icons/fa";
 // Build-time version injected by @rollup/plugin-replace from package.json
 declare const __PLUGIN_VERSION__: string;
 const PLUGIN_VERSION = __PLUGIN_VERSION__;
-
 
 // =============================================================================
 // UIComposition — Steam's internal composition layer system (Phase 13)
@@ -63,32 +62,30 @@ const PLUGIN_VERSION = __PLUGIN_VERSION__;
 // internal module system.
 
 enum UIComposition {
-  Hidden = 0,           // Not visible
-  Notification = 1,     // Above game, below full overlays (what we want)
-  Overlay = 2,          // Standard overlay layer
-  Opaque = 3,           // Fully opaque (blocks everything below)
-  OverlayKeyboard = 4,  // On-screen keyboard layer
+  Hidden = 0, // Not visible
+  Notification = 1, // Above game, below full overlays (what we want)
+  Overlay = 2, // Standard overlay layer
+  Opaque = 3, // Fully opaque (blocks everything below)
+  OverlayKeyboard = 4, // On-screen keyboard layer
 }
 
 // Search Steam's module registry for the useUIComposition hook.
 // It's identified by three method name strings it uses internally to manage
 // composition state requests with Gamescope's compositor.
-const useUIComposition: (composition: UIComposition) => void = findModuleChild(
-  (m: any) => {
-    if (typeof m !== "object") return undefined;
-    for (let prop in m) {
-      if (
-        typeof m[prop] === "function" &&
-        m[prop].toString().includes("AddMinimumCompositionStateRequest") &&
-        m[prop].toString().includes("ChangeMinimumCompositionStateRequest") &&
-        m[prop].toString().includes("RemoveMinimumCompositionStateRequest") &&
-        !m[prop].toString().includes("m_mapCompositionStateRequests")
-      ) {
-        return m[prop];
-      }
+const useUIComposition: (composition: UIComposition) => void = findModuleChild((m: any) => {
+  if (typeof m !== "object") return undefined;
+  for (let prop in m) {
+    if (
+      typeof m[prop] === "function" &&
+      m[prop].toString().includes("AddMinimumCompositionStateRequest") &&
+      m[prop].toString().includes("ChangeMinimumCompositionStateRequest") &&
+      m[prop].toString().includes("RemoveMinimumCompositionStateRequest") &&
+      !m[prop].toString().includes("m_mapCompositionStateRequests")
+    ) {
+      return m[prop];
     }
   }
-);
+});
 
 // =============================================================================
 // VirtualKeyboardManager — detect on-screen keyboard open/close (Phase 14)
@@ -101,8 +98,7 @@ const useUIComposition: (composition: UIComposition) => void = findModuleChild(
 const VIRTUAL_KEYBOARD_MANAGER = findModuleChild((m: any) => {
   if (typeof m !== "object") return undefined;
   for (let prop in m) {
-    if (m[prop]?.m_WindowStore)
-      return m[prop].ActiveWindowInstance?.VirtualKeyboardManager;
+    if (m[prop]?.m_WindowStore) return m[prop].ActiveWindowInstance?.VirtualKeyboardManager;
   }
 });
 
@@ -112,53 +108,53 @@ const VIRTUAL_KEYBOARD_MANAGER = findModuleChild((m: any) => {
 
 // A single entry in a directory listing (file or folder)
 interface DirectoryEntry {
-  name: string;     // File/folder name (e.g., "credentials.json")
-  is_dir: boolean;  // true = directory, false = file
-  size: number;     // File size in bytes (0 for directories)
+  name: string; // File/folder name (e.g., "credentials.json")
+  is_dir: boolean; // true = directory, false = file
+  size: number; // File size in bytes (0 for directories)
 }
 
 // Response from the list_directory() backend RPC
 interface DirectoryListing {
-  path: string;                  // The absolute path that was listed
-  entries: DirectoryEntry[];     // Array of entries in the directory
-  error: string | null;          // Error message, or null if successful
+  path: string; // The absolute path that was listed
+  entries: DirectoryEntry[]; // Array of entries in the directory
+  error: string | null; // Error message, or null if successful
 }
 
 // Response from the load_credentials_file() backend RPC
 interface CredentialResult {
-  valid: boolean;      // true if the file was a valid GCP service account JSON
-  message: string;     // Human-readable success or error message
-  project_id: string;  // GCP project ID (empty on error)
+  valid: boolean; // true if the file was a valid GCP service account JSON
+  message: string; // Human-readable success or error message
+  project_id: string; // GCP project ID (empty on error)
 }
 
 // Response from the get_button_monitor_status() backend RPC
 interface ButtonMonitorStatus {
-  running: boolean;          // true if the monitor thread is alive
-  initialized: boolean;      // true if the hidraw device is open and initialized
-  device_path: string | null;// e.g., "/dev/hidraw2" or null if not found
-  error_count: number;       // consecutive read errors (0 = healthy)
-  target_button: string;     // current target button (e.g., "L4") or "disabled"
+  running: boolean; // true if the monitor thread is alive
+  initialized: boolean; // true if the hidraw device is open and initialized
+  device_path: string | null; // e.g., "/dev/hidraw2" or null if not found
+  error_count: number; // consecutive read errors (0 = healthy)
+  target_button: string; // current target button (e.g., "L4") or "disabled"
   hold_threshold_ms: number; // current hold threshold in milliseconds
 }
 
 // Response from the get_touchscreen_status() backend RPC (Phase 9)
 interface TouchscreenStatus {
-  running: boolean;              // true if the monitor thread is alive
-  initialized: boolean;          // true if the evdev device is open
-  device_path: string | null;    // e.g., "/dev/input/event5" or null
-  error_count: number;           // consecutive read errors (0 = healthy)
-  physical_max_x: number;        // Physical X axis max (short axis)
-  physical_max_y: number;        // Physical Y axis max (long axis)
-  last_touch: { x: number; y: number } | null;  // Last tap in logical coords
+  running: boolean; // true if the monitor thread is alive
+  initialized: boolean; // true if the evdev device is open
+  device_path: string | null; // e.g., "/dev/input/event5" or null
+  error_count: number; // consecutive read errors (0 = healthy)
+  physical_max_x: number; // Physical X axis max (short axis)
+  physical_max_y: number; // Physical Y axis max (long axis)
+  last_touch: { x: number; y: number } | null; // Last tap in logical coords
 }
 
 // Info about a single Piper voice from get_available_voices()
 interface VoiceInfo {
-  label: string;       // Human-readable name (e.g., "US English - Amy (Female)")
-  language: string;    // Language group (e.g., "English (US)")
-  speakers: number;    // Number of speakers (1 = single, >1 = multi-speaker)
+  label: string; // Human-readable name (e.g., "US English - Amy (Female)")
+  language: string; // Language group (e.g., "English (US)")
+  speakers: number; // Number of speakers (1 = single, >1 = multi-speaker)
   downloaded: boolean; // Whether the .onnx file exists in the voices dir
-  file_size: number;   // Size of the .onnx file in bytes (0 if not downloaded)
+  file_size: number; // Size of the .onnx file in bytes (0 if not downloaded)
 }
 
 // Voice registry returned by get_available_voices(): voice_id → VoiceInfo
@@ -170,16 +166,16 @@ interface VoiceRegistry {
 interface VoiceActionResult {
   success: boolean;
   message: string;
-  file_size?: number;   // Only present in download response
+  file_size?: number; // Only present in download response
 }
 
 // Info about a single OCR language from get_available_ocr_languages() (Phase 25)
 interface OcrLanguageInfo {
-  label: string;       // Human-readable name (e.g., "Chinese / Japanese")
-  languages: string;   // Languages covered (e.g., "Simplified Chinese, Traditional Chinese, ...")
-  size_hint: string;   // Approximate download size (e.g., "~85 MB")
+  label: string; // Human-readable name (e.g., "Chinese / Japanese")
+  languages: string; // Languages covered (e.g., "Simplified Chinese, Traditional Chinese, ...")
+  size_hint: string; // Approximate download size (e.g., "~85 MB")
   downloaded: boolean; // Whether rec.onnx exists in the ocr_models dir
-  file_size: number;   // Size of rec.onnx in bytes (0 if not downloaded)
+  file_size: number; // Size of rec.onnx in bytes (0 if not downloaded)
 }
 
 // OCR language registry returned by get_available_ocr_languages()
@@ -191,56 +187,56 @@ interface OcrLanguageRegistry {
 interface OcrLanguageActionResult {
   success: boolean;
   message: string;
-  file_size?: number;   // Only present in download response
+  file_size?: number; // Only present in download response
 }
 
 // Response from the capture_overlay_screenshot() backend RPC (Phase 13)
 interface OverlayScreenshotResult {
-  success: boolean;       // true if screenshot was captured successfully
-  image_base64: string;   // Base64-encoded PNG image data (empty on error)
-  message: string;        // Human-readable success or error message
+  success: boolean; // true if screenshot was captured successfully
+  image_base64: string; // Base64-encoded PNG image data (empty on error)
+  message: string; // Human-readable success or error message
 }
 
 // Phase 23: Pipeline toast state returned by get_pipeline_toast() backend RPC.
 // The frontend toast manager polls this to detect new pipeline runs (via seq)
 // and display status toasts with auto-dismiss timers.
 interface PipelineToastData {
-  seq: number;       // Increments each pipeline run (0 = no run yet)
+  seq: number; // Increments each pipeline run (0 = no run yet)
   status: "idle" | "running" | "success" | "no_text" | "error" | "cancelled";
-  message: string;   // Short human-readable message (e.g., "42 words read")
+  message: string; // Short human-readable message (e.g., "42 words read")
   word_count: number; // Words detected by OCR
-  hidden: boolean;   // Whether the user has disabled toast display
+  hidden: boolean; // Whether the user has disabled toast display
   // Phase 27: spoken text overlay fields
-  text: string;      // Final OCR/translated text (empty for non-success)
-  crop_region: { x1: number; y1: number; x2: number; y2: number } | null;  // Scanned region or null (full screen)
-  show_overlay: boolean;  // Whether text overlay mode is enabled
+  text: string; // Final OCR/translated text (empty for non-success)
+  crop_region: { x1: number; y1: number; x2: number; y2: number } | null; // Scanned region or null (full screen)
+  show_overlay: boolean; // Whether text overlay mode is enabled
 }
 
 // Current plugin settings returned by get_settings() backend RPC
 interface PluginSettings {
   // Provider selection (Phase 8)
-  ocr_provider: string;         // "gcp" or "local"
-  tts_provider: string;         // "gcp" or "local"
+  ocr_provider: string; // "gcp" or "local"
+  tts_provider: string; // "gcp" or "local"
   // OCR language (Phase 25)
-  ocr_language: string;         // OCR recognition language (e.g., "english", "chinese")
+  ocr_language: string; // OCR recognition language (e.g., "english", "chinese")
   // GCP TTS settings
-  voice_id: string;             // GCP TTS voice (Phase 5)
-  speech_rate: string;          // GCP TTS speed preset (Phase 5)
+  voice_id: string; // GCP TTS voice (Phase 5)
+  speech_rate: string; // GCP TTS speed preset (Phase 5)
   // Local TTS settings (Phase 8)
-  local_voice_id: string;       // Piper voice ID
-  local_speech_rate: string;    // Piper speech rate preset
+  local_voice_id: string; // Piper voice ID
+  local_speech_rate: string; // Piper speech rate preset
   // Common settings
-  volume: number;               // TTS volume 0-100 (Phase 5)
-  enabled: boolean;             // Master on/off
-  debug: boolean;               // Verbose logging
-  trigger_button: string;       // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
-  hold_time_ms: number;         // Hold threshold in ms (Phase 7)
+  volume: number; // TTS volume 0-100 (Phase 5)
+  enabled: boolean; // Master on/off
+  debug: boolean; // Verbose logging
+  trigger_button: string; // "disabled", "L4", "R4", "L5", "R5" (Phase 7)
+  hold_time_ms: number; // Hold threshold in ms (Phase 7)
   // Touch input (Phase 29)
-  touch_input_enabled: boolean;   // Whether touchscreen gestures are enabled
-  touch_input_style: string;      // "swipe" | "two_tap"
+  touch_input_enabled: boolean; // Whether touchscreen gestures are enabled
+  touch_input_style: string; // "swipe" | "two_tap"
   mute_interface_sounds: boolean; // Skip playing UI feedback sounds (Phase 10/11)
-  hide_pipeline_toast: boolean;   // Hide on-screen toast with pipeline status (Phase 23)
-  show_text_overlay: boolean;     // Show spoken text overlay instead of word count pill (Phase 27)
+  hide_pipeline_toast: boolean; // Hide on-screen toast with pipeline status (Phase 23)
+  show_text_overlay: boolean; // Show spoken text overlay instead of word count pill (Phase 27)
   // Fixed region coordinates (Phase 10/12)
   fixed_region_x1: number;
   fixed_region_y1: number;
@@ -258,15 +254,14 @@ interface PluginSettings {
   ignored_words_beginning_enabled: boolean;
   ignored_words_count: number;
   // Translation (Phase 26/32)
-  translation_enabled: boolean;           // Enable translation between OCR and TTS
-  translation_target_language: string;    // ISO 639-1 target language code (e.g., "en")
+  translation_enabled: boolean; // Enable translation between OCR and TTS
+  translation_target_language: string; // ISO 639-1 target language code (e.g., "en")
   // Computed fields
-  is_configured: boolean;       // Whether current providers are ready
-  is_gcp_configured: boolean;   // Whether GCP credentials are loaded
-  is_local_available: boolean;  // Whether bundled Python 3.12 is present
-  project_id: string;           // GCP project ID from credentials
+  is_configured: boolean; // Whether current providers are ready
+  is_gcp_configured: boolean; // Whether GCP credentials are loaded
+  is_local_available: boolean; // Whether bundled Python 3.12 is present
+  project_id: string; // GCP project ID from credentials
 }
-
 
 // =============================================================================
 // Backend RPC bindings
@@ -306,11 +301,11 @@ const deleteOcrLanguage = callable<[string], OcrLanguageActionResult>("delete_oc
 const getTouchscreenStatus = callable<[], TouchscreenStatus>("get_touchscreen_status");
 
 // Phase 11: Interface sound effects — fire-and-forget UI feedback sounds
-const playInterfaceSound = callable<[string], {success: boolean; error?: string}>("play_interface_sound");
+const playInterfaceSound = callable<[string], { success: boolean; error?: string }>("play_interface_sound");
 
 // Phase 12: Copy last_selection coordinates to fixed_region coordinates
-const applyLastSelectionToFixedRegion = callable<[], {success: boolean; message: string}>(
-  "apply_last_selection_to_fixed_region"
+const applyLastSelectionToFixedRegion = callable<[], { success: boolean; message: string }>(
+  "apply_last_selection_to_fixed_region",
 );
 
 // Phase 13: Capture screenshot for the region preview overlay
@@ -332,17 +327,8 @@ const setQamVisible = callable<[boolean], void>("set_qam_visible");
 // Used by Content component to fetch last pipeline result for debug indicator
 const getPipelineToast = callable<[], PipelineToastData>("get_pipeline_toast");
 
-
-// =============================================================================
-// Helper: format file size in human-readable form
-// =============================================================================
-// Converts bytes to KB/MB for display in the file browser.
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
+// formatSize extracted to src/utils.ts for testability
+import { formatSize, calculateFontSize, GAME_WIDTH, GAME_HEIGHT } from "./utils";
 
 // =============================================================================
 // OverlayState — shared state bridge for the region preview overlay (Phase 13)
@@ -372,9 +358,15 @@ class OverlayState {
   private _listeners: Array<() => void> = [];
 
   // --- Public getters ---
-  get visible(): boolean { return this._visible; }
-  get imageBase64(): string { return this._imageBase64; }
-  get fixedRegion(): FixedRegion { return this._fixedRegion; }
+  get visible(): boolean {
+    return this._visible;
+  }
+  get imageBase64(): string {
+    return this._imageBase64;
+  }
+  get fixedRegion(): FixedRegion {
+    return this._fixedRegion;
+  }
 
   // Show the overlay with a captured screenshot and the current fixed region
   show(imageBase64: string, region: FixedRegion): void {
@@ -408,7 +400,6 @@ class OverlayState {
   }
 }
 
-
 // =============================================================================
 // RegionPreviewOverlay — global overlay showing fixed region on a screenshot
 // =============================================================================
@@ -421,9 +412,7 @@ class OverlayState {
 // Since the component is freshly mounted each time, it reads image data and
 // region coordinates directly from the OverlayState props — no observer needed.
 
-// Game screen dimensions (Steam Deck native resolution in landscape)
-const GAME_WIDTH = 1280;
-const GAME_HEIGHT = 800;
+// GAME_WIDTH and GAME_HEIGHT imported from ./utils
 
 // Maximum size for the preview image. The QAM panel + icon sidebar starts at
 // roughly x=560 on the 1280px screen. With a 20px left margin and ~20px gap
@@ -565,7 +554,6 @@ function RegionPreviewOverlay({ state }: { state: OverlayState }) {
   );
 }
 
-
 // =============================================================================
 // PipelineToast — on-screen toast showing pipeline status (Phase 23)
 // =============================================================================
@@ -610,7 +598,6 @@ function PipelineToast({ data }: { data: PipelineToastData }) {
   );
 }
 
-
 // =============================================================================
 // SpokenTextOverlay — full-text overlay with region border (Phase 27)
 // =============================================================================
@@ -627,14 +614,12 @@ function SpokenTextOverlay({ data }: { data: PipelineToastData }) {
 
   // Determine if this is a full-screen capture (no specific region to highlight).
   // Full screen: null region or 0,0,1280,800.
-  const isFullScreen = !region ||
-    (region.x1 === 0 && region.y1 === 0 && region.x2 === GAME_WIDTH && region.y2 === GAME_HEIGHT);
+  const isFullScreen =
+    !region || (region.x1 === 0 && region.y1 === 0 && region.x2 === GAME_WIDTH && region.y2 === GAME_HEIGHT);
 
   // Truncate long text at 500 chars to prevent overflow
   const MAX_TEXT_LENGTH = 500;
-  const displayText = data.text.length > MAX_TEXT_LENGTH
-    ? data.text.substring(0, MAX_TEXT_LENGTH) + "..."
-    : data.text;
+  const displayText = data.text.length > MAX_TEXT_LENGTH ? data.text.substring(0, MAX_TEXT_LENGTH) + "..." : data.text;
 
   // ---------------------------------------------------------------------------
   // Dynamic font sizing — calculate a font size that fits all text in the area.
@@ -652,23 +637,9 @@ function SpokenTextOverlay({ data }: { data: PipelineToastData }) {
   // break at exact character boundaries). FIT_FACTOR = 0.77 * 1.6 ≈ 1.2.
   // ---------------------------------------------------------------------------
   const LINE_HEIGHT = 1.4;
-  const FIT_FACTOR = 2.0;   // conservative: ensures text fits even with word-wrap waste
-  const PADDING = 12;        // total inset: 4px padding + 2px border, each side
 
-  let fontSize: number;
-  if (!isFullScreen && region) {
-    // Cropped region: fit text inside the scanned area
-    const availW = (region.x2 - region.x1) - PADDING;
-    const availH = (region.y2 - region.y1) - PADDING;
-    fontSize = Math.floor(Math.sqrt((availW * availH) / (displayText.length * FIT_FACTOR)));
-    fontSize = Math.max(7, Math.min(16, fontSize));
-  } else {
-    // Full-screen: fit text inside subtitle bar (94vw x 25vh minus padding)
-    const availW = GAME_WIDTH * 0.94 - 32;
-    const availH = GAME_HEIGHT * 0.25 - 24;
-    fontSize = Math.floor(Math.sqrt((availW * availH) / (displayText.length * FIT_FACTOR)));
-    fontSize = Math.max(12, Math.min(20, fontSize));
-  }
+  // Font sizing extracted to src/utils.ts for testability
+  const fontSize = calculateFontSize(displayText.length, !isFullScreen && region ? region : null);
 
   // Shared text style: white with heavy dark shadow for readability on any background
   const textStyle: React.CSSProperties = {
@@ -724,9 +695,7 @@ function SpokenTextOverlay({ data }: { data: PipelineToastData }) {
             overflow: "hidden",
           }}
         >
-          <div style={{ ...textStyle, textAlign: "left", maxHeight: "100%", overflow: "hidden" }}>
-            {displayText}
-          </div>
+          <div style={{ ...textStyle, textAlign: "left", maxHeight: "100%", overflow: "hidden" }}>{displayText}</div>
         </div>
       </div>
     );
@@ -758,14 +727,11 @@ function SpokenTextOverlay({ data }: { data: PipelineToastData }) {
           overflow: "hidden",
         }}
       >
-        <div style={textStyle}>
-          {displayText}
-        </div>
+        <div style={textStyle}>{displayText}</div>
       </div>
     </div>
   );
 }
-
 
 // =============================================================================
 // PipelineToastManager — global manager for pipeline toast overlay (Phase 23)
@@ -788,16 +754,18 @@ function PipelineToastManager() {
   useEffect(() => {
     // Listen for "pipeline_toast" events emitted by the backend via decky.emit().
     // Event args: (seq, status, message, word_count, hidden, text, crop_region, show_overlay)
-    const listener = addEventListener<[
-      seq: number,
-      status: string,
-      message: string,
-      word_count: number,
-      hidden: boolean,
-      text: string,
-      crop_region: { x1: number; y1: number; x2: number; y2: number } | null,
-      show_overlay: boolean
-    ]>("pipeline_toast", (seq, status, message, word_count, hidden, text, crop_region, show_overlay) => {
+    const listener = addEventListener<
+      [
+        seq: number,
+        status: string,
+        message: string,
+        word_count: number,
+        hidden: boolean,
+        text: string,
+        crop_region: { x1: number; y1: number; x2: number; y2: number } | null,
+        show_overlay: boolean,
+      ]
+    >("pipeline_toast", (seq, status, message, word_count, hidden, text, crop_region, show_overlay) => {
       // Clear any pending dismiss timer from a previous event
       if (dismissTimerRef.current) {
         clearTimeout(dismissTimerRef.current);
@@ -876,7 +844,6 @@ function PipelineToastManager() {
   return <PipelineToast data={toastData} />;
 }
 
-
 // =============================================================================
 // Voice and speech rate options for the TTS dropdown selectors
 // =============================================================================
@@ -930,12 +897,11 @@ const VOICE_OPTIONS = [
 
 const SPEECH_RATE_OPTIONS = [
   { data: "x-slow", label: "Very Slow (0.5x)" },
-  { data: "slow",   label: "Slow (0.75x)" },
+  { data: "slow", label: "Slow (0.75x)" },
   { data: "medium", label: "Normal (1.0x)" },
-  { data: "fast",   label: "Fast (1.25x)" },
+  { data: "fast", label: "Fast (1.25x)" },
   { data: "x-fast", label: "Very Fast (1.5x)" },
 ];
-
 
 // =============================================================================
 // Provider options for OCR and TTS engine selection (Phase 8)
@@ -945,21 +911,21 @@ const SPEECH_RATE_OPTIONS = [
 
 const OCR_PROVIDER_OPTIONS = [
   { data: "local", label: "RapidOCR (offline)" },
-  { data: "gcp",   label: "Google Cloud (online)" },
+  { data: "gcp", label: "Google Cloud (online)" },
 ];
 
 const TTS_PROVIDER_OPTIONS = [
   { data: "local", label: "Piper TTS (offline)" },
-  { data: "gcp",   label: "Google Cloud (online)" },
+  { data: "gcp", label: "Google Cloud (online)" },
 ];
 
 // Speech rate options for Piper TTS. Same labels as GCP but maps to
 // Piper's length_scale internally (inverse: lower = faster).
 const LOCAL_SPEECH_RATE_OPTIONS = [
   { data: "x-slow", label: "Very Slow" },
-  { data: "slow",   label: "Slow" },
+  { data: "slow", label: "Slow" },
   { data: "medium", label: "Normal" },
-  { data: "fast",   label: "Fast" },
+  { data: "fast", label: "Fast" },
   { data: "x-fast", label: "Very Fast" },
 ];
 
@@ -983,7 +949,6 @@ const TRANSLATION_TARGET_OPTIONS = [
   { data: "nl", label: "Dutch" },
 ];
 
-
 // =============================================================================
 // Button trigger options for the dropdown selectors (Phase 7)
 // =============================================================================
@@ -992,27 +957,26 @@ const TRANSLATION_TARGET_OPTIONS = [
 
 const TRIGGER_BUTTON_OPTIONS = [
   { data: "disabled", label: "None" },
-  { data: "L4",       label: "L4 (Back Left Upper)" },
-  { data: "R4",       label: "R4 (Back Right Upper)" },
-  { data: "L5",       label: "L5 (Back Left Lower)" },
-  { data: "R5",       label: "R5 (Back Right Lower)" },
+  { data: "L4", label: "L4 (Back Left Upper)" },
+  { data: "R4", label: "R4 (Back Right Upper)" },
+  { data: "L5", label: "L5 (Back Left Lower)" },
+  { data: "R5", label: "R5 (Back Right Lower)" },
 ];
 
 // Phase 29: Touch input gesture style options
 const TOUCH_STYLE_OPTIONS = [
   { data: "two_tap", label: "Two-Tap (tap two corners)" },
-  { data: "swipe",   label: "Swipe (drag to select)" },
+  { data: "swipe", label: "Swipe (drag to select)" },
 ];
 
 const HOLD_TIME_OPTIONS = [
-  { data: 0,    label: "Instant (0ms)" },
-  { data: 300,  label: "300ms (Quick)" },
-  { data: 500,  label: "500ms (Default)" },
-  { data: 750,  label: "750ms" },
+  { data: 0, label: "Instant (0ms)" },
+  { data: 300, label: "300ms (Quick)" },
+  { data: 500, label: "500ms (Default)" },
+  { data: 750, label: "750ms" },
   { data: 1000, label: "1000ms (Long)" },
   { data: 1500, label: "1500ms (Very Long)" },
 ];
-
 
 // =============================================================================
 // FileBrowser component — lets the user navigate directories and pick a file
@@ -1021,9 +985,12 @@ const HOLD_TIME_OPTIONS = [
 // click directories to navigate into them, click ".." to go up, and click a
 // .json file to load it as GCP credentials.
 
-function FileBrowser({ onFileSelected, onCancel }: {
-  onFileSelected: (path: string) => void;  // Called when user picks a .json file
-  onCancel: () => void;                     // Called when user clicks Cancel
+function FileBrowser({
+  onFileSelected,
+  onCancel,
+}: {
+  onFileSelected: (path: string) => void; // Called when user picks a .json file
+  onCancel: () => void; // Called when user clicks Cancel
 }) {
   // Current directory being displayed
   const [currentPath, setCurrentPath] = useState("/home/deck/");
@@ -1038,7 +1005,7 @@ function FileBrowser({ onFileSelected, onCancel }: {
   // useEffect runs after the component renders, and re-runs when
   // the values in the dependency array [currentPath] change.
   useEffect(() => {
-    let cancelled = false;  // Prevents stale responses from overwriting state
+    let cancelled = false; // Prevents stale responses from overwriting state
 
     const loadDir = async () => {
       setLoading(true);
@@ -1049,7 +1016,7 @@ function FileBrowser({ onFileSelected, onCancel }: {
       // discard this result to avoid showing stale data.
       if (cancelled) return;
 
-      setCurrentPath(result.path);  // Use normalized path from backend
+      setCurrentPath(result.path); // Use normalized path from backend
       setEntries(result.entries);
       setError(result.error);
       setLoading(false);
@@ -1060,7 +1027,9 @@ function FileBrowser({ onFileSelected, onCancel }: {
     // Cleanup function: runs if useEffect re-fires (path changed) or
     // component unmounts. Sets `cancelled = true` so the old loadDir()
     // call won't update state.
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [currentPath]);
 
   // Navigate up one directory level.
@@ -1077,12 +1046,14 @@ function FileBrowser({ onFileSelected, onCancel }: {
         {/* Current path display */}
         <PanelSectionRow>
           <Field label="Path">
-            <div style={{
-              fontSize: "12px",
-              wordBreak: "break-all",      // Break long paths so they wrap
-              color: "#b8bcbf",            // Steam's secondary text color
-              padding: "4px 0"
-            }}>
+            <div
+              style={{
+                fontSize: "12px",
+                wordBreak: "break-all", // Break long paths so they wrap
+                color: "#b8bcbf", // Steam's secondary text color
+                padding: "4px 0",
+              }}
+            >
               {currentPath}
             </div>
           </Field>
@@ -1091,18 +1062,14 @@ function FileBrowser({ onFileSelected, onCancel }: {
         {/* Loading indicator */}
         {loading && (
           <PanelSectionRow>
-            <div style={{ textAlign: "center", padding: "8px", color: "#b8bcbf" }}>
-              Loading...
-            </div>
+            <div style={{ textAlign: "center", padding: "8px", color: "#b8bcbf" }}>Loading...</div>
           </PanelSectionRow>
         )}
 
         {/* Error display */}
         {error && (
           <PanelSectionRow>
-            <div style={{ color: "#ff4444", padding: "4px 0", fontSize: "13px" }}>
-              {error}
-            </div>
+            <div style={{ color: "#ff4444", padding: "4px 0", fontSize: "13px" }}>{error}</div>
           </PanelSectionRow>
         )}
 
@@ -1119,48 +1086,46 @@ function FileBrowser({ onFileSelected, onCancel }: {
         )}
 
         {/* Directory entries — folders and .json files */}
-        {!loading && entries.map((entry) => (
-          <PanelSectionRow key={entry.name}>
-            <ButtonItem
-              layout="below"
-              onClick={() => {
-                const fullPath = currentPath.endsWith("/")
-                  ? currentPath + entry.name
-                  : currentPath + "/" + entry.name;
+        {!loading &&
+          entries.map((entry) => (
+            <PanelSectionRow key={entry.name}>
+              <ButtonItem
+                layout="below"
+                onClick={() => {
+                  const fullPath = currentPath.endsWith("/")
+                    ? currentPath + entry.name
+                    : currentPath + "/" + entry.name;
 
-                if (entry.is_dir) {
-                  // Navigate into the directory
-                  setCurrentPath(fullPath);
-                } else {
-                  // User selected a .json file — trigger credential loading
-                  onFileSelected(fullPath);
-                }
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                {/* Icon: folder or file */}
-                {entry.is_dir
-                  ? <FaFolder size={14} style={{ color: "#dcb867" }} />
-                  : <FaFileAlt size={14} style={{ color: "#67b7dc" }} />
-                }
-                <span style={{ flex: 1 }}>{entry.name}</span>
-                {/* Show file size for files (not directories) */}
-                {!entry.is_dir && (
-                  <span style={{ color: "#b8bcbf", fontSize: "12px" }}>
-                    {formatSize(entry.size)}
-                  </span>
-                )}
-              </div>
-            </ButtonItem>
-          </PanelSectionRow>
-        ))}
+                  if (entry.is_dir) {
+                    // Navigate into the directory
+                    setCurrentPath(fullPath);
+                  } else {
+                    // User selected a .json file — trigger credential loading
+                    onFileSelected(fullPath);
+                  }
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  {/* Icon: folder or file */}
+                  {entry.is_dir ? (
+                    <FaFolder size={14} style={{ color: "#dcb867" }} />
+                  ) : (
+                    <FaFileAlt size={14} style={{ color: "#67b7dc" }} />
+                  )}
+                  <span style={{ flex: 1 }}>{entry.name}</span>
+                  {/* Show file size for files (not directories) */}
+                  {!entry.is_dir && (
+                    <span style={{ color: "#b8bcbf", fontSize: "12px" }}>{formatSize(entry.size)}</span>
+                  )}
+                </div>
+              </ButtonItem>
+            </PanelSectionRow>
+          ))}
 
         {/* Show a message if the directory is empty (no matching entries) */}
         {!loading && !error && entries.length === 0 && (
           <PanelSectionRow>
-            <div style={{ textAlign: "center", padding: "8px", color: "#b8bcbf" }}>
-              No folders or .json files found
-            </div>
+            <div style={{ textAlign: "center", padding: "8px", color: "#b8bcbf" }}>No folders or .json files found</div>
           </PanelSectionRow>
         )}
       </PanelSection>
@@ -1177,7 +1142,6 @@ function FileBrowser({ onFileSelected, onCancel }: {
   );
 }
 
-
 // =============================================================================
 // Content component — the main plugin panel UI
 // =============================================================================
@@ -1190,7 +1154,13 @@ function FileBrowser({ onFileSelected, onCancel }: {
 // takes over the screen so the keyboard has room and focus works correctly.
 // Pattern from Decky-Translator's ApiKeyModal (TabTranslation.tsx:55-95).
 
-function WordFilterModal({ title, description, currentValue, onSave, closeModal }: {
+function WordFilterModal({
+  title,
+  description,
+  currentValue,
+  onSave,
+  closeModal,
+}: {
   title: string;
   description: string;
   currentValue: string;
@@ -1202,28 +1172,28 @@ function WordFilterModal({ title, description, currentValue, onSave, closeModal 
   // Suppress touch gestures while the modal is open (same as keyboard suppression)
   useEffect(() => {
     setModalVisible(true);
-    return () => { setModalVisible(false); };
+    return () => {
+      setModalVisible(false);
+    };
   }, []);
 
   return (
     <ModalRoot onCancel={closeModal} onEscKeypress={closeModal}>
       <div style={{ padding: "20px", minWidth: "400px" }}>
         <h2 style={{ marginBottom: "15px" }}>{title}</h2>
-        <p style={{ marginBottom: "15px", color: "#aaa", fontSize: "13px" }}>
-          {description}
-        </p>
-        <TextField
-          label="Words"
-          value={text}
-          bShowClearAction={true}
-          onChange={(e: any) => setText(e.target.value)}
-        />
+        <p style={{ marginBottom: "15px", color: "#aaa", fontSize: "13px" }}>{description}</p>
+        <TextField label="Words" value={text} bShowClearAction={true} onChange={(e: any) => setText(e.target.value)} />
         <Focusable
           style={{ display: "flex", gap: "10px", marginTop: "20px", justifyContent: "flex-end" }}
           flow-children="horizontal"
         >
           <DialogButton onClick={closeModal}>Cancel</DialogButton>
-          <DialogButton onClick={() => { onSave(text); closeModal?.(); }}>
+          <DialogButton
+            onClick={() => {
+              onSave(text);
+              closeModal?.();
+            }}
+          >
             Save
           </DialogButton>
         </Focusable>
@@ -1326,7 +1296,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       setLastPipelineResult(toastResult);
     };
     loadSettings();
-  }, [mode]);  // Re-fetch settings when mode changes (e.g., after loading creds)
+  }, [mode]); // Re-fetch settings when mode changes (e.g., after loading creds)
 
   // Handle the user selecting a .json file in the file browser.
   // Calls the backend to validate and store the credentials.
@@ -1460,9 +1430,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   // outside the QAM panel. When hiding: remove it completely so the
   // useUIComposition hook is destroyed and Gamescope input routing is restored.
   const showOverlayComponent = () => {
-    routerHook.addGlobalComponent("DCRRegionPreview", () => (
-      <RegionPreviewOverlay state={overlayState} />
-    ));
+    routerHook.addGlobalComponent("DCRRegionPreview", () => <RegionPreviewOverlay state={overlayState} />);
     setIsOverlayVisible(true);
     // Auto-dismiss after 10 seconds to ensure the composition layer
     // doesn't stay alive indefinitely (e.g., if user forgets to close it)
@@ -1510,12 +1478,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
 
   // --- File browser mode ---
   if (mode === "browser") {
-    return (
-      <FileBrowser
-        onFileSelected={handleFileSelected}
-        onCancel={() => setMode("normal")}
-      />
-    );
+    return <FileBrowser onFileSelected={handleFileSelected} onCancel={() => setMode("normal")} />;
   }
 
   // --- Loading state (settings not yet fetched) ---
@@ -1523,9 +1486,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     return (
       <PanelSection title="Cloud Reader">
         <PanelSectionRow>
-          <div style={{ textAlign: "center", padding: "8px", color: "#b8bcbf" }}>
-            Loading...
-          </div>
+          <div style={{ textAlign: "center", padding: "8px", color: "#b8bcbf" }}>Loading...</div>
         </PanelSectionRow>
       </PanelSection>
     );
@@ -1587,8 +1548,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   label: o.label,
                 }))}
                 selectedOption={
-                  TOUCH_STYLE_OPTIONS.find((o) => o.data === settings.touch_input_style)?.data
-                  ?? TOUCH_STYLE_OPTIONS[0].data
+                  TOUCH_STYLE_OPTIONS.find((o) => o.data === settings.touch_input_style)?.data ??
+                  TOUCH_STYLE_OPTIONS[0].data
                 }
                 onChange={async (option) => {
                   await saveSetting("touch_input_style", option.data);
@@ -1602,8 +1563,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
               <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
                 {settings.touch_input_style === "swipe"
                   ? "Swipe on screen to select a region for OCR"
-                  : "Tap two corners to define a rectangle for OCR"
-                }
+                  : "Tap two corners to define a rectangle for OCR"}
               </div>
             </PanelSectionRow>
           </>
@@ -1620,8 +1580,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
               label: o.label,
             }))}
             selectedOption={
-              TRIGGER_BUTTON_OPTIONS.find((o) => o.data === settings.trigger_button)?.data
-              ?? TRIGGER_BUTTON_OPTIONS[0].data
+              TRIGGER_BUTTON_OPTIONS.find((o) => o.data === settings.trigger_button)?.data ??
+              TRIGGER_BUTTON_OPTIONS[0].data
             }
             onChange={async (option) => {
               await saveSetting("trigger_button", option.data);
@@ -1649,8 +1609,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   label: o.label,
                 }))}
                 selectedOption={
-                  HOLD_TIME_OPTIONS.find((o) => o.data === settings.hold_time_ms)?.data
-                  ?? HOLD_TIME_OPTIONS[1].data
+                  HOLD_TIME_OPTIONS.find((o) => o.data === settings.hold_time_ms)?.data ?? HOLD_TIME_OPTIONS[1].data
                 }
                 onChange={async (option) => {
                   await saveSetting("hold_time_ms", option.data);
@@ -1668,7 +1627,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             <PanelSectionRow>
               <Field label="Fixed Region">
                 <div style={{ color: "#67b7dc", fontSize: "13px" }}>
-                  ({settings.fixed_region_x1}, {settings.fixed_region_y1}) - ({settings.fixed_region_x2}, {settings.fixed_region_y2})
+                  ({settings.fixed_region_x1}, {settings.fixed_region_y1}) - ({settings.fixed_region_x2},{" "}
+                  {settings.fixed_region_y2})
                 </div>
               </Field>
             </PanelSectionRow>
@@ -1762,12 +1722,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   }
                 }}
               >
-                {isOverlayLoading
-                  ? "Capturing..."
-                  : isOverlayVisible
-                  ? "Hide Region Preview"
-                  : "Show Region Preview"
-                }
+                {isOverlayLoading ? "Capturing..." : isOverlayVisible ? "Hide Region Preview" : "Show Region Preview"}
               </ButtonItem>
             </PanelSectionRow>
 
@@ -1775,7 +1730,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             <PanelSectionRow>
               <Field label="Last Selection">
                 <div style={{ color: "#b8bcbf", fontSize: "12px" }}>
-                  ({settings.last_selection_x1}, {settings.last_selection_y1}) - ({settings.last_selection_x2}, {settings.last_selection_y2})
+                  ({settings.last_selection_x1}, {settings.last_selection_y1}) - ({settings.last_selection_x2},{" "}
+                  {settings.last_selection_y2})
                 </div>
               </Field>
             </PanelSectionRow>
@@ -1785,8 +1741,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
               <div style={{ color: "#b8bcbf", fontSize: "12px", padding: "4px 0" }}>
                 {settings.hold_time_ms === 0
                   ? `Press ${settings.trigger_button} to capture the fixed region`
-                  : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to capture the fixed region`
-                }
+                  : `Hold ${settings.trigger_button} for ${settings.hold_time_ms}ms to capture the fixed region`}
               </div>
             </PanelSectionRow>
           </>
@@ -1807,11 +1762,10 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             {settings.touch_input_enabled && settings.trigger_button !== "disabled"
               ? `Touch (${settings.touch_input_style === "swipe" ? "swipe" : "two-tap"}) + ${settings.trigger_button} (fixed region)`
               : settings.touch_input_enabled
-              ? `Touch only (${settings.touch_input_style === "swipe" ? "swipe" : "two-tap"})`
-              : settings.trigger_button !== "disabled"
-              ? `${settings.trigger_button} only (fixed region)`
-              : "No capture method configured"
-            }
+                ? `Touch only (${settings.touch_input_style === "swipe" ? "swipe" : "two-tap"})`
+                : settings.trigger_button !== "disabled"
+                  ? `${settings.trigger_button} only (fixed region)`
+                  : "No capture method configured"}
           </div>
         </PanelSectionRow>
       </PanelSection>
@@ -1832,8 +1786,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
               label: o.label,
             }))}
             selectedOption={
-              OCR_PROVIDER_OPTIONS.find((o) => o.data === settings.ocr_provider)?.data
-              ?? OCR_PROVIDER_OPTIONS[0].data
+              OCR_PROVIDER_OPTIONS.find((o) => o.data === settings.ocr_provider)?.data ?? OCR_PROVIDER_OPTIONS[0].data
             }
             onChange={async (option) => {
               await saveSetting("ocr_provider", option.data);
@@ -1854,9 +1807,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                 ocrLanguages
                   ? Object.entries(ocrLanguages).map(([id, info]) => ({
                       data: id,
-                      label: info.downloaded
-                        ? info.label
-                        : `${info.label} [${info.size_hint}]`,
+                      label: info.downloaded ? info.label : `${info.label} [${info.size_hint}]`,
                     }))
                   : [{ data: settings.ocr_language, label: "Loading..." }]
               }
@@ -1872,73 +1823,78 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
         )}
 
         {/* OCR Language download/delete controls (local provider only) */}
-        {settings.ocr_provider === "local" && ocrLanguages && (() => {
-          const selectedLang = ocrLanguages[settings.ocr_language];
-          const isDownloaded = selectedLang?.downloaded ?? false;
-          return (
-            <>
-              {/* OCR language status message */}
-              {ocrLanguageMessage && (
-                <PanelSectionRow>
-                  <div style={{
-                    color: ocrLanguageIsSuccess ? "#2ecc71" : "#e74c3c",
-                    padding: "4px 0",
-                    fontSize: "13px"
-                  }}>
-                    {ocrLanguageMessage}
-                  </div>
-                </PanelSectionRow>
-              )}
+        {settings.ocr_provider === "local" &&
+          ocrLanguages &&
+          (() => {
+            const selectedLang = ocrLanguages[settings.ocr_language];
+            const isDownloaded = selectedLang?.downloaded ?? false;
+            return (
+              <>
+                {/* OCR language status message */}
+                {ocrLanguageMessage && (
+                  <PanelSectionRow>
+                    <div
+                      style={{
+                        color: ocrLanguageIsSuccess ? "#2ecc71" : "#e74c3c",
+                        padding: "4px 0",
+                        fontSize: "13px",
+                      }}
+                    >
+                      {ocrLanguageMessage}
+                    </div>
+                  </PanelSectionRow>
+                )}
 
-              {isDownloaded ? (
-                <>
-                  {/* Show downloaded indicator + file size */}
-                  <PanelSectionRow>
-                    <div style={{
-                      color: "#2ecc71",
-                      fontSize: "12px",
-                      padding: "4px 0"
-                    }}>
-                      Downloaded ({formatSize(selectedLang.file_size)})
-                    </div>
-                  </PanelSectionRow>
-                  {/* Delete button */}
-                  <PanelSectionRow>
-                    <ButtonItem
-                      layout="below"
-                      onClick={() => handleDeleteOcrLanguage(settings.ocr_language)}
-                    >
-                      Delete Model
-                    </ButtonItem>
-                  </PanelSectionRow>
-                </>
-              ) : (
-                <>
-                  {/* Not downloaded hint */}
-                  <PanelSectionRow>
-                    <div style={{
-                      color: "#b8bcbf",
-                      fontSize: "12px",
-                      padding: "4px 0"
-                    }}>
-                      Model will auto-download on first use
-                    </div>
-                  </PanelSectionRow>
-                  {/* Download button */}
-                  <PanelSectionRow>
-                    <ButtonItem
-                      layout="below"
-                      onClick={() => handleDownloadOcrLanguage(settings.ocr_language)}
-                      disabled={isOcrLanguageDownloading}
-                    >
-                      {isOcrLanguageDownloading ? "Downloading..." : "Download Model"}
-                    </ButtonItem>
-                  </PanelSectionRow>
-                </>
-              )}
-            </>
-          );
-        })()}
+                {isDownloaded ? (
+                  <>
+                    {/* Show downloaded indicator + file size */}
+                    <PanelSectionRow>
+                      <div
+                        style={{
+                          color: "#2ecc71",
+                          fontSize: "12px",
+                          padding: "4px 0",
+                        }}
+                      >
+                        Downloaded ({formatSize(selectedLang.file_size)})
+                      </div>
+                    </PanelSectionRow>
+                    {/* Delete button */}
+                    <PanelSectionRow>
+                      <ButtonItem layout="below" onClick={() => handleDeleteOcrLanguage(settings.ocr_language)}>
+                        Delete Model
+                      </ButtonItem>
+                    </PanelSectionRow>
+                  </>
+                ) : (
+                  <>
+                    {/* Not downloaded hint */}
+                    <PanelSectionRow>
+                      <div
+                        style={{
+                          color: "#b8bcbf",
+                          fontSize: "12px",
+                          padding: "4px 0",
+                        }}
+                      >
+                        Model will auto-download on first use
+                      </div>
+                    </PanelSectionRow>
+                    {/* Download button */}
+                    <PanelSectionRow>
+                      <ButtonItem
+                        layout="below"
+                        onClick={() => handleDownloadOcrLanguage(settings.ocr_language)}
+                        disabled={isOcrLanguageDownloading}
+                      >
+                        {isOcrLanguageDownloading ? "Downloading..." : "Download Model"}
+                      </ButtonItem>
+                    </PanelSectionRow>
+                  </>
+                )}
+              </>
+            );
+          })()}
 
         {/* TTS Engine dropdown */}
         <PanelSectionRow>
@@ -1951,8 +1907,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
               label: o.label,
             }))}
             selectedOption={
-              TTS_PROVIDER_OPTIONS.find((o) => o.data === settings.tts_provider)?.data
-              ?? TTS_PROVIDER_OPTIONS[0].data
+              TTS_PROVIDER_OPTIONS.find((o) => o.data === settings.tts_provider)?.data ?? TTS_PROVIDER_OPTIONS[0].data
             }
             onChange={async (option) => {
               await saveSetting("tts_provider", option.data);
@@ -1995,68 +1950,70 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
 
       {/* ---- GCP Credentials Section (moved before Translation in Phase 31) ---- */}
       {/* Only shown when at least one provider uses GCP */}
-      {needsGcp && <PanelSection title="GCP Credentials">
-        {/* Status: Configured or Not Configured */}
-        <PanelSectionRow>
-          <Field label="Status">
-            <div style={{
-              color: settings.is_gcp_configured ? "#2ecc71" : "#e74c3c",
-              fontWeight: "bold"
-            }}>
-              {settings.is_gcp_configured ? "Configured" : "Not Configured"}
-            </div>
-          </Field>
-        </PanelSectionRow>
-
-        {/* Show project ID when credentials are loaded */}
-        {settings.is_gcp_configured && settings.project_id && (
+      {needsGcp && (
+        <PanelSection title="GCP Credentials">
+          {/* Status: Configured or Not Configured */}
           <PanelSectionRow>
-            <Field label="Project">
-              <div style={{ color: "#b8bcbf", fontSize: "13px" }}>
-                {settings.project_id}
+            <Field label="Status">
+              <div
+                style={{
+                  color: settings.is_gcp_configured ? "#2ecc71" : "#e74c3c",
+                  fontWeight: "bold",
+                }}
+              >
+                {settings.is_gcp_configured ? "Configured" : "Not Configured"}
               </div>
             </Field>
           </PanelSectionRow>
-        )}
 
-        {/* Status message (success/error) shown after credential operations */}
-        {statusMessage && (
+          {/* Show project ID when credentials are loaded */}
+          {settings.is_gcp_configured && settings.project_id && (
+            <PanelSectionRow>
+              <Field label="Project">
+                <div style={{ color: "#b8bcbf", fontSize: "13px" }}>{settings.project_id}</div>
+              </Field>
+            </PanelSectionRow>
+          )}
+
+          {/* Status message (success/error) shown after credential operations */}
+          {statusMessage && (
+            <PanelSectionRow>
+              <div
+                style={{
+                  color: statusIsSuccess ? "#2ecc71" : "#e74c3c",
+                  padding: "4px 0",
+                  fontSize: "13px",
+                }}
+              >
+                {statusMessage}
+              </div>
+            </PanelSectionRow>
+          )}
+
+          {/* Loading indicator while credentials are being validated */}
+          {loadingCreds && (
+            <PanelSectionRow>
+              <div style={{ textAlign: "center", padding: "4px", color: "#b8bcbf" }}>Loading credentials...</div>
+            </PanelSectionRow>
+          )}
+
+          {/* Load Credentials button — opens the file browser */}
           <PanelSectionRow>
-            <div style={{
-              color: statusIsSuccess ? "#2ecc71" : "#e74c3c",
-              padding: "4px 0",
-              fontSize: "13px"
-            }}>
-              {statusMessage}
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Loading indicator while credentials are being validated */}
-        {loadingCreds && (
-          <PanelSectionRow>
-            <div style={{ textAlign: "center", padding: "4px", color: "#b8bcbf" }}>
-              Loading credentials...
-            </div>
-          </PanelSectionRow>
-        )}
-
-        {/* Load Credentials button — opens the file browser */}
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => setMode("browser")}>
-            {settings.is_gcp_configured ? "Change Credentials" : "Load Credentials"}
-          </ButtonItem>
-        </PanelSectionRow>
-
-        {/* Clear Credentials button — only shown when credentials are loaded */}
-        {settings.is_gcp_configured && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={handleClearCredentials}>
-              Clear Credentials
+            <ButtonItem layout="below" onClick={() => setMode("browser")}>
+              {settings.is_gcp_configured ? "Change Credentials" : "Load Credentials"}
             </ButtonItem>
           </PanelSectionRow>
-        )}
-      </PanelSection>}
+
+          {/* Clear Credentials button — only shown when credentials are loaded */}
+          {settings.is_gcp_configured && (
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={handleClearCredentials}>
+                Clear Credentials
+              </ButtonItem>
+            </PanelSectionRow>
+          )}
+        </PanelSection>
+      )}
 
       {/* ---- Translation Section (Phase 26/32) ---- */}
       {/* Uses free Google Translate (unofficial endpoint, no credentials). */}
@@ -2086,8 +2043,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   label: o.label,
                 }))}
                 selectedOption={
-                  TRANSLATION_TARGET_OPTIONS.find((o) => o.data === settings.translation_target_language)?.data
-                  ?? TRANSLATION_TARGET_OPTIONS[0].data
+                  TRANSLATION_TARGET_OPTIONS.find((o) => o.data === settings.translation_target_language)?.data ??
+                  TRANSLATION_TARGET_OPTIONS[0].data
                 }
                 onChange={async (option) => {
                   await saveSetting("translation_target_language", option.data);
@@ -2177,7 +2134,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                       saveSetting("ignored_words_always", value);
                       if (settings) setSettings({ ...settings, ignored_words_always: value });
                     }}
-                  />
+                  />,
                 );
               }}
             >
@@ -2213,7 +2170,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                         saveSetting("ignored_words_beginning", value);
                         if (settings) setSettings({ ...settings, ignored_words_beginning: value });
                       }}
-                    />
+                    />,
                   );
                 }}
               >
@@ -2252,10 +2209,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   data: v.data,
                   label: v.label,
                 }))}
-                selectedOption={
-                  VOICE_OPTIONS.find((v) => v.data === settings.voice_id)?.data
-                  ?? VOICE_OPTIONS[0].data
-                }
+                selectedOption={VOICE_OPTIONS.find((v) => v.data === settings.voice_id)?.data ?? VOICE_OPTIONS[0].data}
                 onChange={(option) => {
                   saveSetting("voice_id", option.data);
                   if (settings) {
@@ -2276,8 +2230,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   label: r.label,
                 }))}
                 selectedOption={
-                  SPEECH_RATE_OPTIONS.find((r) => r.data === settings.speech_rate)?.data
-                  ?? SPEECH_RATE_OPTIONS[2].data
+                  SPEECH_RATE_OPTIONS.find((r) => r.data === settings.speech_rate)?.data ?? SPEECH_RATE_OPTIONS[2].data
                 }
                 onChange={(option) => {
                   saveSetting("speech_rate", option.data);
@@ -2300,9 +2253,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   localVoices
                     ? Object.entries(localVoices).map(([id, info]) => ({
                         data: id,
-                        label: info.downloaded
-                          ? info.label
-                          : `${info.label} [~63 MB]`,
+                        label: info.downloaded ? info.label : `${info.label} [~63 MB]`,
                       }))
                     : [{ data: settings.local_voice_id, label: "Loading..." }]
                 }
@@ -2317,73 +2268,77 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             </PanelSectionRow>
 
             {/* Voice download/delete buttons and status */}
-            {localVoices && (() => {
-              const selectedVoice = localVoices[settings.local_voice_id];
-              const isDownloaded = selectedVoice?.downloaded ?? false;
-              return (
-                <>
-                  {/* Voice status message */}
-                  {voiceMessage && (
-                    <PanelSectionRow>
-                      <div style={{
-                        color: voiceIsSuccess ? "#2ecc71" : "#e74c3c",
-                        padding: "4px 0",
-                        fontSize: "13px"
-                      }}>
-                        {voiceMessage}
-                      </div>
-                    </PanelSectionRow>
-                  )}
+            {localVoices &&
+              (() => {
+                const selectedVoice = localVoices[settings.local_voice_id];
+                const isDownloaded = selectedVoice?.downloaded ?? false;
+                return (
+                  <>
+                    {/* Voice status message */}
+                    {voiceMessage && (
+                      <PanelSectionRow>
+                        <div
+                          style={{
+                            color: voiceIsSuccess ? "#2ecc71" : "#e74c3c",
+                            padding: "4px 0",
+                            fontSize: "13px",
+                          }}
+                        >
+                          {voiceMessage}
+                        </div>
+                      </PanelSectionRow>
+                    )}
 
-                  {isDownloaded ? (
-                    <>
-                      {/* Show downloaded indicator + file size */}
-                      <PanelSectionRow>
-                        <div style={{
-                          color: "#2ecc71",
-                          fontSize: "12px",
-                          padding: "4px 0"
-                        }}>
-                          Downloaded ({formatSize(selectedVoice.file_size)})
-                        </div>
-                      </PanelSectionRow>
-                      {/* Delete button */}
-                      <PanelSectionRow>
-                        <ButtonItem
-                          layout="below"
-                          onClick={() => handleDeleteVoice(settings.local_voice_id)}
-                        >
-                          Delete Voice
-                        </ButtonItem>
-                      </PanelSectionRow>
-                    </>
-                  ) : (
-                    <>
-                      {/* Not downloaded hint */}
-                      <PanelSectionRow>
-                        <div style={{
-                          color: "#b8bcbf",
-                          fontSize: "12px",
-                          padding: "4px 0"
-                        }}>
-                          Voice will auto-download on first use
-                        </div>
-                      </PanelSectionRow>
-                      {/* Download button */}
-                      <PanelSectionRow>
-                        <ButtonItem
-                          layout="below"
-                          onClick={() => handleDownloadVoice(settings.local_voice_id)}
-                          disabled={isVoiceDownloading}
-                        >
-                          {isVoiceDownloading ? "Downloading..." : "Download Voice"}
-                        </ButtonItem>
-                      </PanelSectionRow>
-                    </>
-                  )}
-                </>
-              );
-            })()}
+                    {isDownloaded ? (
+                      <>
+                        {/* Show downloaded indicator + file size */}
+                        <PanelSectionRow>
+                          <div
+                            style={{
+                              color: "#2ecc71",
+                              fontSize: "12px",
+                              padding: "4px 0",
+                            }}
+                          >
+                            Downloaded ({formatSize(selectedVoice.file_size)})
+                          </div>
+                        </PanelSectionRow>
+                        {/* Delete button */}
+                        <PanelSectionRow>
+                          <ButtonItem layout="below" onClick={() => handleDeleteVoice(settings.local_voice_id)}>
+                            Delete Voice
+                          </ButtonItem>
+                        </PanelSectionRow>
+                      </>
+                    ) : (
+                      <>
+                        {/* Not downloaded hint */}
+                        <PanelSectionRow>
+                          <div
+                            style={{
+                              color: "#b8bcbf",
+                              fontSize: "12px",
+                              padding: "4px 0",
+                            }}
+                          >
+                            Voice will auto-download on first use
+                          </div>
+                        </PanelSectionRow>
+                        {/* Download button */}
+                        <PanelSectionRow>
+                          <ButtonItem
+                            layout="below"
+                            onClick={() => handleDownloadVoice(settings.local_voice_id)}
+                            disabled={isVoiceDownloading}
+                          >
+                            {isVoiceDownloading ? "Downloading..." : "Download Voice"}
+                          </ButtonItem>
+                        </PanelSectionRow>
+                      </>
+                    )}
+                  </>
+                );
+              })()}
 
             {/* Local Speech rate dropdown */}
             <PanelSectionRow>
@@ -2396,8 +2351,8 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
                   label: r.label,
                 }))}
                 selectedOption={
-                  LOCAL_SPEECH_RATE_OPTIONS.find((r) => r.data === settings.local_speech_rate)?.data
-                  ?? LOCAL_SPEECH_RATE_OPTIONS[2].data
+                  LOCAL_SPEECH_RATE_OPTIONS.find((r) => r.data === settings.local_speech_rate)?.data ??
+                  LOCAL_SPEECH_RATE_OPTIONS[2].data
                 }
                 onChange={(option) => {
                   saveSetting("local_speech_rate", option.data);
@@ -2428,7 +2383,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             onChange={handleVolumeChange}
           />
         </PanelSectionRow>
-
       </PanelSection>
 
       {/* ---- Debug Section ---- */}
@@ -2453,11 +2407,13 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
         {settings.debug && monitorStatus && settings.trigger_button !== "disabled" && (
           <PanelSectionRow>
             <Field label="Button Monitor">
-              <div style={{
-                color: monitorStatus.initialized ? "#2ecc71" : "#e74c3c",
-                fontWeight: "bold",
-                fontSize: "13px",
-              }}>
+              <div
+                style={{
+                  color: monitorStatus.initialized ? "#2ecc71" : "#e74c3c",
+                  fontWeight: "bold",
+                  fontSize: "13px",
+                }}
+              >
                 {monitorStatus.initialized ? "Connected" : "Not connected"}
               </div>
             </Field>
@@ -2466,11 +2422,13 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
         {settings.debug && touchscreenStatus && needsTouch && (
           <PanelSectionRow>
             <Field label="Touchscreen">
-              <div style={{
-                color: touchscreenStatus.initialized ? "#2ecc71" : "#e74c3c",
-                fontWeight: "bold",
-                fontSize: "13px",
-              }}>
+              <div
+                style={{
+                  color: touchscreenStatus.initialized ? "#2ecc71" : "#e74c3c",
+                  fontWeight: "bold",
+                  fontSize: "13px",
+                }}
+              >
                 {touchscreenStatus.initialized ? "Connected" : "Not connected"}
               </div>
             </Field>
@@ -2481,14 +2439,20 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
         {settings.debug && lastPipelineResult && lastPipelineResult.seq > 0 && (
           <PanelSectionRow>
             <Field label="Last Pipeline">
-              <div style={{
-                color: lastPipelineResult.status === "success" ? "#2ecc71"
-                     : lastPipelineResult.status === "no_text" ? "#f39c12"
-                     : lastPipelineResult.status === "error" ? "#e74c3c"
-                     : "#999999",
-                fontWeight: "bold",
-                fontSize: "13px",
-              }}>
+              <div
+                style={{
+                  color:
+                    lastPipelineResult.status === "success"
+                      ? "#2ecc71"
+                      : lastPipelineResult.status === "no_text"
+                        ? "#f39c12"
+                        : lastPipelineResult.status === "error"
+                          ? "#e74c3c"
+                          : "#999999",
+                  fontWeight: "bold",
+                  fontSize: "13px",
+                }}
+              >
                 {lastPipelineResult.message}
               </div>
             </Field>
@@ -2509,7 +2473,6 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
     </>
   );
 }
-
 
 // =============================================================================
 // Plugin registration
@@ -2546,13 +2509,12 @@ export default definePlugin(() => {
   let keyboardUnregister: { Unregister: () => void } | null = null;
   if (VIRTUAL_KEYBOARD_MANAGER) {
     try {
-      keyboardUnregister = VIRTUAL_KEYBOARD_MANAGER
-        .m_bIsInlineVirtualKeyboardOpen
-        .m_callbacks
-        .Register((isOpen: boolean) => {
+      keyboardUnregister = VIRTUAL_KEYBOARD_MANAGER.m_bIsInlineVirtualKeyboardOpen.m_callbacks.Register(
+        (isOpen: boolean) => {
           console.log(`Decky Cloud Reader: keyboard visible = ${isOpen}`);
           setKeyboardVisible(isOpen);
-        });
+        },
+      );
       console.log("Decky Cloud Reader: VirtualKeyboardManager callback registered");
     } catch (e) {
       console.error("Decky Cloud Reader: failed to register keyboard callback", e);
@@ -2566,9 +2528,7 @@ export default definePlugin(() => {
     name: "Cloud Reader",
 
     // The styled title at the top of the plugin's sidebar panel
-    titleView: (
-      <div className={staticClasses.Title}>Cloud Reader</div>
-    ),
+    titleView: <div className={staticClasses.Title}>Cloud Reader</div>,
 
     // The main content of the plugin panel, with overlay state for the toggle
     content: <Content overlayState={overlayState} />,
