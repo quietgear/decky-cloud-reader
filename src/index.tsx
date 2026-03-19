@@ -259,7 +259,6 @@ interface PluginSettings {
   ignored_words_count: number;
   // Translation (Phase 26/32)
   translation_enabled: boolean;           // Enable translation between OCR and TTS
-  translation_provider: string;           // "free" (no credentials) or "gcp" (Cloud Translation v3)
   translation_target_language: string;    // ISO 639-1 target language code (e.g., "en")
   // Computed fields
   is_configured: boolean;       // Whether current providers are ready
@@ -964,12 +963,6 @@ const LOCAL_SPEECH_RATE_OPTIONS = [
   { data: "x-fast", label: "Very Fast" },
 ];
 
-// Phase 32: Translation provider options for the dropdown.
-const TRANSLATION_PROVIDER_OPTIONS = [
-  { data: "free", label: "Free Google Translate" },
-  { data: "gcp",  label: "GCP Cloud Translation" },
-];
-
 // Phase 26: Translation target language options for the dropdown.
 // ISO 639-1 codes accepted by both free and GCP translation providers.
 const TRANSLATION_TARGET_OPTIONS = [
@@ -1539,10 +1532,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
   }
 
   // Check if any provider uses GCP (controls GCP Credentials section visibility).
-  // Phase 32: also true when GCP translation provider is selected.
-  const needsGcp = settings.ocr_provider === "gcp"
-    || settings.tts_provider === "gcp"
-    || (settings.translation_enabled && settings.translation_provider === "gcp");
+  const needsGcp = settings.ocr_provider === "gcp" || settings.tts_provider === "gcp";
 
   // --- Normal mode (settings view) ---
   return (
@@ -2069,9 +2059,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       </PanelSection>}
 
       {/* ---- Translation Section (Phase 26/32) ---- */}
-      {/* Always visible — free provider needs no GCP credentials.
-          Translates OCR text before TTS using either the unofficial Google
-          Translate endpoint (free, no credentials) or GCP Cloud Translation. */}
+      {/* Uses free Google Translate (unofficial endpoint, no credentials). */}
       <PanelSection title="Translation">
         <PanelSectionRow>
           <ToggleField
@@ -2080,47 +2068,13 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
             checked={settings.translation_enabled ?? false}
             onChange={async (checked) => {
               await saveSetting("translation_enabled", checked);
-              // Refresh all settings so needsGcp recalculates
-              const updated = await getSettings();
-              setSettings(updated);
+              setSettings({ ...settings, translation_enabled: checked });
             }}
           />
         </PanelSectionRow>
 
         {settings.translation_enabled && (
           <>
-            {/* Phase 32: Translation provider dropdown */}
-            <PanelSectionRow>
-              <DropdownItem
-                label="Translation Engine"
-                description="Free works without credentials"
-                menuLabel="Select Translation Engine"
-                rgOptions={TRANSLATION_PROVIDER_OPTIONS.map((o) => ({
-                  data: o.data,
-                  label: o.label,
-                }))}
-                selectedOption={
-                  TRANSLATION_PROVIDER_OPTIONS.find((o) => o.data === settings.translation_provider)?.data
-                  ?? TRANSLATION_PROVIDER_OPTIONS[0].data
-                }
-                onChange={async (option) => {
-                  await saveSetting("translation_provider", option.data);
-                  // Refresh all settings so needsGcp recalculates
-                  const updated = await getSettings();
-                  setSettings(updated);
-                }}
-              />
-            </PanelSectionRow>
-
-            {/* Warning: GCP translation needs credentials */}
-            {settings.translation_provider === "gcp" && !settings.is_gcp_configured && (
-              <PanelSectionRow>
-                <div style={{ color: "#e74c3c", fontSize: "12px", padding: "4px 0" }}>
-                  GCP Translation requires credentials — configure them below
-                </div>
-              </PanelSectionRow>
-            )}
-
             {/* Target language dropdown */}
             <PanelSectionRow>
               <DropdownItem

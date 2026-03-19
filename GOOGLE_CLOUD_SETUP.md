@@ -8,11 +8,10 @@ This guide walks you through setting up Google Cloud services for Decky Cloud Re
 
 - **Cloud Vision API** — reads text from screenshots (OCR)
 - **Cloud Text-to-Speech API** — converts text to spoken audio
-- **Cloud Translation API** — translates OCR text before TTS (optional, for playing games in foreign languages)
 
 ## Cost
 
-- **Free tier**: 1,000 OCR requests/month + 1M characters TTS/month + 500K characters Translation/month (always free, no expiration)
+- **Free tier**: 1,000 OCR requests/month + 1M characters TTS/month (always free, no expiration)
 - **New accounts**: $300 free credits for 90 days
 - **Typical usage**: Completely free for personal use
 
@@ -53,12 +52,6 @@ You need to enable two APIs for this project.
 2. Make sure your project is selected at the top
 3. Click **"Enable"**
 
-### Enable Cloud Translation API (optional — only needed if you want translation)
-
-1. Go to [Cloud Translation API](https://console.cloud.google.com/apis/library/translate.googleapis.com)
-2. Make sure your project is selected at the top
-3. Click **"Enable"**
-
 ---
 
 ## Step 4: Create a Service Account
@@ -78,10 +71,8 @@ A service account is like a special user account for your application.
 6. Search for `Cloud Vision User` and select it
 7. Click **"+ Add Another Role"**
 8. Search for `Cloud Text-to-Speech User` and select it
-9. **(If using translation)** Click **"+ Add Another Role"**
-10. Search for `cloudtranslate.generalModels.predict` — this is the easiest way to find the correct role, as searching "Cloud Translation" returns many unrelated results. Select **"Cloud Translation API User"** from the results.
-11. Click **"Continue"**
-12. Click **"Done"**
+9. Click **"Continue"**
+10. Click **"Done"**
 
 ---
 
@@ -152,7 +143,6 @@ These limits reset monthly and **never expire**:
 | Cloud Vision (OCR) | 1,000 units/month |
 | Text-to-Speech (Standard voices) | 4 million characters/month |
 | Text-to-Speech (WaveNet/Neural voices) | 1 million characters/month |
-| Cloud Translation | 500,000 characters/month |
 
 For typical screen reader usage, you'll stay well within free limits.
 
@@ -164,7 +154,6 @@ For typical screen reader usage, you'll stay well within free limits.
 
 - Make sure all required APIs are enabled (Step 3)
 - Make sure your service account has all required roles (Step 4)
-- For translation errors mentioning `cloudtranslate.generalModels.predict`, add the **Cloud Translation API User** role to your service account
 
 ### "Invalid credentials"
 
@@ -188,7 +177,7 @@ For typical screen reader usage, you'll stay well within free limits.
 
 1. **Never share your JSON key file** or credentials publicly
 2. **Don't commit credentials to git** — the `.gitignore` already excludes JSON files
-3. **Use minimal permissions** — the service account only has Vision, TTS, and Translation access
+3. **Use minimal permissions** — the service account only has Vision and TTS access
 4. **Set up budget alerts** to catch unexpected usage
 5. **Rotate keys periodically** — delete old keys and create new ones in the Cloud Console
 

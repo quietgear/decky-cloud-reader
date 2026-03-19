@@ -97,7 +97,7 @@ TTS_TIMEOUT = 30  # seconds
 # 60 seconds is generous — the combined call typically takes ~3s.
 OCR_TTS_TIMEOUT = 60  # seconds
 
-# Timeout for the translation subprocess (Phase 26). Cloud Translation is
+# Timeout for the free translation subprocess (Phase 26/32). Translation is
 # a text-only API — much faster than Vision or TTS. 15 seconds with retries.
 TRANSLATE_TIMEOUT = 15  # seconds
 
@@ -206,9 +206,9 @@ OCR_LANGUAGES = {
 
 DEFAULT_OCR_LANGUAGE = "english"
 
-# Phase 26: OCR language → Cloud Translation source language mapping.
-# Maps our language IDs to ISO 639-1 codes for the Translation API.
-# None = let Cloud Translation auto-detect (for groups covering multiple languages).
+# Phase 26: OCR language → translation source language mapping.
+# Maps our language IDs to ISO 639-1 codes for the free Google Translate API.
+# None = auto-detect (for groups covering multiple languages).
 TRANSLATION_SOURCE_LANGUAGE = {
     "english": "en",
     "chinese": None,   # zh or ja — auto-detect
@@ -340,11 +340,9 @@ DEFAULT_SETTINGS = {
     "ignored_words_count": 3,
 
     # Phase 26/32 — Translation pipeline. When enabled, OCR text is translated
-    # to the target language before text filtering and TTS. Two providers:
-    # "free" (unofficial Google Translate, no credentials) or "gcp" (Cloud
-    # Translation v3, requires service account).
+    # to the target language before text filtering and TTS via free Google
+    # Translate (unofficial translate.googleapis.com endpoint, no credentials).
     "translation_enabled": False,
-    "translation_provider": "free",
     "translation_target_language": "en",
 
     # Phase 27 — When True, replace the "N words read" pill toast with a
@@ -826,12 +824,7 @@ class Plugin:
         ocr_provider = self.settings.get("ocr_provider", DEFAULT_SETTINGS["ocr_provider"])
         tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
 
-        # Phase 32: also need GCP creds when translation_provider is "gcp"
-        needs_gcp_creds = (
-            ocr_provider == "gcp" or tts_provider == "gcp"
-            or (self.settings.get("translation_enabled", False)
-                and self.settings.get("translation_provider", "free") == "gcp")
-        )
+        needs_gcp_creds = (ocr_provider == "gcp" or tts_provider == "gcp")
         if needs_gcp_creds:
             creds_b64 = self.settings.get("gcp_credentials_base64", "")
             if not creds_b64:
@@ -2810,12 +2803,7 @@ class Plugin:
             tts_provider = self.settings.get("tts_provider", DEFAULT_SETTINGS["tts_provider"])
 
             # Check GCP credentials if any provider needs them
-            # Phase 32: also need GCP creds when translation_provider is "gcp"
-            needs_gcp_creds = (
-                ocr_provider == "gcp" or tts_provider == "gcp"
-                or (self.settings.get("translation_enabled", False)
-                    and self.settings.get("translation_provider", "free") == "gcp")
-            )
+            needs_gcp_creds = (ocr_provider == "gcp" or tts_provider == "gcp")
             if needs_gcp_creds:
                 creds_b64 = self.settings.get("gcp_credentials_base64", "")
                 if not creds_b64:
@@ -2923,8 +2911,7 @@ class Plugin:
             )
 
             # Phase 26/32: check if translation is active. When active, we must
-            # split OCR and TTS so we can translate between them. Supports two
-            # providers: "free" (no credentials) and "gcp" (Cloud Translation).
+            # split OCR and TTS so we can translate between them.
             translation_active = self.settings.get("translation_enabled", False)
 
             # Route based on whether both providers are the same AND no mid-pipeline processing
@@ -2992,8 +2979,7 @@ class Plugin:
                 char_count = ocr_result.get("char_count", len(ocr_text))
 
                 # Phase 26/32: translate OCR text before filtering/TTS if enabled.
-                # Routes to either free Google Translate (curl) or GCP Cloud
-                # Translation (gcp_worker) based on translation_provider setting.
+                # Uses free Google Translate via curl subprocess (no credentials).
                 if translation_active and ocr_text.strip():
                     if self._pipeline_cancel.is_set():
                         return {"success": False, "message": "Pipeline cancelled", "step": "cancelled", "text": ocr_text, "audio_size": 0}
@@ -3001,28 +2987,13 @@ class Plugin:
                     self._pipeline_step = "translating"
                     target_lang = self.settings.get("translation_target_language", "en")
                     source_lang = TRANSLATION_SOURCE_LANGUAGE.get(ocr_language)
-                    translation_provider = self.settings.get("translation_provider", "free")
 
                     decky.logger.info(f"{LOG} pipeline: translating {len(ocr_text):,} chars "
-                                      f"({source_lang or 'auto'} → {target_lang}) "
-                                      f"[{translation_provider}]...")
+                                      f"({source_lang or 'auto'} → {target_lang})...")
 
-                    if translation_provider == "gcp":
-                        # GCP Cloud Translation v3 via gcp_worker
-                        translate_result = self._send_command(
-                            {
-                                "action": "translate",
-                                "text": ocr_text,
-                                "target_language": target_lang,
-                                "source_language": source_lang,
-                            },
-                            provider="gcp", timeout=TRANSLATE_TIMEOUT,
-                        )
-                    else:
-                        # Free Google Translate via curl (Phase 32)
-                        translate_result = self._free_translate(
-                            ocr_text, target_lang, source_lang
-                        )
+                    translate_result = self._free_translate(
+                        ocr_text, target_lang, source_lang
+                    )
 
                     if not translate_result.get("success", False):
                         return {
@@ -3418,12 +3389,7 @@ class Plugin:
         # have everything they need to function
         ocr_provider = result.get("ocr_provider", "local")
         tts_provider = result.get("tts_provider", "local")
-        # Phase 32: also need GCP creds when translation_provider is "gcp"
-        needs_gcp = (
-            ocr_provider == "gcp" or tts_provider == "gcp"
-            or (result.get("translation_enabled", False)
-                and result.get("translation_provider", "free") == "gcp")
-        )
+        needs_gcp = (ocr_provider == "gcp" or tts_provider == "gcp")
         needs_local = ocr_provider == "local" or tts_provider == "local"
         result["is_configured"] = (
             (not needs_gcp or bool(creds_b64))

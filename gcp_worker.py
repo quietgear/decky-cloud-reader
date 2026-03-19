@@ -126,21 +126,6 @@ OCR_LANGUAGE_HINTS = {
     "greek": ["el"],
 }
 
-# Phase 26: OCR language → Cloud Translation source language mapping.
-# Maps our language IDs to ISO 639-1 codes for the Translation API.
-# None = let Cloud Translation auto-detect (for OCR groups covering multiple
-# languages, like "chinese" which could be zh or ja, or "latin" which could
-# be fr/de/es/it/pt).
-TRANSLATION_SOURCE_LANGUAGE = {
-    "english": "en",
-    "chinese": None,   # zh or ja — auto-detect
-    "korean": "ko",
-    "latin": None,     # fr/de/es/it/pt — auto-detect
-    "eslav": None,     # ru/uk/bg/be — auto-detect
-    "thai": "th",
-    "greek": "el",
-}
-
 
 # ---------------------------------------------------------------------------
 # Logging helpers — all output goes to stderr, never stdout
@@ -320,59 +305,6 @@ def init_tts_client(creds_b64, creds_json=None):
     client = texttospeech.TextToSpeechClient(credentials=credentials)
 
     log_info("TTS client initialized")
-    return client
-
-
-# ---------------------------------------------------------------------------
-# Translation client initialization (Phase 26)
-# ---------------------------------------------------------------------------
-# Uses Translation API v3 (gRPC transport), NOT v2 (REST/requests). gRPC
-# bundles its own SSL via the grpcio C extension, so it's immune to the
-# LD_LIBRARY_PATH contamination from Decky Loader's PyInstaller environment.
-# v2 would fail with "SSL module is not available" because urllib3 relies on
-# Python's built-in ssl module which loads the incompatible bundled libssl.so.3.
-#
-# Lazy-initialized — NOT called at worker startup because most users won't
-# use translation. Cached in module-level variables after first use.
-
-_translate_client = None
-_translate_parent = None  # "projects/{project_id}" — required by v3 API
-
-def init_translate_client(creds_b64, creds_json=None):
-    """
-    Create a Google Cloud Translation v3 client from GCP service account credentials.
-
-    Uses the same two-mode pattern as Vision/TTS client init:
-      1. Pass creds_b64 — decodes internally
-      2. Pass creds_json — skips decoding (reuses pre-decoded creds)
-
-    Also extracts project_id from credentials to build the `parent` path
-    required by the v3 API.
-
-    Args:
-        creds_b64: Base64-encoded GCP service account JSON.
-        creds_json: Optional pre-decoded credentials dict.
-
-    Returns:
-        Tuple of (TranslationServiceClient, parent_string).
-    """
-    global _translate_parent
-
-    if creds_json is None:
-        creds_json = _decode_credentials(creds_b64)
-
-    credentials = _make_oauth_credentials(creds_json)
-
-    # Extract project_id for the v3 parent path
-    project_id = creds_json.get("project_id", "")
-    if not project_id:
-        raise ValueError("Service account JSON missing 'project_id' field")
-    _translate_parent = f"projects/{project_id}"
-
-    from google.cloud import translate_v3
-    client = translate_v3.TranslationServiceClient(credentials=credentials)
-
-    log_info(f"Translation v3 client initialized (project={project_id})")
     return client
 
 
@@ -800,116 +732,6 @@ def do_tts(text, output_path, voice_id, speech_rate, creds_b64, tts_client=None)
 
 
 # ---------------------------------------------------------------------------
-# Translation action (Phase 26) — translate text via Cloud Translation v3
-# ---------------------------------------------------------------------------
-
-def do_translate(text, target_language, source_language, creds_b64):
-    """
-    Translate text using Google Cloud Translation v3 API (gRPC transport).
-
-    Uses a module-level cached client (lazy-initialized on first call) to
-    avoid re-creating the client on every translation request. v3 uses gRPC
-    (same as Vision/TTS), so it's immune to PyInstaller SSL contamination.
-
-    Args:
-        text: The text to translate.
-        target_language: ISO 639-1 target language code (e.g., "en", "de").
-        source_language: ISO 639-1 source language code, or None/empty for
-                        auto-detection (recommended for multi-language OCR groups).
-        creds_b64: Base64-encoded GCP service account JSON.
-
-    Returns:
-        Never returns — raises WorkerResult or WorkerError via output_result/output_error.
-    """
-    import html
-
-    # Validate inputs
-    if not text or not text.strip():
-        output_error("No text provided for translation")
-
-    if not target_language:
-        output_error("No target language specified for translation")
-
-    log_info(f"Translate: {len(text):,} chars, target={target_language}, "
-             f"source={source_language or 'auto-detect'}")
-
-    # Lazy-init or reuse cached Translation client
-    global _translate_client
-    if _translate_client is None:
-        try:
-            _translate_client = init_translate_client(creds_b64)
-        except Exception as e:
-            log_error(f"Failed to init Translation client: {e}")
-            output_error(f"Failed to initialize Translation credentials: {e}")
-
-    # Call the Translation v3 API with retry logic (same pattern as OCR/TTS)
-    from google.api_core import exceptions as google_exceptions
-
-    last_error = None
-    response = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            # v3 API: translate_text() with parent project path.
-            # source_language_code="" means auto-detect.
-            # mime_type="text/plain" ensures plain text handling.
-            response = _translate_client.translate_text(
-                contents=[text],
-                target_language_code=target_language,
-                source_language_code=source_language or "",
-                parent=_translate_parent,
-                mime_type="text/plain",
-            )
-            break
-        except (
-            google_exceptions.ServiceUnavailable,
-            google_exceptions.ResourceExhausted,
-            google_exceptions.DeadlineExceeded,
-            ConnectionError,
-            ConnectionResetError,
-        ) as e:
-            last_error = e
-            if attempt < MAX_RETRIES - 1:
-                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
-                log_info(
-                    f"Translation transient error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
-                    f"Retrying in {delay}s..."
-                )
-                time.sleep(delay)
-            else:
-                log_error(f"Translation failed after {MAX_RETRIES} attempts: {e}")
-                output_error(f"Translation API failed after {MAX_RETRIES} retries: {e}")
-        except Exception as e:
-            log_error(f"Translation API error: {e}")
-            log_error(traceback.format_exc())
-            # Reset cached client on unexpected errors (may be stale)
-            _translate_client = None
-            output_error(f"Translation API error: {e}")
-    else:
-        output_error(f"Translation API failed after {MAX_RETRIES} retries: {last_error}")
-
-    # v3 returns a list of Translation objects (one per input content string).
-    # We sent one string, so we get one translation back.
-    translation = response.translations[0]
-
-    # v3 may still return HTML entities in some edge cases — unescape them.
-    translated_text = html.unescape(translation.translated_text)
-    detected_source = translation.detected_language_code or source_language or "unknown"
-
-    log_info(f"Translated: {len(translated_text):,} chars, "
-             f"source={detected_source}, target={target_language}")
-    log_debug(f"Translation preview: {translated_text[:200]}...")
-
-    output_result({
-        "success": True,
-        "text": translated_text,
-        "source_language": detected_source,
-        "target_language": target_language,
-        "char_count": len(translated_text),
-        "message": f"Translation complete: {len(translated_text):,} chars ({detected_source} → {target_language})",
-    })
-
-
-# ---------------------------------------------------------------------------
 # Combined OCR+TTS action — single subprocess for the pipeline
 # ---------------------------------------------------------------------------
 
@@ -1268,10 +1090,6 @@ def serve():
                            vision_client=vision_client, tts_client=tts_client,
                            crop_region=cmd.get("crop_region"),
                            ocr_language=cmd.get("ocr_language"))
-
-            elif action == "translate":
-                do_translate(cmd.get("text", ""), cmd.get("target_language", ""),
-                             cmd.get("source_language"), creds_b64)
 
             else:
                 print(json.dumps({"success": False, "message": f"Unknown action: {action}"}), flush=True)

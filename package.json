@@ -1,6 +1,6 @@
 {
   "name": "decky-cloud-reader",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "OCR and Text-to-Speech for text-heavy games using Google Cloud services",
   "type": "module",
   "scripts": {
