@@ -2465,7 +2465,9 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       </div>
       {/* Invisible spacer so gamepad D-pad navigation can reach the bottom */}
       <PanelSectionRow>
-        <Focusable style={{ height: "1px", opacity: 0 }} onActivate={() => {}}>{null}</Focusable>
+        <Focusable style={{ height: "1px", opacity: 0 }} onActivate={() => {}}>
+          {null}
+        </Focusable>
       </PanelSectionRow>
     </>
   );
