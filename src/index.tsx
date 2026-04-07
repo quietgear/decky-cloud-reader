@@ -300,9 +300,6 @@ const deleteOcrLanguage = callable<[string], OcrLanguageActionResult>("delete_oc
 // Phase 9: Touchscreen monitor status
 const getTouchscreenStatus = callable<[], TouchscreenStatus>("get_touchscreen_status");
 
-// Phase 11: Interface sound effects — fire-and-forget UI feedback sounds
-const playInterfaceSound = callable<[string], { success: boolean; error?: string }>("play_interface_sound");
-
 // Phase 12: Copy last_selection coordinates to fixed_region coordinates
 const applyLastSelectionToFixedRegion = callable<[], { success: boolean; message: string }>(
   "apply_last_selection_to_fixed_region",
@@ -2468,7 +2465,7 @@ function Content({ overlayState }: { overlayState: OverlayState }) {
       </div>
       {/* Invisible spacer so gamepad D-pad navigation can reach the bottom */}
       <PanelSectionRow>
-        <Focusable style={{ height: "1px", opacity: 0 }} onActivate={() => {}} />
+        <Focusable style={{ height: "1px", opacity: 0 }} onActivate={() => {}}>{null}</Focusable>
       </PanelSectionRow>
     </>
   );
