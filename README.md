@@ -154,11 +154,13 @@ The output zip will be at `dist/decky-cloud-reader.zip`.
 
 ### Releasing a New Version
 
-1. Update the version in `package.json`
-2. Commit: `git commit -am "Bump version to X.Y.Z"`
-3. Tag: `git tag vX.Y.Z`
-4. Push: `git push origin main --tags`
-5. GitHub Actions will automatically build the plugin and create a release on the [Releases page](../../releases)
+1. Create a branch: `git checkout -b release/X.Y.Z`
+2. Update the version in `package.json`
+3. Commit and push: `git commit -am "Bump version to X.Y.Z" && git push -u origin release/X.Y.Z`
+4. Open a pull request to `main` — CI must pass
+5. Squash-merge the PR
+6. Tag the merge commit: `git checkout main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`
+7. GitHub Actions will automatically build the plugin and create a release on the [Releases page](../../releases)
 
 ## Architecture
 
