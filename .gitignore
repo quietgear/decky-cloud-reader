@@ -69,9 +69,6 @@ yalc.lock
 # Decky loader injected module
 decky_plugin.py
 
-# Deploy artifacts
-deploy/
-
 # Docker
 docker-compose.override.yml
 
