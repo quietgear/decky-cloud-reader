@@ -2,12 +2,11 @@
 # Decky Cloud Reader — GitHub Actions Release Workflow
 # =============================================================================
 #
-# Builds the plugin inside an x86_64 Docker container and publishes the
-# resulting zip file as a GitHub Release asset.
+# Automatically builds and publishes a GitHub Release when a version bump is
+# merged to main. The version is read from package.json — if a git tag for
+# that version already exists, the workflow exits early (no duplicate release).
 #
-# Trigger: push a version tag, e.g.:
-#   git tag v1.0.0
-#   git push origin v1.0.0
+# Trigger: push to main (typically a PR merge)
 #
 # The Docker build cross-compiles everything for the Steam Deck (x86_64 Linux):
 #   - Frontend (TypeScript → bundled JS via Rollup)
@@ -22,14 +21,49 @@ name: Build and Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Check if this merge includes a version bump worth releasing
+  # ---------------------------------------------------------------------------
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      tag_exists: ${{ steps.check_tag.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history to check existing tags
+
+      - name: Read version from package.json
+        id: get_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: v${VERSION}"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          if git rev-parse "${{ steps.get_version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.get_version.outputs.version }} already exists — skipping release"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.get_version.outputs.version }} is new — will release"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build and release (only if version tag is new)
+  # ---------------------------------------------------------------------------
   build-and-release:
+    needs: check-version
+    if: needs.check-version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Required for creating GitHub Releases
+      contents: write  # Required for creating tags and GitHub Releases
 
     steps:
       - name: Checkout code
@@ -110,10 +144,20 @@ jobs:
           echo "Build artifact:"
           ls -lh dist/decky-cloud-reader.zip
 
+      # -----------------------------------------------------------------
+      # Create tag and GitHub Release
+      # -----------------------------------------------------------------
+
+      - name: Create git tag
+        run: |
+          git tag ${{ needs.check-version.outputs.version }}
+          git push origin ${{ needs.check-version.outputs.version }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Decky Cloud Reader ${{ github.ref_name }}"
+          tag_name: ${{ needs.check-version.outputs.version }}
+          name: "Decky Cloud Reader ${{ needs.check-version.outputs.version }}"
           body: |
             ## Installation
 
