@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import string
 import subprocess
 
@@ -773,6 +774,28 @@ class Plugin:
         """Check if audio is currently playing."""
         return self._playback_process is not None and self._playback_process.poll() is None
 
+    @staticmethod
+    def _is_game_mode():
+        """
+        Check if we're running in Game Mode (Gamescope compositor active).
+
+        Gamescope creates a Wayland socket at /run/user/{uid}/gamescope-0 when
+        it runs as the session compositor (Game Mode). In Desktop Mode (KDE
+        Plasma — X11 or Wayland), this socket does not exist. We check both
+        existence and socket type to avoid false positives from stale files.
+
+        Returns False in Desktop Mode so triggers (button/touch) are suppressed
+        — screen capture requires Gamescope, and firing sounds is confusing.
+        """
+        # Hardcode UID 1000 (the 'deck' user on SteamOS). The plugin runs as
+        # root (UID 0) due to plugin.json flags, but Gamescope's Wayland socket
+        # is created under the deck user's XDG_RUNTIME_DIR.
+        socket_path = "/run/user/1000/gamescope-0"
+        try:
+            return os.path.exists(socket_path) and stat.S_ISSOCK(os.stat(socket_path).st_mode)
+        except OSError:
+            return False
+
     async def _handle_button_trigger(self):
         """
         Runs on the event loop — guards and triggers the Read Screen pipeline.
@@ -790,6 +813,12 @@ class Plugin:
         # Guard: plugin must be enabled
         if not self._is_enabled:
             decky.logger.debug(f"{LOG} button trigger: plugin disabled, ignoring")
+            return
+
+        # Guard: only trigger in Game Mode (Gamescope active). In Desktop Mode
+        # there's no Gamescope compositor, so screen capture won't work.
+        if not self._is_game_mode():
+            decky.logger.debug(f"{LOG} button trigger: not in Game Mode, ignoring")
             return
 
         # Guard: trigger cooldown — ignore if too soon after last start/stop
@@ -846,6 +875,8 @@ class Plugin:
         """From monitor thread: finger made contact at (x, y)."""
         if not self._is_enabled:
             return
+        if not self._is_game_mode():
+            return
         # Suppress touch gestures while keyboard, modal, or QAM is open
         if self._keyboard_visible or self._modal_visible or self._qam_visible:
             return
@@ -854,6 +885,8 @@ class Plugin:
     def _on_touch_up(self, end_x, end_y, start_x, start_y, duration):
         """From monitor thread: finger lifted. Provides start/end coords + duration."""
         if not self._is_enabled:
+            return
+        if not self._is_game_mode():
             return
         # Suppress touch gestures while keyboard, modal, or QAM is open
         if self._keyboard_visible or self._modal_visible or self._qam_visible:
@@ -866,6 +899,8 @@ class Plugin:
     def _on_touch_tap(self, x, y):
         """From monitor thread: short tap detected (legacy, < 0.5s)."""
         if not self._is_enabled:
+            return
+        if not self._is_game_mode():
             return
         # Suppress touch gestures while keyboard, modal, or QAM is open
         if self._keyboard_visible or self._modal_visible or self._qam_visible:
