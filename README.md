@@ -118,6 +118,18 @@ All settings are accessible from the plugin panel in Decky's Quick Access Menu.
 | **Hide Toast** | Off | Hide on-screen pipeline status toast |
 | **Show Text Overlay** | Off | Show spoken text + region border instead of word count |
 
+### Data Locations
+
+Plugin data is stored under `~/homebrew/settings/decky-cloud-reader/` on the Steam Deck:
+
+| Path | Contents |
+|------|----------|
+| `settings.json` | Plugin configuration |
+| `voices/` | Downloaded Piper TTS voice models (~63 MB each) |
+| `ocr_models/` | Downloaded OCR recognition models (8–85 MB each) |
+
+These persist across plugin updates. Uninstalling the plugin does not remove this directory.
+
 ## Google Cloud Setup
 
 GCP mode is **optional** — local mode works without any cloud setup.
